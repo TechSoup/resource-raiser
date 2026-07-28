@@ -1,0 +1,2192 @@
+{
+ "n": 308,
+ "by_shape": {
+  "ratio": 17,
+  "point": 155,
+  "comparison": 26,
+  "correlation": 11,
+  "filtered-subset": 13,
+  "entity-list": 21,
+  "topical": 10,
+  "status": 18,
+  "timeseries": 6,
+  "ranking": 25,
+  "aggregate": 6
+ },
+ "by_expect": {
+  "answer": 271,
+  "either": 28,
+  "refuse": 9
+ },
+ "cases": [
+  {
+   "q": "How does Harvard University's NIH funding compare to its NSF funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "How much capital expenditures did JPMorgan Chase report?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Does Caltech or the University of Michigan get more NIH funding?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "How big is NVIDIA?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'how big' -> revenue / assets / employees / net income"
+  },
+  {
+   "q": "median gross rent in Milwaukee",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Which has a higher diabetes rate, Miami or Seattle?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "How does Johns Hopkins University's NIH funding compare to its NSF funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Compare NSF research awards for the University of Michigan and Yale University",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Across Texas counties, is median household income correlated with obesity rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "Which cities have a binge drinking rate above 25%?",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "How much NIH research funding does Columbia University receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in food security?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "What's the unemployment rate for Los Angeles?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Is the Red Cross a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "why": "informal name must resolve",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What were Amazon's earnings?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'earnings' -> net income / operating income / EBITDA / gross profit"
+  },
+  {
+   "q": "Tesla total assets, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Which universities get more than a billion dollars a year from NIH?",
+   "shape": "filtered-subset",
+   "expect": "refuse"
+  },
+  {
+   "q": "What sector does the Wikimedia Foundation work in?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "Intel's gross profit",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What's the median gross rent for Portland?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Compare the poverty rate in Chicago and Los Angeles",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Is Feeding America a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "When did the Sierra Club become tax-exempt?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "NSF research awards for Harvard University",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "Across New York counties, is median household income correlated with obesity rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "Feeding America total expenses, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "How does the Wikimedia Foundation's revenue compare to the federal funding it receives?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Tell me Tesla's latest capital expenditures.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What was JPMorgan Chase's stockholders equity?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Apple total revenue, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "How does the American Red Cross's revenue compare to the federal funding it receives?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Costco's cost of revenue",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Apple total revenue from 2019 to 2023",
+   "shape": "timeseries",
+   "expect": "either",
+   "why": "fan-out over periods; correctness matters more than latency"
+  },
+  {
+   "q": "Which county has the highest rate of received food stamps in the past 12 months among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "Where is the American Red Cross headquartered?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf",
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "What's the Coronary heart disease among adults for Boston?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Where is Feeding America headquartered?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf",
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "How does Feeding America's revenue compare to the federal funding it receives?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Which organization receives the most federal funding?",
+   "shape": "ranking",
+   "expect": "answer"
+  },
+  {
+   "q": "Which has more total assets, the American Red Cross or the Nature Conservancy?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "What is the median household income in Michigan?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of current cigarette smoking among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "What is the largest nonprofit in the US?",
+   "shape": "ranking",
+   "expect": "either",
+   "why": "answerable via the BigQuery population sources when enabled"
+  },
+  {
+   "q": "Amazon total revenue from 2019 to 2023",
+   "shape": "timeseries",
+   "expect": "either",
+   "why": "fan-out over periods; correctness matters more than latency"
+  },
+  {
+   "q": "NSF research awards for the University of Michigan",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "Compare the poverty rate in Houston and Seattle",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Look up the total revenue for the American Red Cross.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Milwaukee Cancer (non-skin) or melanoma among adults",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Which counties have an obesity rate over 45%?",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "Mexican peso to dollar exchange rate",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "Compare the poverty rate in Boston and Phoenix",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "What was AMD's total revenue in 2023?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in climate?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "Tell me Detroit's percentage of people who walk to work.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What was Intel's net income in 2023?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What was the Nature Conservancy's total contributions and grants?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "NVIDIA total revenue from 2019 to 2023",
+   "shape": "timeseries",
+   "expect": "either",
+   "why": "fan-out over periods; correctness matters more than latency"
+  },
+  {
+   "q": "How many 501(c)(3) organizations are there in the US?",
+   "shape": "aggregate",
+   "expect": "either",
+   "why": "irs-990-bq counts the filer population when GOOGLE_CLOUD_PROJECT is set"
+  },
+  {
+   "q": "What grants can a nonprofit apply for in disaster relief?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "poverty rate in Phoenix",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Look up the Binge drinking among adults in Boston.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Which nonprofits have revenue over $1 billion?",
+   "shape": "filtered-subset",
+   "expect": "either",
+   "why": "served by irs-990-bq when GOOGLE_CLOUD_PROJECT is set"
+  },
+  {
+   "q": "the Nature Conservancy's total expenses",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Look up the cost of revenue for Coca-Cola.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Are donations to the Wikimedia Foundation tax-deductible?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "What were Apple's earnings?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'earnings' -> net income / operating income / EBITDA / gross profit"
+  },
+  {
+   "q": "How big is Tesla?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'how big' -> revenue / assets / employees / net income"
+  },
+  {
+   "q": "What is the Current cigarette smoking among adults in Seattle?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Walmart net income, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What were NVIDIA's earnings?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'earnings' -> net income / operating income / EBITDA / gross profit"
+  },
+  {
+   "q": "Across California counties, is median household income correlated with obesity rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "How high is the Colorectal cancer screening among adults aged 45\u201375 years in Milwaukee?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Are donations to the Sierra Club tax-deductible?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "Does Harvard University or Johns Hopkins University get more NIH funding?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "How much NIH research funding does Stanford receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "What does Feeding America do?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "What was Pfizer's operating income?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "How much NIH research funding does Harvard University receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "Which university has the largest endowment?",
+   "shape": "ranking",
+   "expect": "refuse",
+   "why": "no source can see this population/measure"
+  },
+  {
+   "q": "Canadian dollar to dollar exchange rate",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "How does MIT's NIH funding compare to its NSF funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "What was St. Jude's officer compensation?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Is the ACLU Foundation a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Japanese yen to dollar exchange rate",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "the Sierra Club total expenses, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What is the Treasury Reporting Rates of Exchange: Tunisia-Dinar?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "Who is the CEO of the Wikimedia Foundation?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "How much NIH research funding does the University of Michigan receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "What was Coca-Cola's total revenue in 2023?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "How much NIH research funding does MIT receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "Where is the Sierra Club headquartered?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf",
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "Are donations to the Nature Conservancy tax-deductible?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "Where is the Nature Conservancy headquartered?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf",
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "Across California counties, is poverty rate correlated with obesity rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "Compare the total revenue of the Sierra Club and the Wikimedia Foundation",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Look up the median household income in Nashville.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What is Pfizer's long-term debt?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Which had higher total revenue, NVIDIA or Intel?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "How does the Sierra Club's revenue compare to the federal funding it receives?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "What did Ford report for total revenue?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Is the American Red Cross a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in housing?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "What is the total revenue of all US nonprofits?",
+   "shape": "aggregate",
+   "expect": "either"
+  },
+  {
+   "q": "Which county has the highest rate of any disability among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "Where is the Wikimedia Foundation headquartered?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf",
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "What was AMD's total assets?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What sector does Feeding America work in?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in mental health?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "homeownership rate in Los Angeles",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What's the Hearing disability among adults like in Cleveland?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "What is the percentage foreign-born in Portland?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What is the Nature Conservancy's IRS ruling date?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "Which city has the lowest obesity rate?",
+   "shape": "ranking",
+   "expect": "answer"
+  },
+  {
+   "q": "Does Stanford or MIT get more NIH funding?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Starbucks inventory, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Is the Sierra Club a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Tell me about Microsoft's performance",
+   "shape": "point",
+   "expect": "either"
+  },
+  {
+   "q": "Which city has the highest diabetes rate?",
+   "shape": "ranking",
+   "expect": "answer"
+  },
+  {
+   "q": "What share of the Nature Conservancy's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Look up the net assets for the American Red Cross.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Current asthma among adults in Portland",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of lack of social and emotional support among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "What is the current US national debt?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "What share of Feeding America's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Which has more total assets, the Sierra Club or St. Jude?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "How much NIH research funding does Duke University receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in youth programs?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "Which nonprofit has the highest revenue?",
+   "shape": "ranking",
+   "expect": "either",
+   "why": "answerable via the BigQuery population sources when enabled"
+  },
+  {
+   "q": "Look up the No leisure-time physical activity among adults in Baltimore.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "How high is the Diagnosed diabetes among adults in Denver?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Which has more total assets, the ACLU Foundation or the Salvation Army?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "List all nonprofits in Chicago",
+   "shape": "filtered-subset",
+   "expect": "refuse",
+   "why": "ProPublica declares population.enumerable: false"
+  },
+  {
+   "q": "Give me Amazon's research and development expense.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Which has a higher diabetes rate, Chicago or Houston?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Which company gets the most funding from SEC?",
+   "shape": "ranking",
+   "expect": "either",
+   "why": "answerable via the BigQuery population sources when enabled"
+  },
+  {
+   "q": "Which had higher total revenue, Amazon or Walmart?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "What is the total federal funding to all nonprofits?",
+   "shape": "aggregate",
+   "expect": "refuse"
+  },
+  {
+   "q": "What share of the Sierra Club's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Is the Nature Conservancy a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Report Habitat for Humanity's program service revenue.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Compare the total revenue of the American Red Cross and Feeding America",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Look up the total assets for Netflix.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Compare NSF research awards for Duke University and Columbia University",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "San Antonio percentage with a bachelor's degree",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What is the poverty rate in Chicago?",
+   "shape": "point",
+   "expect": "answer",
+   "why": "ACS jam values must be filtered, not reported",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Look up the research and development expense for Boeing.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Tesla total revenue from 2019 to 2023",
+   "shape": "timeseries",
+   "expect": "either",
+   "why": "fan-out over periods; correctness matters more than latency"
+  },
+  {
+   "q": "NSF research awards for Yale University",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "Does Duke University or Yale University get more NIH funding?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Is Feeding America a private foundation or a public charity?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "Look up the Cholesterol screening among adults in Cleveland.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "British pound to dollar exchange rate",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "Across California counties, is median household income correlated with diabetes rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "What is the median home value in Houston?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Microsoft selling, general and administrative expense, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Are donations to Feeding America tax-deductible?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "How much federal funding has the Wikimedia Foundation received?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "usaspending"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in rural development?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "NSF research awards for the University of Washington",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "What's the median household income like in Baltimore?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "How much federal funding has Feeding America received?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "usaspending"
+   ]
+  },
+  {
+   "q": "NSF research awards for Johns Hopkins University",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "What is the Treasury Reporting Rates of Exchange: Taiwan-Dollar?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "Give me some companies with over $200 billion in revenue",
+   "shape": "filtered-subset",
+   "expect": "either"
+  },
+  {
+   "q": "What was Ford's net income in 2023?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Is the Wikimedia Foundation a private foundation or a public charity?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "How much NIH research funding does Caltech receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of no leisure-time physical activity among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "NSF research awards for Caltech",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "Which state gets the most funding from NIH?",
+   "shape": "ranking",
+   "expect": "refuse",
+   "why": "NIH is entity-list only; it cannot see its population"
+  },
+  {
+   "q": "Compare NSF research awards for MIT and Johns Hopkins University",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "What share of St. Jude's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "How much federal funding has the American Red Cross received?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "usaspending"
+   ]
+  },
+  {
+   "q": "What were Tesla's earnings?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'earnings' -> net income / operating income / EBITDA / gross profit"
+  },
+  {
+   "q": "Tell me Portland's median household size.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What share of the Wikimedia Foundation's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Who founded the Sierra Club?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "Name a few universities receiving over $500 million from NIH",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "Are donations to the American Red Cross tax-deductible?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in the arts?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "Give me Starbucks's gross profit.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Which cities have a diabetes rate above 20%?",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "Compare the total revenue of the Nature Conservancy and Habitat for Humanity",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "percentage without health insurance in Houston",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What's the Vision disability among adults like in San Antonio?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "How high is the Any disability among adults in Baltimore?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "per capita income in Baltimore",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Across Florida counties, is median household income correlated with obesity rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "How much NIH research funding does Johns Hopkins receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "why": "must page every FY project (~$969M), not just the top 10 (~$208M)",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "Atlanta median age",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What was ExxonMobil's operating income in 2023?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Compare the total revenue of Doctors Without Borders and the Salvation Army",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Netflix diluted earnings per share, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Look up the operating income for Alphabet.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What grants can a nonprofit apply for in medical research?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "What was Apple's inventory?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "How much did Apple spend on R&D in 2023?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Across California counties, is median household income correlated with binge drinking rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "How many nonprofits are headquartered in California?",
+   "shape": "aggregate",
+   "expect": "either"
+  },
+  {
+   "q": "How much total revenue did Feeding America report?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What is the Treasury Reporting Rates of Exchange: Suriname-Dollar?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "What is Disney's cash and cash equivalents?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "How high is the Depression among adults in Denver?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Which cities have a high blood pressure rate above 35%?",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "Compare the poverty rate in Detroit and Miami",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Across California counties, is unemployment rate correlated with diabetes rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "What's the Obesity among adults like in Houston?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Across California counties, is poverty rate correlated with diabetes rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "When was the Sierra Club founded?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "What sector does the Nature Conservancy work in?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "What were Microsoft's earnings?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'earnings' -> net income / operating income / EBITDA / gross profit"
+  },
+  {
+   "q": "What's the percentage foreign-born for Cleveland?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Look up the payroll taxes for the Salvation Army.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Which had higher total revenue, Apple or Microsoft?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "How big is Apple?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'how big' -> revenue / assets / employees / net income"
+  },
+  {
+   "q": "What sector does the Sierra Club work in?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "Which university gets the most funding from NIH?",
+   "shape": "ranking",
+   "expect": "refuse",
+   "why": "NIH is entity-list only; it cannot see its population"
+  },
+  {
+   "q": "What is ExxonMobil's total revenue?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What was Apple's profit?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'profit' is ambiguous"
+  },
+  {
+   "q": "How much NIH research funding does the University of Washington receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "How much total liabilities did Coca-Cola report?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "When was Feeding America founded?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "AMD's operating cash flow",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Is the Wikimedia Foundation a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Which had higher total revenue, Tesla or Ford?",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "Which cities have a current asthma rate above 12%?",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "Report Doctors Without Borders's salaries and wages.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What is the ACLU's website?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "How much operating cash flow did Boeing report?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Rank US companies by revenue",
+   "shape": "ranking",
+   "expect": "either",
+   "why": "answerable via the BigQuery population sources when enabled"
+  },
+  {
+   "q": "How much cash and cash equivalents did Ford report?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Tell me the Sierra Club's latest total assets.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Is the American Red Cross a private foundation or a public charity?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "Give me Microsoft's net income.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "When was the Nature Conservancy founded?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "What was ExxonMobil's diluted earnings per share?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "How much federal funding has the Sierra Club received?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "usaspending"
+   ]
+  },
+  {
+   "q": "Report the YMCA's professional fundraising fees.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What is the Treasury Reporting Rates of Exchange: Congo-Cfa Franc?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "When was the Wikimedia Foundation founded?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "Is Habitat for Humanity a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Houston poverty rate",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "How has the American Red Cross's revenue changed since 2019?",
+   "shape": "timeseries",
+   "expect": "either"
+  },
+  {
+   "q": "How much federal funding has the Nature Conservancy received?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "usaspending"
+   ]
+  },
+  {
+   "q": "What was Disney's total revenue in 2023?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of self-care disability among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "Look up the poverty rate in New York.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What is the Treasury Reporting Rates of Exchange: Jordan-Dinar?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "Is the Sierra Club a private foundation or a public charity?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "What was Apple's diluted earnings per share?",
+   "shape": "point",
+   "expect": "answer",
+   "why": "per-share concepts live in units.USD/shares; must not pick basic",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of chronic obstructive pulmonary disease among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "Which county has the highest rate of diagnosed diabetes among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "Which cities have a diabetes rate below 8%?",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "What is the Wikimedia Foundation's net assets?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What fraction of the Red Cross's revenue is program service revenue?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "NSF research awards for MIT",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "How many employees does the Wikimedia Foundation have?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "Phoenix Housing insecurity in the past 12 months among adults",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Is St. Jude a 501(c)(3)?",
+   "shape": "status",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of high cholesterol among adults who have ever been screened?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "What sector does the American Red Cross work in?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-bmf"
+   ]
+  },
+  {
+   "q": "How much does NIH award in total each year?",
+   "shape": "aggregate",
+   "expect": "refuse"
+  },
+  {
+   "q": "What share of the American Red Cross's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "Do richer counties in California have lower diabetes rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "How does Stanford's NIH funding compare to its NSF funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "What is the median home value in California?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "Which cities have a obesity rate above 40%?",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "What is the percentage without health insurance in Milwaukee?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "How much NIH research funding does Johns Hopkins University receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "Tell me Detroit's Stroke among adults.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "cdc-places"
+   ]
+  },
+  {
+   "q": "Give me Costco's net income.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of mobility disability among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "Look up the long-term debt for General Motors.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What was Habitat for Humanity's total revenue?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Report Disney's selling, general and administrative expense.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Give me some universities that get more than a billion dollars from NIH",
+   "shape": "filtered-subset",
+   "expect": "answer"
+  },
+  {
+   "q": "How much federal funding has Habitat for Humanity received?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "usaspending"
+   ]
+  },
+  {
+   "q": "Which county has the highest rate of vision disability among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "How big is Microsoft?",
+   "shape": "point",
+   "expect": "either",
+   "why": "'how big' -> revenue / assets / employees / net income"
+  },
+  {
+   "q": "Which county has the highest rate of hearing disability among adults?",
+   "shape": "ranking",
+   "expect": "answer",
+   "why": "CDC PLACES declares server-side ordering"
+  },
+  {
+   "q": "Look up the total liabilities for General Motors.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "What is the US national debt?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "What share of the ACLU Foundation's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "What grants can a nonprofit apply for in education?",
+   "shape": "topical",
+   "expect": "answer",
+   "dirs": [
+    "grants-gov"
+   ]
+  },
+  {
+   "q": "Give me Walmart's stockholders equity.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Give me an overview of the Nature Conservancy",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "NSF research awards for Duke University",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "Across California counties, is poverty rate correlated with current lack of health insurance rates?",
+   "shape": "correlation",
+   "expect": "answer"
+  },
+  {
+   "q": "NSF research awards for Stanford",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "Euro to dollar exchange rate",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "Compare the total revenue of the ACLU Foundation and St. Jude",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "When was the American Red Cross founded?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-profile"
+   ]
+  },
+  {
+   "q": "What was the Wikimedia Foundation's total revenue?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "What's the per capita income like in Chicago?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  },
+  {
+   "q": "What is the Treasury Reporting Rates of Exchange: Sudan-Pound?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "treasury"
+   ]
+  },
+  {
+   "q": "Tell me Goodwill Industries's latest net fundraising income.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "NSF research awards for Columbia University",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nsf-awards"
+   ]
+  },
+  {
+   "q": "Which nonprofit CEO is paid the most?",
+   "shape": "ranking",
+   "expect": "either",
+   "why": "answerable via the BigQuery population sources when enabled"
+  },
+  {
+   "q": "How much NIH research funding does Yale University receive?",
+   "shape": "entity-list",
+   "expect": "answer",
+   "dirs": [
+    "nih-reporter"
+   ]
+  },
+  {
+   "q": "What share of Habitat for Humanity's revenue comes from federal funding?",
+   "shape": "ratio",
+   "expect": "answer"
+  },
+  {
+   "q": "What is the average diabetes rate across US counties?",
+   "shape": "aggregate",
+   "expect": "either",
+   "why": "CDC can enumerate, so an average is computable if the aggregate plan is wired"
+  },
+  {
+   "q": "Microsoft total revenue from 2019 to 2023",
+   "shape": "timeseries",
+   "expect": "either",
+   "why": "fan-out over periods; correctness matters more than latency"
+  },
+  {
+   "q": "Compare NSF research awards for Stanford and Caltech",
+   "shape": "comparison",
+   "expect": "answer"
+  },
+  {
+   "q": "NVIDIA total liabilities, most recent year",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "sec-edgar"
+   ]
+  },
+  {
+   "q": "Look up the investment income for the ACLU Foundation.",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "nonprofit-990"
+   ]
+  },
+  {
+   "q": "Which company has the most employees?",
+   "shape": "ranking",
+   "expect": "refuse",
+   "why": "no source can see this population/measure"
+  },
+  {
+   "q": "Which nonprofit gets the most funding from IRS 990?",
+   "shape": "ranking",
+   "expect": "refuse",
+   "why": "IRS 990 is entity-list only; it cannot see its population"
+  },
+  {
+   "q": "What's the percentage of households with broadband like in Detroit?",
+   "shape": "point",
+   "expect": "answer",
+   "dirs": [
+    "census"
+   ]
+  }
+ ]
+}

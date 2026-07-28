@@ -1,0 +1,1246 @@
+{
+ "$comment": "ARD table (leaf) descriptors sampled from the live registry (registry/meta.json), excluding BigQuery-backed tables. Each table is one queryable measure/entry within a source; access and capability are inherited from its source _access.md.",
+ "version": "0.1",
+ "count": 101,
+ "tables": [
+  {
+   "id": "sources/sec-edgar/accelerated-share-repurchase-program-adjustment.md",
+   "title": "Accelerated Share Repurchase Program, Adjustment — SEC EDGAR",
+   "description": "The amount needed to adjust previously recorded stockholders' equity balances to the actual aggregate amounts paid, whether in cash or other consideration, to acquire all of the shares purchased under an Accelerated Share Repurchase arrangement.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the adjustment for stockholders' equity in an accelerated share repurchase program?",
+    "How do you calculate the adjustment for an accelerated share repurchase?",
+    "What amount is needed to adjust equity for accelerated share repurchases?",
+    "Can you explain the adjustment for shares purchased in an accelerated share repurchase?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/assets-sold-under-agreements-to-repurchase-carrying-amounts.md",
+   "title": "Assets Sold under Agreements to Repurchase, Carrying Amount — SEC EDGAR",
+   "description": "Carrying amount of assets sold under agreements to repurchase when the carrying amount (or market value, if higher than the carrying amount) of securities or other assets sold under repurchase agreements exceeds 10 percent of total assets.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the carrying amount of assets sold under repurchase agreements?",
+    "Can you provide the carrying value of repurchase agreement assets?",
+    "How much are the assets sold under repurchase agreements worth?",
+    "What is the carrying amount for the repurchase agreement assets?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/cash-surrender-value-of-life-insurance.md",
+   "title": "Cash Surrender Value of Life Insurance — SEC EDGAR",
+   "description": "Carrying amount as of the balance sheet date of amounts which could be received based on the terms of the insurance contract upon surrendering life policies owned by the entity.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the cash surrender value of life insurance policies?",
+    "How much cash can we receive upon surrendering life insurance?",
+    "Can you tell me the total cash amount for life insurance surrender value?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/crypto-asset-number-of-restricted-units.md",
+   "title": "Crypto Asset, Number of Units, Restricted — SEC EDGAR",
+   "description": "Number of crypto asset units held subject to contractual sale restriction. Excludes crypto asset units held for platform user.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the number of restricted crypto asset units we hold?",
+    "Can you tell me how many crypto asset units are under sale restrictions?",
+    "How many units of crypto assets are restricted from sale?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/deferred-compensation-sharebased-arrangements-liability-classified-noncurrent.md",
+   "title": "Deferred Compensation Share-Based Arrangements, Liability, Classified, Noncurrent — SEC EDGAR",
+   "description": "Aggregate carrying value as of the balance sheet date of the liabilities for stock option plans and other equity-based compensation arrangements payable after one year (or the operating cycle, if longer).",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the noncurrent liability for deferred compensation share-based arrangements?",
+    "Can you show me the carrying value of liabilities for stock option plans payable after one year?",
+    "How much is the liability for deferred compensation arrangements classified as noncurrent?",
+    "What is the total noncurrent liability for share-based compensation arrangements?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/deposit-liabilities-effect-of-change-in-present-value-assumptions-recorded-as-expense.md",
+   "title": "Deposit Liabilities, Effect of Change in Present Value Assumptions Recorded as Expense — SEC EDGAR",
+   "description": "Amount of expense due to change in the present value assumptions on expected recoveries.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the expense related to changes in present value assumptions for deposit liabilities?",
+    "Can you explain the impact of present value assumption changes on deposit liabilities expense?",
+    "How much expense was recorded due to changes in present value assumptions?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/dividends-receivable.md",
+   "title": "Dividends Receivable — SEC EDGAR",
+   "description": "Carrying amount as of the balance sheet date of dividends declared but not received.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What are the dividends receivable on the balance sheet?",
+    "Can you show me the amount of declared dividends that we haven't received?",
+    "How much do we have in dividends that are due to us?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/federal-home-loan-bank-advances-current.md",
+   "title": "Long-Term Federal Home Loan Bank Advances, Current — SEC EDGAR",
+   "description": "The current portion of Federal Home Loan Bank borrowings initially due beyond one year or beyond the normal operating cycle if longer.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the current portion of our long-term Federal Home Loan Bank advances?",
+    "Can you tell me the carrying value of current Federal Home Loan Bank advances?",
+    "How much do we have in current long-term Federal Home Loan Bank advances?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/financing-receivable-year-five-originated-four-years-before-current-fiscal-year-writeoff.md",
+   "title": "Financing Receivable, Year Five, Originated, Four Years before Current Fiscal Year, Writeoff — SEC EDGAR",
+   "description": "Amount of writeoff of financing receivable originated four years before current fiscal year. Excludes net investment in lease.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the writeoff amount for financing receivables from four years ago?",
+    "Can you provide the writeoff for receivables originated four fiscal years back?",
+    "How much has been written off for financing receivables from four years before this year?",
+    "What’s the total writeoff for financing receivables from four years ago?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/incentive-distribution-distribution-per-year.md",
+   "title": "Incentive Distribution, Distribution — SEC EDGAR",
+   "description": "Amount of incentive obligation paid in cash or stock during the period to a limited liability corporation managing member or limited partnership general partner.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the total incentive distribution paid during the period?",
+    "Can you tell me the amount of incentive obligation paid in cash or stock?",
+    "How much was the incentive distribution to the managing member?",
+    "What is the total amount for incentive distributions this period?",
+    "What is the cash or stock amount for incentive distributions?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/incremental-common-shares-attributable-to-written-put-options.md",
+   "title": "Incremental Common Shares Attributable to Dilutive Effect of Written Put Options — SEC EDGAR",
+   "description": "Additional shares included in the calculation of diluted EPS as a result of the potentially dilutive effect of outstanding written put options using the reverse treasury stock method.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What are the incremental shares from written put options for diluted EPS?",
+    "Can you explain the dilutive effect of outstanding written put options?",
+    "How do written put options affect the calculation of diluted EPS?",
+    "What additional shares are considered for diluted EPS due to written put options?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/investment-company-tax-basis-capital-loss-carryforward-utilization.md",
+   "title": "Investment Company, Tax Basis, Capital Loss Carryforward (Utilization) — SEC EDGAR",
+   "description": "Amount of increase (decrease) in income from operation from difference between amount reported in financial statement and tax basis of investment company, attributable to capital loss carryforward (utilization).",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the amount of capital loss carryforward for the investment company?",
+    "How much has the investment company's income changed due to capital loss carryforward?",
+    "Can you tell me the figure for capital loss carryforward affecting the investment company's income?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/life-settlement-contracts-investment-method-premiums-to-be-paid-in-year-two.md",
+   "title": "Life Settlement Contract, Investment Method, Premium to be Paid, Year Two — SEC EDGAR",
+   "description": "Amount of life insurance premium accounted for under investment method to be paid in second fiscal year following current fiscal year to keep life settlement contract in force. Excludes interim and annual periods when interim periods are reported from current statement of financi",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the premium to be paid for life settlement contracts in the second fiscal year?",
+    "Can you provide the amount of life insurance premium due in the second year for life settlements?",
+    "How much is accounted for under the investment method for premiums to keep life settlement contracts in force in the second fiscal year?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/net-amount-at-risk-by-product-and-guarantee-guaranteed-minimum-return-rate.md",
+   "title": "Net Amount at Risk by Product and Guarantee, Guaranteed Minimum Return Rate — SEC EDGAR",
+   "description": "Rate of guaranteed minimum return on deposits made to contracts reported in separate accounts maintained by an insurance entity.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the guaranteed minimum return rate on deposits in separate accounts?",
+    "Can you tell me the rate of guaranteed minimum return for these contracts?",
+    "How much is the guaranteed minimum return rate for the insurance entity's separate accounts?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/other-comprehensive-income-defined-benefit-plans-adjustment-before-tax-portion-attributable-to-parent.md",
+   "title": "Other Comprehensive (Income) Loss, Defined Benefit Plan, before Tax, after Reclassification Adjustment, Attributable to Parent — SEC EDGAR",
+   "description": "Amount, before tax, after reclassification adjustment, of (increase) decrease in accumulated other comprehensive (income) loss for defined benefit plan, attributable to parent entity.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the OCI loss for the defined benefit plan attributable to the parent?",
+    "Can you provide the amount of OCI loss for the defined benefit plan before tax for the parent?",
+    "How much is the OCI loss for the defined benefit plan related to the parent entity?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/partners-capital-account-treasury-units-reissued.md",
+   "title": "Partners' Capital Account, Treasury Units, Reissued — SEC EDGAR",
+   "description": "Value of units that were previously issued and then were repurchased and classified as treasury units. This element represents the monetary value of these units which were reissued during the period.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the value of reissued treasury units in the partners' capital account?",
+    "Can you tell me the monetary value of treasury units that were reissued?",
+    "How much are the reissued treasury units in the partners' capital account?",
+    "What are the figures for treasury units that were previously repurchased and reissued?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/prepayable-financial-asset-closed-portfolio-last-of-layer-amortized-cost.md",
+   "title": "Financial Asset, Closed Portfolio, Portfolio Layer Method, Amortized Cost — SEC EDGAR",
+   "description": "Amortized cost of closed portfolio of financial asset used to designate hedging relationship in which hedged item is expected to be outstanding for designated hedged period.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the amortized cost of the closed portfolio of financial assets for the hedging relationship?",
+    "Can you provide the amortized cost for the closed portfolio used in the hedging relationship?",
+    "How much is the amortized cost of the financial asset portfolio designated for hedging?",
+    "What is the amortized cost of the closed portfolio in the hedging relationship?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/property-plant-and-equipment-gross-period-increase-decrease.md",
+   "title": "Property, Plant, and Equipment, before Accumulated Depreciation, Period Increase (Decrease) — SEC EDGAR",
+   "description": "Amount of increase (decrease) in property, plant, and equipment. Includes, but is not limited to, land and land improvement; building; machinery and equipment; furniture and fixture; and work of art, historical treasure, or similar asset classified as collection.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the amount of increase or decrease in property, plant, and equipment?",
+    "Can you provide the total change in property, plant, and equipment this period?",
+    "What’s the current value of the increase or decrease in property, plant, and equipment?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/restricted-investments.md",
+   "title": "Restricted Investments — SEC EDGAR",
+   "description": "Investments which are not defined as or included in marketable (debt, equity, or other) securities whose use is restricted in whole or in part, generally by contractual agreements or regulatory requirements. For use in an unclassified balance sheet.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What are the total restricted investments we have?",
+    "Can you provide the amount of investments that are restricted?",
+    "How much do we have in investments that cannot be used freely?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/settlement-liabilities-current.md",
+   "title": "Settlement Liabilities, Current — SEC EDGAR",
+   "description": "Amounts payable for money transfers, money orders, and consumer payment service arrangements. Settlement liabilities include amounts payable to intermediaries for global payment transfers.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What are the current settlement liabilities for the airline?",
+    "How much does the airline owe for money transfers and payment services?",
+    "Can you provide details on the amounts payable for consumer payment arrangements?",
+    "What is the total of current liabilities related to money transfers?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/temporary-equity-maturity-year-four.md",
+   "title": "Temporary Equity, Maturity, Year Four — SEC EDGAR",
+   "description": "Amount of temporary equity maturing in fourth fiscal year following current fiscal year. Excludes interim and annual periods when interim periods are reported from current statement of financial position date (rolling approach).",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the amount of temporary equity maturing in the fourth fiscal year?",
+    "Can you tell me how much temporary equity will mature in four years?",
+    "How much temporary equity is due to mature in the fourth year from now?"
+   ]
+  },
+  {
+   "id": "sources/sec-edgar/write-off-of-deferred-debt-issuance-cost.md",
+   "title": "Deferred Debt Issuance Cost, Writeoff — SEC EDGAR",
+   "description": "Write-off of amounts previously capitalized as debt issuance cost in an extinguishment of debt.",
+   "source": "sec-edgar",
+   "domain": "finance/corporate",
+   "representativeQueries": [
+    "What is the write-off amount for deferred debt issuance costs?",
+    "Can you provide the total write-off for debt issuance costs this period?",
+    "What’s the current write-off for amounts previously capitalized as debt issuance costs?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02-0053pe.md",
+   "title": "SCHOOL ENROLLMENT — Population 3+ enrolled in school (percent) — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02_0053PE: Percent of the population 3 years and over enrolled in school.",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage are enrolled in school in {place}?",
+    "school enrollment rate in {place}"
+   ]
+  },
+  {
+   "id": "sources/census/dp02-0092e.md",
+   "title": "PLACE OF BIRTH — Total population — Native — Born in United States — Different state — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02_0092E: Selected Social Characteristics in the United States (PLACE OF BIRTH — Total population — Native — Born in United States — Different state).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population was born in a different U.S. state?",
+    "How many people are native but born in another state?",
+    "Can you provide the percentage of natives born in a different state?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02-0111e.md",
+   "title": "WORLD REGION OF BIRTH OF FOREIGN BORN — Foreign-born population, excluding population born at sea — Northern America — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02_0111E: Selected Social Characteristics in the United States (WORLD REGION OF BIRTH OF FOREIGN BORN — Foreign-born population, excluding population born at sea — Northern America).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What is the world region of birth for foreign-born people from Northern America in the US?",
+    "How many foreign-born individuals in the US are from Northern America?",
+    "Can you provide the percentage of foreign-born residents from Northern America?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02-0135pe.md",
+   "title": "% ANCESTRY — Total population — Hungarian — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02_0135PE: Selected Social Characteristics in the United States (% ANCESTRY — Total population — Hungarian).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population identifies as Hungarian?",
+    "How many people have Hungarian ancestry?",
+    "Can you tell me the count of individuals with Hungarian roots?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02-0147pe.md",
+   "title": "% ANCESTRY — Total population — Swedish — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02_0147PE: Selected Social Characteristics in the United States (% ANCESTRY — Total population — Swedish).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population has Swedish ancestry?",
+    "How many people in the U.S. identify as having Swedish roots?",
+    "Can you provide the share of the population with Swedish ancestry?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02pr-0076pe.md",
+   "title": "% DISABILITY STATUS OF THE CIVILIAN NONINSTITUTIONALIZED POPULATION — 18 to 64 years — With a disability — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02PR_0076PE: Selected Social Characteristics in Puerto Rico (% DISABILITY STATUS OF THE CIVILIAN NONINSTITUTIONALIZED POPULATION — 18 to 64 years — With a disability).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of people aged 18 to 64 have a disability?",
+    "How many adults between 18 and 64 are disabled?",
+    "Can you provide the disability rate for the 18 to 64 age group?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02pr-0105pe.md",
+   "title": "% WORLD REGION OF BIRTH OF FOREIGN BORN — Foreign-born population, excluding population born at sea — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02PR_0105PE: Selected Social Characteristics in Puerto Rico (% WORLD REGION OF BIRTH OF FOREIGN BORN — Foreign-born population, excluding population born at sea).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of foreign-born people in Puerto Rico are from different world regions?",
+    "How many foreign-born residents in Puerto Rico come from each world region?",
+    "Can you tell me the world region of birth for the foreign-born population in Puerto Rico?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02pr-0130pe.md",
+   "title": "% ANCESTRY — Total population — English — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02PR_0130PE: Selected Social Characteristics in Puerto Rico (% ANCESTRY — Total population — English).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population has English ancestry?",
+    "How many people in the U.S. identify as having English roots?",
+    "Can you provide the percentage of individuals with English ancestry?"
+   ]
+  },
+  {
+   "id": "sources/census/dp02pr-0142pe.md",
+   "title": "% ANCESTRY — Total population — Russian — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP02PR_0142PE: Selected Social Characteristics in Puerto Rico (% ANCESTRY — Total population — Russian).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population has Russian ancestry?",
+    "How many people in Puerto Rico identify as Russian?",
+    "Can you give me the stats on Russian ancestry in the population?"
+   ]
+  },
+  {
+   "id": "sources/census/dp03-0063pe.md",
+   "title": "% INCOME AND BENEFITS (IN 2022 INFLATION-ADJUSTED DOLLARS) — Total households — Mean household income (dollars) — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP03_0063PE: Selected Economic Characteristics (% INCOME AND BENEFITS (IN 2022 INFLATION-ADJUSTED DOLLARS) — Total households — Mean household income (dollars)).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What is the mean household income for all households in 2022 dollars?",
+    "How much do households earn on average in 2022 inflation-adjusted terms?",
+    "What percentage of total households report their income in 2022 dollars?"
+   ]
+  },
+  {
+   "id": "sources/census/dp03-0106pe.md",
+   "title": "% HEALTH INSURANCE COVERAGE — Civilian noninstitutionalized population 19 to 64 years — In labor force: — Employed: — With health insurance coverage — With private health insurance — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP03_0106PE: Selected Economic Characteristics (% HEALTH INSURANCE COVERAGE — Civilian noninstitutionalized population 19 to 64 years — In labor force: — Employed: — With health insurance coverage — With private health insurance).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of employed individuals aged 19 to 64 have private health insurance?",
+    "How many people in the labor force aged 19 to 64 are covered by private health insurance?",
+    "Can you provide the percentage of employed individuals with health insurance coverage?"
+   ]
+  },
+  {
+   "id": "sources/census/dp03-0121pe.md",
+   "title": "% PERCENTAGE OF FAMILIES AND PEOPLE WHOSE INCOME IN THE PAST 12 MONTHS IS BELOW THE POVERTY LEVEL — All families — With related children of the householder under 18 years — With related children of the householder under 5 years only — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP03_0121PE: Selected Economic Characteristics (% PERCENTAGE OF FAMILIES AND PEOPLE WHOSE INCOME IN THE PAST 12 MONTHS IS BELOW THE POVERTY LEVEL — All families — With related children of the householder under 18 years — With related children of t",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of families with children under 5 are below the poverty level?",
+    "How many families with kids under 18 are living in poverty?",
+    "Can you provide the count of families with children under 5 that are below the poverty line?"
+   ]
+  },
+  {
+   "id": "sources/census/dp03-0133pe.md",
+   "title": "% PERCENTAGE OF FAMILIES AND PEOPLE WHOSE INCOME IN THE PAST 12 MONTHS IS BELOW THE POVERTY LEVEL — All people — 18 years and over — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP03_0133PE: Selected Economic Characteristics (% PERCENTAGE OF FAMILIES AND PEOPLE WHOSE INCOME IN THE PAST 12 MONTHS IS BELOW THE POVERTY LEVEL — All people — 18 years and over).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of adults over 18 are below the poverty level?",
+    "How many people aged 18 and over are living in poverty?",
+    "Can you provide the poverty rate for individuals 18 and older?"
+   ]
+  },
+  {
+   "id": "sources/census/dp04-0083pe.md",
+   "title": "% VALUE — Owner-occupied units — $100,000 to $149,999 — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP04_0083PE: Selected Housing Characteristics (% VALUE — Owner-occupied units — $100,000 to $149,999).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of owner-occupied units are valued between $100,000 and $149,999?",
+    "How many homes are valued in that price range?",
+    "Can you provide stats on housing values for owner-occupied units?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0002pe.md",
+   "title": "% SEX AND AGE — Total population — Male — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0002PE: ACS Demographic and Housing Estimates (% SEX AND AGE — Total population — Male).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population is male?",
+    "How many males are there in the total population?",
+    "Can you give me the stats for the male demographic?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0015e.md",
+   "title": "SEX AND AGE — Total population — 65 to 74 years — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0015E: ACS Demographic and Housing Estimates (SEX AND AGE — Total population — 65 to 74 years).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population is aged 65 to 74 years?",
+    "How many individuals fall within the 65 to 74 age range?",
+    "Can you provide the percentage of people aged 65 to 74?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0027e.md",
+   "title": "SEX AND AGE — Total population — 18 years and over — Female — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0027E: ACS Demographic and Housing Estimates (SEX AND AGE — Total population — 18 years and over — Female).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What is the female population aged 18 and over?",
+    "How many adult females are there in the U.S.?",
+    "Can you provide statistics on females aged 18 and older?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0039e.md",
+   "title": "RACE — Total population — One race — American Indian and Alaska Native — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0039E: ACS Demographic and Housing Estimates (RACE — Total population — One race — American Indian and Alaska Native).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What is the population count for American Indian and Alaska Native individuals?",
+    "How many people identify as American Indian or Alaska Native?",
+    "Can you provide the racial demographics for American Indian and Alaska Native individuals?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0051e.md",
+   "title": "RACE — Total population — One race — Asian — Other Asian — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0051E: ACS Demographic and Housing Estimates (RACE — Total population — One race — Asian — Other Asian).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population identifies as Other Asian?",
+    "How many people in the U.S. are classified as Other Asian?",
+    "Can you tell me the percentage of Other Asians among the Asian population?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0063pe.md",
+   "title": "% RACE — Total population — Two or More Races — Black or African American and American Indian and Alaska Native — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0063PE: ACS Demographic and Housing Estimates (% RACE — Total population — Two or More Races — Black or African American and American Indian and Alaska Native).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population identifies as Black or African American and American Indian?",
+    "How many people are of two or more races including Black or African American and American Indian?",
+    "Can you provide the share of the population with that racial combination?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0075pe.md",
+   "title": "% HISPANIC OR LATINO AND RACE — Total population — Hispanic or Latino (of any race) — Puerto Rican — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0075PE: ACS Demographic and Housing Estimates (% HISPANIC OR LATINO AND RACE — Total population — Hispanic or Latino (of any race) — Puerto Rican).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population is Puerto Rican among Hispanic or Latino individuals?",
+    "How many Puerto Ricans are there in the Hispanic or Latino population?",
+    "Can you provide the percentage of Puerto Ricans in the Hispanic or Latino demographic?"
+   ]
+  },
+  {
+   "id": "sources/census/dp05-0087pe.md",
+   "title": "% HISPANIC OR LATINO AND RACE — Total population — Not Hispanic or Latino — Two or More Races — Two races excluding Some Other Race, and three or more races — US Census ACS",
+   "description": "ACS 5-year Data Profile variable DP05_0087PE: ACS Demographic and Housing Estimates (% HISPANIC OR LATINO AND RACE — Total population — Not Hispanic or Latino — Two or More Races — Two races excluding Some Other Race, and three or more races).",
+   "source": "census",
+   "domain": "demographics",
+   "representativeQueries": [
+    "What percentage of the population identifies as two or more races and is not Hispanic or Latino?",
+    "Can you tell me the % of people who are not Hispanic or Latino and identify as two or more races?",
+    "How many people are counted as two or more races excluding some other race among the non-Hispanic population?"
+   ]
+  },
+  {
+   "id": "sources/treasury/avg-interest-rates-domestic-series.md",
+   "title": "Average Interest Rate on Treasury Securities: Domestic Series",
+   "description": "Average interest rate for Domestic Series — Treasury FiscalData 'Average Interest Rate on Treasury Securities'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the average interest rate for Domestic Series Treasury Securities?",
+    "How much is the average interest rate on Domestic Series?",
+    "Can you tell me the average interest rate for Treasury Securities in the Domestic Series?"
+   ]
+  },
+  {
+   "id": "sources/treasury/debt-to-penny-intragov-hold-amt.md",
+   "title": "Debt to the Penny: Intragovernmental Holdings",
+   "description": "Intragovernmental Holdings from Treasury FiscalData 'Debt to the Penny'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What are the intragovernmental holdings right now?",
+    "How much debt is held within the government?",
+    "Can you provide the current intragovernmental debt figures?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-belize-dollar.md",
+   "title": "Treasury Reporting Rates of Exchange: Belize-Dollar",
+   "description": "Exchange rate to the us dollar for Belize-Dollar — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the Belize Dollar to the US dollar?",
+    "How much is 1 Belize Dollar worth in US dollars?",
+    "Can you tell me the current rate for Belize's currency against the dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-chile-peso.md",
+   "title": "Treasury Reporting Rates of Exchange: Chile-Peso",
+   "description": "Exchange rate to the us dollar for Chile-Peso — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the Chile-Peso to the US dollar?",
+    "How much is 1 Chile-Peso in US dollars?",
+    "Can you provide the current rate of Chile-Peso against the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-el-salvador-dollar.md",
+   "title": "Treasury Reporting Rates of Exchange: El Salvador-Dollar",
+   "description": "Exchange rate to the us dollar for El Salvador-Dollar — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the El Salvador Dollar to the US dollar?",
+    "How much is 1 El Salvador Dollar in US dollars?",
+    "Can you provide the current rate of the El Salvador Dollar against the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-haiti-gourde.md",
+   "title": "Treasury Reporting Rates of Exchange: Haiti-Gourde",
+   "description": "Exchange rate to the us dollar for Haiti-Gourde — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the Haitian Gourde to the US dollar?",
+    "How much is 1 Haitian Gourde in US dollars?",
+    "Can you provide the current rate of the Haitian Gourde against the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-kyrgyzstan-som.md",
+   "title": "Treasury Reporting Rates of Exchange: Kyrgyzstan-Som",
+   "description": "Exchange rate to the us dollar for Kyrgyzstan-Som — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the Kyrgyzstan-Som to the US dollar?",
+    "How much is 1 Kyrgyzstan-Som in US dollars?",
+    "Can you provide the current rate of Kyrgyzstan-Som against the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-moldova-leu.md",
+   "title": "Treasury Reporting Rates of Exchange: Moldova-Leu",
+   "description": "Exchange rate to the us dollar for Moldova-Leu — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the Moldova-Leu to the US dollar?",
+    "How much is 1 Moldova-Leu worth in US dollars?",
+    "Can you tell me the current rate of Moldova-Leu against the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-paraguay-guarani.md",
+   "title": "Treasury Reporting Rates of Exchange: Paraguay-Guarani",
+   "description": "Exchange rate to the us dollar for Paraguay-Guarani — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the Paraguay-Guarani to the US dollar?",
+    "How much is 1 Paraguay-Guarani in US dollars?",
+    "Can you provide the current rate of Paraguay-Guarani to the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-somali-shilling.md",
+   "title": "Treasury Reporting Rates of Exchange: Somali-Shilling",
+   "description": "Exchange rate to the us dollar for Somali-Shilling — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for the Somali-Shilling to the US dollar?",
+    "How much is 1 Somali Shilling in US dollars?",
+    "Can you provide the current rate of Somali-Shilling against the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-tonga-pa-anga.md",
+   "title": "Treasury Reporting Rates of Exchange: Tonga-Pa'Anga",
+   "description": "Exchange rate to the us dollar for Tonga-Pa'Anga — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for Tonga-Pa'Anga to the US dollar?",
+    "How much is 1 Tonga-Pa'Anga worth in US dollars?",
+    "Can you tell me the current rate of Tonga-Pa'Anga against the US dollar?"
+   ]
+  },
+  {
+   "id": "sources/treasury/rates-of-exchange-zimbabwe-gold.md",
+   "title": "Treasury Reporting Rates of Exchange: Zimbabwe-Gold",
+   "description": "Exchange rate to the us dollar for Zimbabwe-Gold — Treasury FiscalData 'Treasury Reporting Rates of Exchange'.",
+   "source": "treasury",
+   "domain": "finance/government",
+   "representativeQueries": [
+    "What is the exchange rate for Zimbabwe-Gold to the US dollar?",
+    "How much is 1 Zimbabwe-Gold worth in US dollars?",
+    "Can you provide the current exchange rate for Zimbabwe-Gold to USD?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/classification.md",
+   "title": "Nonprofit Type & Status — IRS / ProPublica",
+   "description": "A nonprofit's IRS classification and status — 501(c)(3) subsection, NTEE sector category, IRS ruling date, and whether it is actively filing. Used to verify eligibility and legitimacy.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "Is the American Red Cross a 501(c)(3)?",
+    "What kind of nonprofit is this and what sector is it in?",
+    "When was an organization recognized as tax-exempt and is it active?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/gnlsecur.md",
+   "title": "Gain/Loss — Securities — IRS Form 990 (Nonprofit)",
+   "description": "Gain or loss from sales of securities.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What is the gain or loss from securities sales?",
+    "How much did we earn or lose from selling securities?",
+    "Can you provide the financial results from our securities transactions?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/grsinc170.md",
+   "title": "Gross Income (170) — IRS Form 990 (Nonprofit)",
+   "description": "Gross income (170 support test).",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What is the gross income for the organization?",
+    "Can you tell me the total gross income?",
+    "How much gross income did the nonprofit report?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/grsrcptspublicuse.md",
+   "title": "Gross Receipts — Public Use of Facilities — IRS Form 990 (Nonprofit)",
+   "description": "Gross receipts from public use of club facilities.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What are the gross receipts from public use of club facilities?",
+    "How much did we earn from public use of our facilities?",
+    "Can you provide the total income from public facility usage?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/invstmntinc.md",
+   "title": "Investment Income — IRS Form 990 (Nonprofit)",
+   "description": "Investment income.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What was the investment income for the year?",
+    "How much did the organization earn from investments?",
+    "Can you provide the total investment income?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/netgnls.md",
+   "title": "Net Gain/Loss on Asset Sales — IRS Form 990 (Nonprofit)",
+   "description": "Net gain or loss from sales of assets.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What is the net gain or loss from asset sales?",
+    "How much did we gain or lose from selling assets?",
+    "Can you tell me the financial outcome of our asset sales?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/othrsalwages.md",
+   "title": "Salaries and Wages — IRS Form 990 (Nonprofit)",
+   "description": "Other salaries and wages paid to employees.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What are the total salaries and wages paid to employees?",
+    "How much did the organization spend on employee wages?",
+    "Can you provide the total salaries for the year?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/rntlexpnsreal.md",
+   "title": "Rental Expenses — Real Property — IRS Form 990 (Nonprofit)",
+   "description": "Rental expenses for real property.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What are the rental expenses for real property?",
+    "How much did the organization spend on real estate rentals?",
+    "Can you tell me the total rental expenses for real property?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/srvcsval170.md",
+   "title": "Govt Services Value (170) — IRS Form 990 (Nonprofit)",
+   "description": "Value of services/facilities furnished by a government unit (170).",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What is the value of services or facilities provided by the government?",
+    "How much are the government services we received worth?",
+    "Can you tell me the value of government-furnished services?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/totgftgrntrcvd509.md",
+   "title": "Gifts/Grants Received (509) — IRS Form 990 (Nonprofit)",
+   "description": "Gifts, grants, and contributions received (509(a)(2) support test).",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What gifts and grants did the organization receive?",
+    "Can you provide the total contributions received?",
+    "How much in gifts and grants were reported?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/totsupp509.md",
+   "title": "Total Support (509) — IRS Form 990 (Nonprofit)",
+   "description": "Total support (509(a)(2) support test).",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What is the total support for the organization?",
+    "Can you tell me the overall total support amount?",
+    "How much total support did the nonprofit receive?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-990/unsecurednotesend.md",
+   "title": "Unsecured Notes (End of Year) — IRS Form 990 (Nonprofit)",
+   "description": "Unsecured notes and loans payable at end of year.",
+   "source": "nonprofit-990",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What are the unsecured notes and loans payable at year-end?",
+    "How much do we owe in unsecured loans at the end of the year?",
+    "Can you tell me the total of our unsecured notes?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/access2.md",
+   "title": "Current lack of health insurance among adults aged 18-64 years — CDC PLACES",
+   "description": "Local prevalence estimate: Current lack of health insurance among adults aged 18-64 years (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What percentage of adults aged 18-64 lack health insurance?",
+    "How many people aged 18-64 are currently uninsured?",
+    "What's the current rate of health insurance coverage for adults 18-64?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/casthma.md",
+   "title": "Current asthma among adults — CDC PLACES",
+   "description": "Local prevalence estimate: Current asthma among adults (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What percentage of adults currently have asthma?",
+    "How many adults are living with asthma in my community?",
+    "Can you provide statistics on current asthma rates among adults?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/colon-screen.md",
+   "title": "Colorectal cancer screening among adults aged 45–75 years — CDC PLACES",
+   "description": "Local prevalence estimate: Colorectal cancer screening among adults aged 45–75 years (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What is the prevalence of colorectal cancer screening for adults aged 45-75?",
+    "How many adults aged 45-75 have been screened for colorectal cancer?",
+    "Can you provide statistics on colorectal cancer screening in this age group?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/disability.md",
+   "title": "Any disability among adults — CDC PLACES",
+   "description": "Local prevalence estimate: Any disability among adults (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What is the rate of any disability among adults?",
+    "How many adults have some form of disability?",
+    "Can you provide data on disabilities in my community?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/hearing.md",
+   "title": "Hearing disability among adults — CDC PLACES",
+   "description": "Local prevalence estimate: Hearing disability among adults (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What percentage of adults have a hearing disability?",
+    "How many adults are affected by hearing disabilities?",
+    "Can you provide statistics on hearing disabilities among adults?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/lpa.md",
+   "title": "No leisure-time physical activity among adults — CDC PLACES",
+   "description": "Local prevalence estimate: No leisure-time physical activity among adults (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What percentage of adults do not engage in leisure-time physical activity?",
+    "How many adults are inactive during their free time?",
+    "Can you give me data on adults who don't exercise in their leisure time?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/phlth.md",
+   "title": "Frequent physical distress among adults — CDC PLACES",
+   "description": "Local prevalence estimate: Frequent physical distress among adults (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What is the prevalence of frequent physical distress among adults locally?",
+    "How many adults report physical distress on a regular basis?",
+    "Can you provide statistics on physical health issues among adults?"
+   ]
+  },
+  {
+   "id": "sources/cdc-places/vision.md",
+   "title": "Vision disability among adults — CDC PLACES",
+   "description": "Local prevalence estimate: Vision disability among adults (CDC PLACES, county/place level).",
+   "source": "cdc-places",
+   "domain": "health",
+   "representativeQueries": [
+    "What is the local prevalence of vision disabilities among adults?",
+    "How many adults have vision impairments in my community?",
+    "Can you provide statistics on vision disabilities among adults?"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/biggest-recipients.md",
+   "title": "The biggest grant recipients — IRS 990 grant graph",
+   "description": "Rank organizations by the grant money they RECEIVE, or by how many different funders back them (an in-degree over the grant graph), from IRS 990 e-file data, 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "Which organizations receive the most grant money?",
+    "Which nonprofits are funded by the most different foundations?",
+    "Who are the biggest grant recipients?",
+    "Which charities get grants from the most funders?",
+    "Rank organizations by total grants received"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/geographic.md",
+   "title": "Grant money by place — IRS 990 grant graph",
+   "description": "Where grant money goes and comes from — which US states receive the most grant dollars, which send the most, and how much flows from one state to another, from IRS 990 e-file data, 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "Which states receive the most grant money?",
+    "Which states send out the most in grants?",
+    "How much grant money flows from New York to California?",
+    "Where does grant money go by state?",
+    "What states get the most foundation funding?"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/grant-overview.md",
+   "title": "Grant graph overview — totals and averages — IRS 990 grant graph",
+   "description": "Headline numbers for US grantmaking — how many grants were made, the total and average grant dollars, how many funders and recipients, and the year-over-year trend, from IRS 990 e-file data, 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "How much grant money was given out in total?",
+    "How many grants were made in 2023?",
+    "What is the average grant size?",
+    "How much did nonprofits and foundations grant overall?",
+    "What is the total value of all grants in the data?"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/grants-by-cause.md",
+   "title": "Grant money by cause — IRS 990 grant graph",
+   "description": "How grant dollars break down by the CAUSE of the recipient — education, health, environment, housing, arts, human services, and so on — and how much goes to any one cause, by joining recipients to their IRS NTEE classification. IRS 990 e-file data, 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "How much grant money goes to education?",
+    "What causes get the most grant funding?",
+    "How much funding goes to health versus education?",
+    "What kinds of causes do grants support?",
+    "How much grant money is directed to the environment?",
+    "Which cause areas receive the most grants?"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/grants-made.md",
+   "title": "Grants made by an organization — IRS 990 grant graph",
+   "description": "The grants a given nonprofit or foundation MADE — its recipients, the amounts, and the total it granted — from IRS 990 e-file data (Schedule I + 990-PF), 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "Who does the Ford Foundation fund?",
+    "What grants did the Gates Foundation make?",
+    "Who does the MacArthur Foundation give money to?",
+    "What organizations does the Mellon Foundation fund?",
+    "List the grants made by the Hewlett Foundation",
+    "Who are the recipients of grants from the Robert Wood Johnson Foundation?"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/grants-received.md",
+   "title": "Who funds an organization — IRS 990 grant graph",
+   "description": "The funders that gave grants TO a given organization (a school, church, nonprofit) — the charities and foundations behind it, the amounts, and the total it received — from IRS 990 e-file data (Schedule I + 990-PF), 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "Which foundations fund Stanford?",
+    "Who funds the American Red Cross?",
+    "What charities have funded this university?",
+    "Which foundations give money to Feeding America?",
+    "Who are the funders of this organization?",
+    "What foundations support the ACLU?"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/shared-grantees.md",
+   "title": "Organizations funded by two funders — IRS 990 grant graph",
+   "description": "Given TWO named funders, the organizations they BOTH fund — a grant-graph intersection showing where two foundations' giving overlaps, from IRS 990 e-file data, 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "Do the Gates and Ford foundations fund any of the same organizations?",
+    "Which organizations do the Mellon and MacArthur foundations both fund?",
+    "What grantees do these two foundations have in common?",
+    "Which nonprofits get money from both of these funders?",
+    "Where does the giving of two foundations overlap?"
+   ]
+  },
+  {
+   "id": "sources/irs-grants/top-grantmakers.md",
+   "title": "The biggest grantmakers — IRS 990 grant graph",
+   "description": "Rank US nonprofits and foundations by total grant dollars paid out, across all grantmakers, from IRS 990 e-file data (Schedule I + 990-PF), 2022-2024.",
+   "source": "irs-grants",
+   "domain": "nonprofit/philanthropy",
+   "representativeQueries": [
+    "Which foundations paid out the most in grants to other organizations?",
+    "Who gave away the most grant money to other nonprofits?",
+    "Rank grantmakers by total grant dollars paid out",
+    "Which organizations distributed the most in grants?",
+    "Biggest grant-paying foundations by dollars granted to others"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-profile/ceo.md",
+   "title": "Chief Executive / Leader — Organization Profile (Nonprofit)",
+   "description": "The current chief executive or leader of a nonprofit (Wikidata).",
+   "source": "nonprofit-profile",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "Who is the CEO of this nonprofit?",
+    "Who leads this charity?",
+    "Who is the executive director of this organization?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-profile/founder.md",
+   "title": "Founder — Organization Profile (Nonprofit)",
+   "description": "Who founded a nonprofit (Wikidata).",
+   "source": "nonprofit-profile",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "Who founded this nonprofit?",
+    "Who started this charity?",
+    "Who are the founders of this organization?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-profile/inception.md",
+   "title": "Year Founded — Organization Profile (Nonprofit)",
+   "description": "The year a nonprofit was founded or established.",
+   "source": "nonprofit-profile",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "When was this nonprofit founded?",
+    "What year was this charity established?",
+    "How old is this organization?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-profile/website.md",
+   "title": "Official Website — Organization Profile (Nonprofit)",
+   "description": "A nonprofit's official website URL.",
+   "source": "nonprofit-profile",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "What is this nonprofit's website?",
+    "What is the official website of this charity?",
+    "Where can I find this organization online?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-bmf/deductibility.md",
+   "title": "Contribution Deductibility — IRS Business Master File (Nonprofit)",
+   "description": "Whether donations to a US nonprofit are tax-deductible, decoded from its IRS deductibility code.",
+   "source": "nonprofit-bmf",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "Are donations to this nonprofit tax-deductible?",
+    "Can I deduct a contribution to this charity?",
+    "Is a gift to this organization tax-deductible?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-bmf/foundation-type.md",
+   "title": "Foundation Type — IRS Business Master File (Nonprofit)",
+   "description": "Whether a US 501(c)(3) is a public charity or a private foundation (and its subtype), decoded from its IRS foundation code.",
+   "source": "nonprofit-bmf",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "Is this organization a private foundation or a public charity?",
+    "What foundation type is this nonprofit?",
+    "Is this a private foundation?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-bmf/location.md",
+   "title": "Headquarters Location — IRS Business Master File (Nonprofit)",
+   "description": "The city and state where a US nonprofit is registered with the IRS.",
+   "source": "nonprofit-bmf",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "Where is this nonprofit headquartered?",
+    "What city and state is this charity located in?",
+    "Where is this organization based?"
+   ]
+  },
+  {
+   "id": "sources/nonprofit-bmf/ruling-date.md",
+   "title": "IRS Ruling Date (Tax-Exempt Since) — IRS Business Master File (Nonprofit)",
+   "description": "The date the IRS granted a US nonprofit its tax-exempt status (ruling date).",
+   "source": "nonprofit-bmf",
+   "domain": "nonprofit",
+   "representativeQueries": [
+    "When did this nonprofit become tax-exempt?",
+    "What year did the IRS recognize this charity's exempt status?",
+    "Since when has this organization been a 501(c)(3)?"
+   ]
+  },
+  {
+   "id": "sources/college-scorecard/latest-admissions-admission-rate-overall.md",
+   "title": "Admission Rate — College Scorecard",
+   "description": "Overall admission (acceptance) rate.",
+   "source": "college-scorecard",
+   "domain": "education",
+   "representativeQueries": [
+    "What is the admission rate at {school}?",
+    "acceptance rate of {school}",
+    "how selective is {school}"
+   ]
+  },
+  {
+   "id": "sources/college-scorecard/latest-cost-avg-net-price-overall.md",
+   "title": "Average Net Price — College Scorecard",
+   "description": "Average annual net price after aid (USD).",
+   "source": "college-scorecard",
+   "domain": "education",
+   "representativeQueries": [
+    "What is the average net price at {school}?",
+    "how much does {school} really cost after aid"
+   ]
+  },
+  {
+   "id": "sources/college-scorecard/latest-cost-tuition-in-state.md",
+   "title": "In-State Tuition — College Scorecard",
+   "description": "Annual in-state tuition and fees (USD).",
+   "source": "college-scorecard",
+   "domain": "education",
+   "representativeQueries": [
+    "What is the in-state tuition at {school}?"
+   ]
+  },
+  {
+   "id": "sources/college-scorecard/latest-student-size.md",
+   "title": "Enrollment — College Scorecard",
+   "description": "Undergraduate enrollment (number of students).",
+   "source": "college-scorecard",
+   "domain": "education",
+   "representativeQueries": [
+    "How many students attend {school}?",
+    "enrollment at {school}",
+    "how big is {school}"
+   ]
+  },
+  {
+   "id": "sources/fema/declarations.md",
+   "title": "Federal Disaster Declarations — FEMA",
+   "description": "",
+   "source": "fema",
+   "domain": "emergency",
+   "representativeQueries": [
+    "What disasters have been declared in {state}?",
+    "recent disaster declarations in {state}",
+    "wildfire declarations in {state}",
+    "federal emergencies in {state}",
+    "how many disasters in {state}"
+   ]
+  },
+  {
+   "id": "sources/grants-gov/funding-opportunities.md",
+   "title": "Federal Funding Opportunities — Grants.gov",
+   "description": "Open federal grant opportunities an organization can apply for, searchable by topic or program area.",
+   "source": "grants-gov",
+   "domain": "government/spending",
+   "representativeQueries": [
+    "What federal grants can a nonprofit apply for in education?",
+    "Open grant opportunities for health programs",
+    "Find funding opportunities for the arts"
+   ]
+  },
+  {
+   "id": "sources/nih-reporter/research-grants.md",
+   "title": "NIH Research Grants — NIH RePORTER",
+   "description": "NIH-funded biomedical research grants and projects awarded to an organization.",
+   "source": "nih-reporter",
+   "domain": "research/funding",
+   "representativeQueries": [
+    "How much NIH research funding does Stanford get?",
+    "NIH grants awarded to a research institution",
+    "biomedical research projects funded at a university"
+   ]
+  },
+  {
+   "id": "sources/nsf-awards/research-grants.md",
+   "title": "NSF Research Grants — NSF Awards",
+   "description": "National Science Foundation research grant awards made to an awardee organization.",
+   "source": "nsf-awards",
+   "domain": "research/funding",
+   "representativeQueries": [
+    "How much NSF funding does a university receive?",
+    "NSF research awards to an organization",
+    "science research grants funded by the National Science Foundation"
+   ]
+  },
+  {
+   "id": "sources/usaspending/federal-awards-received.md",
+   "title": "Federal Awards Received — USAspending.gov",
+   "description": "Federal grants and financial-assistance awards an organization has received from US government agencies.",
+   "source": "usaspending",
+   "domain": "government/spending",
+   "representativeQueries": [
+    "How much federal grant money did the American Red Cross receive?",
+    "What federal awards has a nonprofit gotten?",
+    "Which agencies fund this organization?"
+   ]
+  }
+ ]
+}
