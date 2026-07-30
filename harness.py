@@ -576,151 +576,201 @@ def _identity_scope(rows, ident):
     return out
 
 
+# --- fetch strategies -----------------------------------------------------------------------------
+# One (field, entity, key, period) fetch attempt. Every source shape is a named strategy below, and
+# _fetch dispatches to whichever one the source's OKF frontmatter declares (its marker key). Adding a
+# source that fits an existing shape is data-only — a new sources/<name>/_access.md with the right
+# marker, no code here. A genuinely new access pattern is one new handler + one _STRATEGIES entry; the
+# per-attempt plumbing (identifier, key, period, entity) and the SystemExit->Backtrack wrapping are
+# shared, so a handler contains only what is unique to that shape.
+from collections import namedtuple
+_F = namedtuple("_F", "fm ident key period attribute mention state ctx")
+
+
+def _s_concept(f):
+    """SEC EDGAR — an XBRL us-gaap concept per company. Resolves ticker->CIK once per mention."""
+    if f.key:
+        return driver.fetch_metric(f.attribute, cik=f.key, period=f.period, log=False)
+    if f.mention not in _TICKER_CACHE:                   # same mention on every backtrack — resolve once
+        _TICKER_CACHE[f.mention] = json.loads(TK.llm(
+            'JSON {"ticker":"<US stock ticker or empty>"}.', f.mention, json_mode=True)).get("ticker")
+    ticker = _TICKER_CACHE[f.mention]
+    if not ticker:
+        raise Backtrack("no ticker")
+    return driver.fetch_metric(f.attribute, ticker, f.period, log=False)
+
+
+# Nonprofit sources resolve names authoritatively via ProPublica (EIN spine), so fall back to the NAME
+# when the Wikidata candidate carries no EIN. Otherwise a candidate with no EIN (the real "Sierra Club",
+# a c4) backtracks to a sibling that does (the c3 "Sierra Club Foundation"), and the answer flips.
+# `key or mention` keeps a real EIN when present, else uses the name.
+def _np_org(f):
+    org = f.key or f.mention
+    if not org:
+        raise Backtrack("no nonprofit key")
+    return org
+
+
+def _s_classification(f):
+    import nonprofit
+    return nonprofit.classify(_np_org(f))
+
+
+def _s_field(f):
+    import nonprofit
+    return nonprofit.fetch_np(f.fm["field"], _np_org(f), f.period)
+
+
+def _s_bmf(f):
+    import nonprofit
+    return nonprofit.bmf(f.fm["bmf"], _np_org(f))
+
+
+def _s_profile(f):
+    import orgprofile as profile
+    if not f.key:
+        raise Backtrack("no wikidata qid")
+    return profile.fetch(f.fm["profile"], f.key, (f.state.get("entity") or {}).get("label"))
+
+
+def _s_scorecard(f):
+    import college
+    return college.fetch(f.fm["scorecard"], f.key or f.mention)
+
+
+def _s_fema(f):
+    import fema
+    return fema.fetch(f.key or f.mention)
+
+
+def _s_variable(f):
+    """US Census ACS — one variable at a place, with the Data Profile percent-column quirk handled."""
+    geo = _resolve_geo(f.mention) if f.key == "__native__" else f.key
+    if not geo:
+        raise Backtrack("no geo")
+    def _jam(x):
+        try:
+            return float(x) <= -100000000                # ACS jam sentinels are large negatives
+        except (TypeError, ValueError):
+            return False
+    arr = driver.accessor(f.ident, "acs", geo=geo)
+    if not isinstance(arr, list) or len(arr) < 2:
+        raise Backtrack("no census row")
+    val, var = arr[1][1], (f.fm.get("get") or f.fm["variable"])
+    # ACS Data Profile quirk: for a PERCENT row the value lives in the *PE* column and the *E* column
+    # is -888888888 ("not applicable"). If the picked estimate is that sentinel, read the percent
+    # sibling — otherwise a poverty/unemployment RATE looks like missing data and the search backtracks
+    # forever over a value that is simply in the other column.
+    if str(val).strip() == "-888888888" and var.endswith("E") and not var.endswith("PE"):
+        pe = var[:-1] + "PE"
+        a2 = driver.accessor(f.ident, "acs", geo=geo, get=pe)
+        if isinstance(a2, list) and len(a2) >= 2 and not _jam(a2[1][1]):
+            val, var = a2[1][1], pe
+    if _jam(val):
+        raise Backtrack("jam null")
+    return {"place": arr[1][0], "metric": f.fm["title"].split(" — US Census")[0],
+            "variable": var, "value": val, "source": "US Census ACS (did:web:census.gov)"}
+
+
+def _s_measureid(f):
+    """CDC PLACES — one local health measure at a place."""
+    arr = driver.accessor(f.ident, "by_measure", measureid=f.fm["measureid"], place=f.key)
+    row = next((r for r in arr if r.get("data_value")), None) if isinstance(arr, list) else None
+    if not row:
+        raise Backtrack("no cdc row")
+    return {"place": row.get("locationname"), "measure": f.fm["title"].split(" — CDC")[0],
+            "value": row.get("data_value"), "unit": row.get("data_value_unit"),
+            "source": "CDC PLACES (did:web:cdc.gov)"}
+
+
+def _s_tfield(f):
+    """US Treasury FiscalData — the latest value of a field, optionally within a filtered series."""
+    q = f"fields={f.fm['tfield']},record_date&sort=-record_date&page[size]=1"
+    if f.fm.get("filter"):
+        q += f"&filter={f.fm['filter']}"
+    rows = (driver.accessor(f.ident, "get", query=q) or {}).get("data", [])
+    if not rows:
+        raise Backtrack("no treasury data")
+    rec = {"metric": f.fm["title"], "value": rows[0].get(f.fm["tfield"]),
+           "as_of": rows[0].get("record_date"), "source": "US Treasury FiscalData (did:web:treasury.gov)"}
+    if f.fm.get("filter") and ":eq:" in f.fm["filter"]:
+        rec["series"] = f.fm["filter"].split(":eq:")[-1]     # the dimension value, e.g. "Euro Zone-Euro"
+    return rec
+
+
+def _s_search(f):
+    """Federal award/opportunity search (NSF/NIH/USAspending/grants.gov) — a keyword or org query,
+    paged to completion when the source declares entity-scoped completeness."""
+    s = f.fm["search"]
+    val = (f.key or f.mention) if s["want"] == "organization" else f.attribute
+    if not val:
+        raise Backtrack("no search term")
+    cap = (planner.capabilities(f.ident) or {}).get(s["operation"], {})
+    page = cap.get("page") or {}
+
+    def _pull(**extra):
+        r = driver.accessor(f.ident, s["operation"], **{s["arg"]: val, **extra})
+        for part in s["extract"].split("."):
+            r = r[int(part)] if isinstance(r, list) else r.get(part, [])
+        return r if isinstance(r, list) else []
+
+    if page.get("complete_for") == "entity" and page.get("offset_param"):
+        # ENTITY-scoped completeness: this org's own records fit under the offset ceiling, so page them
+        # all. Without this the "total" is just the largest N projects — Johns Hopkins reads $208M
+        # instead of $969M, and every threshold comparison is wrong.
+        step, off, res = int(page.get("max") or 500), 0, []
+        _say("status", icon="📄", msg=f"Paging every record for this organization…")
+        while off < int((cap.get("population") or {}).get("ceiling") or 15000):
+            chunk = _pull(**{page["offset_param"]: off})
+            res.extend(chunk)
+            if len(chunk) < step:
+                break
+            off += step
+        _say("status", icon="📄", msg=f"{len(res)} records retrieved (complete for this organization)")
+    else:
+        res = _pull()
+    out = {"query": val, "source": f.fm.get("title")}
+    if isinstance(res, list):
+        rows = [r for r in res if isinstance(r, dict)]
+        total = sum(_amount(r) for r in rows)            # compute totals HERE, not in the LLM
+        out["record_count"] = len(rows)
+        if total:
+            out["total_usd"] = round(total, 2)
+            out["total_usd_display"] = "${:,.0f}".format(total)
+        # Completeness is DECLARED, not guessed: a capped page is a partial total. Propagating it
+        # matters most for joins — dividing a truncated numerator by a complete denominator is the
+        # characteristic way a cross-source join produces a confident wrong number.
+        out["complete"] = bool(page.get("complete")) or page.get("complete_for") == "entity"
+        if not out["complete"]:
+            out["coverage"] = (f"total is across the {len(rows)} award records returned by this "
+                               f"query, not every award the organization has received")
+        out.update(_identity_scope(rows, f.fm.get("identity") or {}))   # scope a name-matched result
+        res = [{k: v for k, v in r.items() if not (isinstance(v, str) and len(v) > 240)}
+               for r in rows][:8]                        # drop bulky prose (abstracts etc.)
+    out["results"] = res
+    return out
+
+
+# The dispatch table: OKF marker key -> strategy. First marker the frontmatter declares wins, so the
+# order here is only a tie-break (a leaf declares exactly one). To add a shape, append one pair.
+_STRATEGIES = [
+    ("concept", _s_concept), ("classification", _s_classification), ("field", _s_field),
+    ("bmf", _s_bmf), ("profile", _s_profile), ("scorecard", _s_scorecard), ("fema", _s_fema),
+    ("variable", _s_variable), ("measureid", _s_measureid), ("tfield", _s_tfield), ("search", _s_search),
+]
+
+
 def _fetch(state, ctx):
-    """Attempt one complete (field, entity, key, period) assignment. Raise Backtrack on any failure."""
+    """Attempt one complete (field, entity, key, period) assignment. Raise Backtrack on any failure.
+    Dispatches to the strategy the source's OKF frontmatter declares — see _STRATEGIES."""
     identifier = state["hit"]["identifier"]
     fm = driver.frontmatter(identifier)
-    key, period = state.get("key"), state.get("period") or "latest"
-    attribute, mention = ctx.get("attribute") or "", ctx.get("entity") or ""
+    f = _F(fm, identifier, state.get("key"), state.get("period") or "latest",
+           ctx.get("attribute") or "", ctx.get("entity") or "", state, ctx)
     try:
-        if fm.get("concept"):
-            if key:
-                return driver.fetch_metric(attribute, cik=key, period=period, log=False)
-            if mention not in _TICKER_CACHE:                 # same mention on every backtrack — resolve once
-                _TICKER_CACHE[mention] = json.loads(TK.llm(
-                    'JSON {"ticker":"<US stock ticker or empty>"}.', mention, json_mode=True)).get("ticker")
-            ticker = _TICKER_CACHE[mention]
-            if not ticker:
-                raise Backtrack("no ticker")
-            return driver.fetch_metric(attribute, ticker, period, log=False)
-        # Nonprofit sources resolve names authoritatively via ProPublica (EIN spine), so fall back to
-        # the NAME when the Wikidata candidate carries no EIN. Otherwise a candidate with no EIN (the
-        # real "Sierra Club", a c4) backtracks to a sibling that does (the c3 "Sierra Club Foundation"),
-        # and the answer flips. `key or mention` keeps a real EIN when present, else uses the name.
-        if fm.get("classification"):
-            import nonprofit
-            org = key or mention
-            if not org:
-                raise Backtrack("no nonprofit key")
-            return nonprofit.classify(org)
-        if fm.get("field"):
-            import nonprofit
-            org = key or mention
-            if not org:
-                raise Backtrack("no nonprofit key")
-            return nonprofit.fetch_np(fm["field"], org, period)
-        if fm.get("bmf"):
-            import nonprofit
-            org = key or mention
-            if not org:
-                raise Backtrack("no nonprofit key")
-            return nonprofit.bmf(fm["bmf"], org)
-        if fm.get("profile"):
-            import orgprofile as profile
-            if not key:
-                raise Backtrack("no wikidata qid")
-            return profile.fetch(fm["profile"], key, (state.get("entity") or {}).get("label"))
-        if fm.get("scorecard"):
-            import college
-            return college.fetch(fm["scorecard"], key or mention)
-        if fm.get("fema"):
-            import fema
-            return fema.fetch(key or mention)
-        if fm.get("variable"):
-            geo = _resolve_geo(mention) if key == "__native__" else key
-            if not geo:
-                raise Backtrack("no geo")
-            def _jam(x):
-                try:
-                    return float(x) <= -100000000                # ACS jam sentinels are large negatives
-                except (TypeError, ValueError):
-                    return False
-            arr = driver.accessor(identifier, "acs", geo=geo)
-            if not isinstance(arr, list) or len(arr) < 2:
-                raise Backtrack("no census row")
-            val, var = arr[1][1], (fm.get("get") or fm["variable"])
-            # ACS Data Profile quirk: for a PERCENT row the value lives in the *PE* column and the *E*
-            # column is -888888888 ("not applicable"). If the picked estimate is that sentinel, read the
-            # percent sibling — otherwise a poverty/unemployment RATE looks like missing data and the
-            # search backtracks forever over a value that is simply in the other column.
-            if str(val).strip() == "-888888888" and var.endswith("E") and not var.endswith("PE"):
-                pe = var[:-1] + "PE"
-                a2 = driver.accessor(identifier, "acs", geo=geo, get=pe)
-                if isinstance(a2, list) and len(a2) >= 2 and not _jam(a2[1][1]):
-                    val, var = a2[1][1], pe
-            if _jam(val):
-                raise Backtrack("jam null")
-            return {"place": arr[1][0], "metric": fm["title"].split(" — US Census")[0],
-                    "variable": var, "value": val, "source": "US Census ACS (did:web:census.gov)"}
-        if fm.get("measureid"):
-            arr = driver.accessor(identifier, "by_measure", measureid=fm["measureid"], place=key)
-            row = next((r for r in arr if r.get("data_value")), None) if isinstance(arr, list) else None
-            if not row:
-                raise Backtrack("no cdc row")
-            return {"place": row.get("locationname"), "measure": fm["title"].split(" — CDC")[0],
-                    "value": row.get("data_value"), "unit": row.get("data_value_unit"),
-                    "source": "CDC PLACES (did:web:cdc.gov)"}
-        if fm.get("tfield"):
-            q = f"fields={fm['tfield']},record_date&sort=-record_date&page[size]=1"
-            if fm.get("filter"):
-                q += f"&filter={fm['filter']}"
-            rows = (driver.accessor(identifier, "get", query=q) or {}).get("data", [])
-            if not rows:
-                raise Backtrack("no treasury data")
-            rec = {"metric": fm["title"], "value": rows[0].get(fm["tfield"]),
-                   "as_of": rows[0].get("record_date"), "source": "US Treasury FiscalData (did:web:treasury.gov)"}
-            if fm.get("filter") and ":eq:" in fm["filter"]:
-                rec["series"] = fm["filter"].split(":eq:")[-1]   # the dimension value, e.g. "Euro Zone-Euro"
-            return rec
-        if fm.get("search"):
-            s = fm["search"]
-            val = (key or mention) if s["want"] == "organization" else attribute
-            if not val:
-                raise Backtrack("no search term")
-            cap = (planner.capabilities(identifier) or {}).get(s["operation"], {})
-            page = cap.get("page") or {}
-
-            def _pull(**extra):
-                r = driver.accessor(identifier, s["operation"], **{s["arg"]: val, **extra})
-                for part in s["extract"].split("."):
-                    r = r[int(part)] if isinstance(r, list) else r.get(part, [])
-                return r if isinstance(r, list) else []
-
-            if page.get("complete_for") == "entity" and page.get("offset_param"):
-                # ENTITY-scoped completeness: this org's own records fit under the offset ceiling, so
-                # page them all. Without this the "total" is just the largest N projects — Johns
-                # Hopkins reads $208M instead of $969M, and every threshold comparison is wrong.
-                step, off, res = int(page.get("max") or 500), 0, []
-                _say("status", icon="📄", msg=f"Paging every record for this organization…")
-                while off < int((cap.get("population") or {}).get("ceiling") or 15000):
-                    chunk = _pull(**{page["offset_param"]: off})
-                    res.extend(chunk)
-                    if len(chunk) < step:
-                        break
-                    off += step
-                _say("status", icon="📄", msg=f"{len(res)} records retrieved (complete for this organization)")
-            else:
-                res = _pull()
-            out = {"query": val, "source": fm.get("title")}
-            if isinstance(res, list):
-                rows = [r for r in res if isinstance(r, dict)]
-                total = sum(_amount(r) for r in rows)        # compute totals HERE, not in the LLM
-                out["record_count"] = len(rows)
-                if total:
-                    out["total_usd"] = round(total, 2)
-                    out["total_usd_display"] = "${:,.0f}".format(total)
-                # Completeness is DECLARED, not guessed: a capped page is a partial total. Propagating
-                # it matters most for joins — dividing a truncated numerator by a complete denominator
-                # is the characteristic way a cross-source join produces a confident wrong number.
-                out["complete"] = bool(page.get("complete")) or page.get("complete_for") == "entity"
-                if not out["complete"]:
-                    out["coverage"] = (f"total is across the {len(rows)} award records returned by this "
-                                       f"query, not every award the organization has received")
-                out.update(_identity_scope(rows, fm.get("identity") or {}))   # scope a name-matched result
-                res = [{k: v for k, v in r.items() if not (isinstance(v, str) and len(v) > 240)}
-                       for r in rows][:8]                    # drop bulky prose (abstracts etc.)
-            out["results"] = res
-            return out
+        for marker, handler in _STRATEGIES:
+            if fm.get(marker):
+                return handler(f)
     except SystemExit as e:
         raise Backtrack(str(e))
     raise Backtrack("no structured retrieval for this source")
