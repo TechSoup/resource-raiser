@@ -574,21 +574,28 @@ def _fetch(state, ctx):
             if not ticker:
                 raise Backtrack("no ticker")
             return driver.fetch_metric(attribute, ticker, period, log=False)
+        # Nonprofit sources resolve names authoritatively via ProPublica (EIN spine), so fall back to
+        # the NAME when the Wikidata candidate carries no EIN. Otherwise a candidate with no EIN (the
+        # real "Sierra Club", a c4) backtracks to a sibling that does (the c3 "Sierra Club Foundation"),
+        # and the answer flips. `key or mention` keeps a real EIN when present, else uses the name.
         if fm.get("classification"):
             import nonprofit
-            if not key:
+            org = key or mention
+            if not org:
                 raise Backtrack("no nonprofit key")
-            return nonprofit.classify(key)
+            return nonprofit.classify(org)
         if fm.get("field"):
             import nonprofit
-            if not key:
+            org = key or mention
+            if not org:
                 raise Backtrack("no nonprofit key")
-            return nonprofit.fetch_np(fm["field"], key, period)
+            return nonprofit.fetch_np(fm["field"], org, period)
         if fm.get("bmf"):
             import nonprofit
-            if not key:
+            org = key or mention
+            if not org:
                 raise Backtrack("no nonprofit key")
-            return nonprofit.bmf(fm["bmf"], key)
+            return nonprofit.bmf(fm["bmf"], org)
         if fm.get("profile"):
             import orgprofile as profile
             if not key:
@@ -718,7 +725,11 @@ def _answers(question, data):
             "a different place/entity (a broader containing area used as a proxy for a place is fine). "
             "CRUCIAL: do NOT judge the numeric VALUE in any way — do not consider whether it seems too "
             "large or small, whether an exchange rate looks inverted, or whether a date is recent, old, or "
-            "in the future. Treat the value and its date as authoritative and current. Judge only WHAT the "
+            "in the future. Treat the value and its date as authoritative and current. "
+            "A NEGATIVE or FALSE answer is still an ANSWER: for a yes/no question, a record whose value is "
+            "'no' / false / 0 (e.g. is_501c3=false correctly answers 'Is X a 501(c)(3)?' with NO) ANSWERS "
+            "the question and MUST be accepted — never reject a record because the answer it gives is "
+            "negative, or you will backtrack until you find a wrongly-positive match. Judge only WHAT the "
             "record is about. Bias strongly toward ACCEPT: if the record names the same currency, place, or "
             "measure the question asks about — even inside a longer official title (e.g. 'Treasury Reporting "
             "Rates of Exchange: Euro Zone-Euro' answers a euro exchange-rate question) — ACCEPT. Reject only "
