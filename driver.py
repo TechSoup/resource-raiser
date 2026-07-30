@@ -19,6 +19,13 @@ import ard_client
 ROOT = os.path.dirname(os.path.abspath(__file__))
 UA = "ard-data-demo (guha@guha.com)"
 
+
+class CredentialError(Exception):
+    """A source cannot answer because a required credential is missing (an API key, a GCP project).
+    Distinct from the SystemExit/Backtrack a normal 'this source has no data' miss raises: no amount
+    of backtracking over other hits/entities/periods can satisfy it, so the search must STOP and tell
+    the user to set the key — not spend ~2 minutes exhausting every other option first."""
+
 # In-process cache of SEC companyconcept responses, keyed by (cik, concept). fetch_metric probes
 # ~25 candidate concepts per query and the harness may re-enter it while backtracking; caching makes
 # repeats free. None = the company doesn't report that concept (a 404), also worth remembering.
@@ -81,6 +88,10 @@ def accessor(rel, op, **params):
     cmd += [f"{k}={v}" for k, v in params.items()]
     out = subprocess.run(cmd, capture_output=True, text=True)
     if out.returncode:
+        # A missing-credential failure is not a backtrack-able miss (see CredentialError). The accessor
+        # marks it with a stable prefix so we can classify it across the subprocess boundary.
+        if "CREDENTIAL_ERROR:" in (out.stderr or ""):
+            raise CredentialError(out.stderr.split("CREDENTIAL_ERROR:", 1)[1].strip().splitlines()[0])
         raise SystemExit(f"accessor error: {out.stderr}")
     return json.loads(out.stdout)
 

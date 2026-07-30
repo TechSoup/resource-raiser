@@ -45,21 +45,26 @@ def available():
 
 
 def _client():
+    # A missing project/package is a CredentialError, not a backtrack-able miss: the search must stop
+    # and tell the user to set it, not exhaust every other source first (see driver.CredentialError).
+    import driver
     proj = os.getenv("GOOGLE_CLOUD_PROJECT")
     if not proj:
-        raise SystemExit("BigQuery source needs a GCP project — set GOOGLE_CLOUD_PROJECT and "
-                         "application-default credentials (`gcloud auth application-default login`).")
+        raise driver.CredentialError("BigQuery source needs a GCP project — set GOOGLE_CLOUD_PROJECT "
+                                     "and application-default credentials "
+                                     "(`gcloud auth application-default login`).")
     try:
         from google.cloud import bigquery
     except ImportError as e:
-        raise SystemExit(f"BigQuery source needs `pip install google-cloud-bigquery` ({e})")
+        raise driver.CredentialError(f"BigQuery source needs `pip install google-cloud-bigquery` ({e})")
     return bigquery.Client(project=proj)
 
 
 def _rows(sql):
+    import driver
     try:
         return [dict(r) for r in _client().query(sql).result()]
-    except SystemExit:
+    except (SystemExit, driver.CredentialError):
         raise
     except Exception as e:
         raise SystemExit(f"BigQuery query failed: {str(e)[:160]}")

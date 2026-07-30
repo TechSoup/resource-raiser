@@ -91,19 +91,47 @@ def forward(name, n=12):
             "recipients": recips, "top": recips[0], "source": SOURCE}
 
 
+def _ein_label(c, ein, fallback):
+    """The recipient's own filed name for this EIN — the name attached to the most grant dollars in
+    Schedule I. Keys the label on the EIN so we show "Stanford University", not whichever similarly
+    named org (…Bookstore, …Hospital) the free-text resolver happened to pick."""
+    row = c.execute("SELECT recipient_name FROM grant_edges WHERE recipient_ein=? AND recipient_name<>'' "
+                    "GROUP BY recipient_name ORDER BY SUM(amount) DESC LIMIT 1", (ein,)).fetchone()
+    return row[0] if row else fallback
+
+
+def _dominant_recipient_ein(c, name):
+    """The EIN of the biggest recipient (by grant dollars) whose filed name matches `name`. The grant
+    data itself is the authoritative disambiguator: among all "STANFORD" recipients, the one drawing
+    the most money is the real Stanford — more reliable than the generic name resolver, which can
+    latch onto a tiny similarly-named org. Returns (ein, label) or (None, None) if no EIN'd match."""
+    row = c.execute(
+        "SELECT recipient_ein, recipient_name, SUM(amount) amt FROM grant_edges "
+        "WHERE recipient_name LIKE ? AND recipient_ein<>'' AND amount>0 "
+        "GROUP BY recipient_ein ORDER BY amt DESC LIMIT 1", (f"%{name.upper()}%",)).fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
 def reverse(name, n=12):
-    """Grants RECEIVED by `name` — its funders, biggest first. Prefers a recipient-EIN match
-    (clean, from Schedule I); falls back to a recipient-name match (needed for 990-PF)."""
+    """Grants RECEIVED by `name` — its funders, biggest first. Prefers a clean recipient-EIN match
+    (from Schedule I); falls back to a recipient-name match only when no EIN'd match exists (needed
+    for 990-PF, which carries no recipient EIN)."""
     ein, disp = _resolve(name)
     with _conn() as c:
-        if ein:
-            # EIN match (Schedule I) OR name match (990-PF carries no recipient EIN). Match the name
-            # against the RAW query, not the resolved name, so a wrong resolver pick can't misdirect it.
-            where = "(recipient_ein=? OR recipient_name LIKE ?)"
-            arg = (ein, f"%{name.upper()}%")
-            method = "EIN + name"
+        method, where, arg = "name", "recipient_name LIKE ?", (f"%{name.upper()}%",)
+        # Prefer the dominant EIN'd recipient from the grant data; fall back to the resolver's EIN.
+        dom_ein, dom_label = _dominant_recipient_ein(c, name)
+        use_ein = dom_ein or (ein if ein and c.execute(
+            "SELECT 1 FROM grant_edges WHERE recipient_ein=? AND amount>0 LIMIT 1", (ein,)).fetchone()
+            else None)
+        if use_ein:
+            # EIN alone — an exact join key, so it can't conflate "Stanford University" with
+            # "Stanford University Bookstore" the way a name LIKE would. Label from the EIN's own
+            # filed name, not the resolver's guess.
+            method, where, arg = "EIN", "recipient_ein=?", (use_ein,)
+            disp = dom_label or _ein_label(c, use_ein, disp)
         else:
-            where, arg, method, disp = "recipient_name LIKE ?", (f"%{name.upper()}%",), "name", name
+            disp = name  # no EIN'd match — show what the user asked
         rows = c.execute(
             f"SELECT funder_name, funder_ein, SUM(amount) amt, COUNT(*) k "
             f"FROM grant_edges WHERE {where} AND amount>0 GROUP BY funder_ein "

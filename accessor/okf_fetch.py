@@ -112,10 +112,13 @@ def main(argv):
         # keyless request to a "Missing Key" HTML page). Surface it clearly instead of a decode
         # traceback, so the harness fails loudly rather than treating it as a backtrack-able miss.
         low = body.lower()
-        hint = (" — this endpoint requires an API key; set it (e.g. CENSUS_API_KEY / DATA_GOV_API_KEY)"
-                if ("missing key" in low or "missing_key" in low or "api key" in low or "api_key" in low)
-                else "")
-        raise SystemExit(f"non-JSON response from {url[:120]}{hint}\n{body[:300]}")
+        if "missing key" in low or "missing_key" in low or "api key" in low or "api_key" in low:
+            # CREDENTIAL_ERROR: is a stable marker the driver classifies across the subprocess boundary
+            # so the harness stops the search immediately instead of backtracking (~2 min) over sources
+            # that can never answer without the key.
+            raise SystemExit(f"CREDENTIAL_ERROR: {url[:120]} requires an API key; set it "
+                             f"(e.g. CENSUS_API_KEY / DATA_GOV_API_KEY) and retry.\n{body[:200]}")
+        raise SystemExit(f"non-JSON response from {url[:120]}\n{body[:300]}")
     if dotted:
         try:
             result = extract(result, dotted)

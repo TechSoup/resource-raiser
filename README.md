@@ -168,10 +168,16 @@ directions and answers exploratory questions over the whole graph:
 The grant queries need a one-time data build (kept out of the repo — it's derived and large):
 
 ```bash
-python3 tools/grants_download.py   # streams ~12GB of IRS 990 e-file XML (2022-2024),
-                                   # parses out the grant edges -> data/990/grants.sqlite (~7M edges)
+python3 tools/grants_download.py   # streams the IRS 990 e-file XML for 2022-2024 (~50-70 GB over
+                                   # the wire, ~9-13 h) one monthly ZIP at a time, parsing out the
+                                   # grant edges -> data/990/grants.sqlite (~7M edges). Resumable.
 python3 tools/bmf_ntee.py          # adds the IRS BMF NTEE lookup, for the by-cause queries
 ```
+
+Peak *disk* is only a few hundred MB (one ZIP at a time), but it downloads the full 2022-2024 e-file
+corpus, so budget the bandwidth and hours above. It's resumable — re-run to continue where it stopped.
+**While the build is running the grant questions stay unavailable** (the SQLite writer holds the
+database, so the read-only query path sees "database is locked"); let it finish first.
 
 The rest of the engine works without this; only the grant-graph questions depend on it.
 
@@ -285,7 +291,8 @@ run.sh             build (first run) + serve
   cached; later runs are fast, and an interrupted build resumes. Rebuild with
   `python3 registry/index.py build`. To shrink it, park the SEC leaves (see [SETUP.md](SETUP.md)).
 - **Grant-graph questions return nothing** — run `python3 tools/grants_download.py` (and
-  `tools/bmf_ntee.py`) to build the edge table.
+  `tools/bmf_ntee.py`) to build the edge table (a long, ~50-70 GB / ~9-13 h one-time download;
+  grant questions stay unavailable, "database is locked", until it finishes).
 - **BigQuery sources dormant / population rankings refused** — set `GOOGLE_CLOUD_PROJECT` and run
   `gcloud auth application-default login`.
 - **Ports** — Agent Finder on `8088`, Web UI/API on `8099`. Stop with

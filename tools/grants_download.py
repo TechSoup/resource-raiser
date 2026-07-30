@@ -2,8 +2,12 @@
 """Stream the IRS 990 e-file ZIPs for 2022-2024 into the grant-edge table, one ZIP at a time.
 
 Disk-frugal: download one monthly ZIP, unzip to a temp dir, extract edges, delete both. Peak
-disk is ~one ZIP (a few hundred MB), never the whole ~12 GB corpus. Resumable — a ZIP already
-recorded in the done_files table is skipped, so a re-run continues where it stopped.
+disk is ~one ZIP (a few hundred MB), never the whole corpus — but it still streams the entire
+2022-2024 e-file set over the wire (~50-70 GB, ~9-13 h). Resumable — a ZIP already recorded in the
+done_files table is skipped, so a re-run continues where it stopped.
+
+NOTE: while this runs, the SQLite writer holds data/990/grants.sqlite, so the read-only grant query
+path sees "database is locked" — grant questions are unavailable until the build finishes.
 """
 import os, sys, urllib.request, tempfile
 import grants_etl as G

@@ -18,22 +18,41 @@ from core import Toolkit
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TK = Toolkit()
 
-# Live-progress channel. When a request is streaming (/ask_stream), _EMIT is set to a
-# writer that pushes each event to the browser; otherwise _say is a no-op. The server is
-# single-threaded, so one module-level callback is safe for the in-flight request.
+# Live-progress channel. When a request is streaming (/ask_stream), the handler installs a writer
+# that pushes each event to THAT browser; otherwise _say is a no-op.
+#
+# PER-THREAD, not module-global. The server is ThreadingHTTPServer (see serve()), so requests run
+# concurrently: with one global writer a second request overwrote the first's channel (its browser
+# went silent), and worse, whichever request finished first cleared the global and silenced any
+# request still running — which hung the UI (the client's reader loop only ends on a clean close)
+# and cascaded, one stuck request killing every retry. Thread-local gives each request its own.
 import threading
-_EMIT = None
+_EMIT = threading.local()
 _EMIT_LOCK = threading.Lock()          # parallel executors emit from worker threads; serialize the writes
 
 
 def _say(kind, **data):
-    cb = _EMIT
+    cb = getattr(_EMIT, "cb", None)
     if cb:
         try:
             with _EMIT_LOCK:
                 cb({"kind": kind, **data})
         except Exception:
             pass
+
+
+def _with_emitter(fn):
+    """Bind the CALLING thread's stream writer onto a callable run on a worker thread. The fan-out
+    helpers hand work to a ThreadPoolExecutor, and a fresh pool thread has no thread-local writer —
+    so without this every event from a parallel stage is dropped. Always assign (even None): pool
+    threads are reused, so a stale writer would otherwise publish into an already-closed socket."""
+    cb = getattr(_EMIT, "cb", None)
+
+    def wrapped(*a, **k):
+        _EMIT.cb = cb
+        return fn(*a, **k)
+
+    return wrapped
 
 
 import glob as _glob
@@ -1120,7 +1139,7 @@ def _run_ambiguous(question, ctx):
     # for a long time — the deadline stops one slow interpretation from blocking the rest.
     from concurrent.futures import ThreadPoolExecutor, as_completed
     ex = ThreadPoolExecutor(max_workers=min(4, len(interps)))
-    futs = {ex.submit(one, i): i for i in interps}
+    futs = {ex.submit(_with_emitter(one), i): i for i in interps}
     answers, done = [], set()
     try:
         for fut in as_completed(futs, timeout=55):
@@ -1294,7 +1313,7 @@ def _run_fanout(question, ctx, shape):
 
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=min(6, len(yrs))) as ex:
-            series = list(ex.map(one_year, yrs))               # ex.map preserves input order
+            series = list(ex.map(_with_emitter(one_year), yrs))  # ex.map preserves input order
         for s in series:
             _say("status", icon="✅" if s.get("value") is not None else "↩️",
                  msg=f"{s['label']}: {s.get('value') if s.get('value') is not None else 'no data'}")
@@ -1331,7 +1350,7 @@ def _run_fanout(question, ctx, shape):
 
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=min(6, len(subs))) as ex:
-        series = list(ex.map(one_sub, subs))                   # preserves order
+        series = list(ex.map(_with_emitter(one_sub), subs))    # preserves order
     for s in series:
         _say("status", icon="✅" if s.get("value") is not None else "↩️",
              msg=f"{s['label']}: {s.get('value') if s.get('value') is not None else 'no data'}")
@@ -1597,19 +1616,27 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    var cursor=document.createElement('div');cursor.className='ln';cursor.innerHTML='<span class="cur">▋</span>';log.appendChild(cursor);
    function push(html){var d=document.createElement('div');d.className='ln';d.innerHTML=html;log.insertBefore(d,cursor);log.scrollTop=log.scrollHeight;return d;}
    function status(icon,txt,cls){return push('<span class="ic">'+icon+'</span><span class="txt '+(cls||'')+'">'+txt+'</span>');}
-   function fin(){if(cursor)cursor.parentNode&&cursor.remove();b.disabled=false;}
+   var stalled=false,wd=null;
+   function fin(){if(cursor)cursor.parentNode&&cursor.remove();b.disabled=false;if(wd)clearTimeout(wd);}
+   // Watchdog: a stream that stops arriving mid-flight would otherwise leave the spinner up forever
+   // (the reader loop only ends on a clean close). Say so instead of hanging silently.
+   function beat(){if(wd)clearTimeout(wd);wd=setTimeout(function(){stalled=true;
+     status('⚠️','The server stopped sending updates. It may still be working — check the terminal, or ask again.','back');fin();},120000);}
+   beat();
    fetch('/ask_stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:question})})
     .then(function(resp){
       var reader=resp.body.getReader(),dec=new TextDecoder(),buf='';
       function pump(){return reader.read().then(function(res){
+        if(stalled)return;
         if(res.done){fin();return;}
+        beat();
         buf+=dec.decode(res.value,{stream:true});
         var parts=buf.split('\n\n');buf=parts.pop();
         parts.forEach(function(p){p=p.replace(/^data: /,'').trim();if(!p)return;var ev;try{ev=JSON.parse(p)}catch(_){return;}handle(ev);});
         return pump();
       });}
       return pump();
-    }).catch(function(err){status('⚠️',esc(String(err)),'back');fin();});
+    }).catch(function(err){if(!stalled){status('⚠️',esc(String(err)),'back');fin();}});
    function handle(ev){
      if(ev.kind==='status'){status(ev.icon||'•',esc(ev.msg),ev.icon==='↩️'?'back':'');}
      else if(ev.kind==='plan'){
@@ -1786,6 +1813,8 @@ def serve(port):
             if path == "/ask":
                 try:
                     self._json(200, run(q))
+                except driver.CredentialError as e:
+                    self._json(200, {"question": q, "answer": None, "error": f"Missing credential: {e}"})
                 except SystemExit as e:
                     self._json(200, {"question": q, "answer": None, "error": str(e)})
                 except Exception as e:                    # rate-limit / timeout / anything: return JSON,
@@ -1793,7 +1822,6 @@ def serve(port):
                                      "error": f"{type(e).__name__}: {e}"})
                 return
             # Streaming play-by-play: emit each stage of the plan→find→resolve→fetch→check loop live.
-            global _EMIT
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -1811,15 +1839,17 @@ def serve(port):
                 except Exception:
                     pass
 
-            _EMIT = emit
+            _EMIT.cb = emit                # this thread only — never other in-flight requests
             try:
                 emit({"kind": "answer", **run(q)})
+            except driver.CredentialError as e:
+                emit({"kind": "error", "question": q, "error": f"Missing credential: {e}"})
             except SystemExit as e:
                 emit({"kind": "error", "question": q, "error": str(e)})
             except Exception as e:
                 emit({"kind": "error", "question": q, "error": str(e)})
             finally:
-                _EMIT = None
+                _EMIT.cb = None
                 try:
                     self.wfile.write(b"data: {\"kind\":\"done\"}\n\n")
                     self.wfile.flush()
