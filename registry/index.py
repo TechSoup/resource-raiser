@@ -6,9 +6,11 @@
 `search` — embed an NL query and return the top-k matching entries (ARD-style:
            identifier, title, score, plus the bits the accessor needs).
 
-Semantic matching uses a small local static-embedding model (model2vec), so the
-registry needs no API key. The /search shape mirrors ARD so this is swappable
-for a full registry (e.g. AgentFinder) later.
+Semantic matching uses the configured embedding provider (Azure OpenAI / OpenAI / Gemini,
+or any OpenAI-compatible local host like Ollama via llm.py), so building the index needs an
+embedding key. The /search shape mirrors ARD so this is swappable for a full registry later.
+Set ARD_RERANK=0 to skip the second-stage LLM re-rank (much faster on slow/local models; the
+embedding prefilter alone is usually enough).
 """
 import os, sys, glob, json, hashlib
 import numpy as np
@@ -22,7 +24,7 @@ CACHE_VEC = os.path.join(os.path.dirname(__file__), "vectors.npy")
 CACHE_META = os.path.join(os.path.dirname(__file__), "meta.json")
 
 
-def embed(texts, batch=256):
+def embed(texts, batch=96):
     return np.asarray(llm.embed(texts, batch), dtype=np.float32)
 
 
@@ -47,7 +49,7 @@ SEED = ("revenue", "income", "asset", "liabilit", "equity", "profit", "expense",
         "poverty", "population", "insurance", "rent", "employ", "diabetes")  # hard-case anchors for sampling
 
 
-def build(batch=256, limit=None):
+def build(batch=96, limit=None):
     """Embed every OKF leaf and cache vectors + metadata, writing incrementally so an
     interrupted build can resume. Each doc carries a `sig` (hash of its embedded text);
     on restart we reuse the longest saved prefix whose docs still match, and embed only
@@ -56,8 +58,9 @@ def build(batch=256, limit=None):
 
     limit=N builds a smaller test index of N leaves — every leaf whose title hits a SEED
     anchor (so the hard disambiguation cases are kept) plus a stride sample of the rest."""
-    docs, texts = [], []
-    for path in sorted(glob.glob(os.path.join(SOURCES, "**", "*.md"), recursive=True)):
+    emodel = llm.embed_model()                         # sig includes the model, so switching embedding
+    docs, texts = [], []                               # providers (e.g. Gemini 3072-dim -> Ollama 768-dim)
+    for path in sorted(glob.glob(os.path.join(SOURCES, "**", "*.md"), recursive=True)):  # invalidates the cache
         fm = frontmatter(path)
         if not fm or not fm.get("representativeQueries"):
             continue                                   # skip _access docs / non-entries
@@ -69,7 +72,7 @@ def build(batch=256, limit=None):
             "concept": fm.get("concept"),
             "source": fm.get("source"),
             "queries": (fm.get("representativeQueries") or [])[:6],
-            "sig": hashlib.md5(text.encode("utf-8")).hexdigest()[:12],
+            "sig": hashlib.md5((text + "|" + emodel).encode("utf-8")).hexdigest()[:12],
         })
         texts.append(text)
 
@@ -108,14 +111,19 @@ def build(batch=256, limit=None):
         else:
             vecs[i] = hit
     print(f"reusing {len(docs) - len(todo)} cached, embedding {len(todo)} new/changed of {len(docs)}…")
+    def _persist(subset):
+        done = [(d, v) for d, v in zip(docs, vecs) if v is not None] if subset else list(zip(docs, vecs))
+        np.save(CACHE_VEC, np.asarray([v for _, v in done], dtype=np.float32))
+        json.dump([d for d, _ in done], open(CACHE_META, "w"))
+
     for j in range(0, len(todo), batch):
         idx = todo[j:j + batch]
         embs = normed(embed([texts[i] for i in idx]))
         for k, i in enumerate(idx):
             vecs[i] = embs[k]
         print(f"  embedded {min(j + batch, len(todo))}/{len(todo)}")
-    np.save(CACHE_VEC, np.asarray(vecs, dtype=np.float32))
-    json.dump(docs, open(CACHE_META, "w"))
+        _persist(subset=True)                          # checkpoint each batch: an interrupt resumes here
+    _persist(subset=False)
     print(f"indexed {len(docs)} entries -> {CACHE_VEC}")
 
 
@@ -177,6 +185,8 @@ def search(query, k=5, prefilter=60, sources=None, rerank=True):
     """Two-stage retrieval: embedding cosine prefilter (optionally scoped to given
     source directories — pass 2 of the entity->source, attribute->field design),
     then small-LM re-rank of the attribute against the fields in scope."""
+    if os.getenv("ARD_RERANK", "1").lower() in ("0", "false", "no"):
+        rerank = False                                 # embedding-only (fast on slow/local models)
     vecs, meta = _store()
     q = normed(embed([query]))[0]
     scores = vecs @ q

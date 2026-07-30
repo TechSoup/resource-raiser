@@ -2,6 +2,8 @@
 # Copy this file to set_keys.sh (which is gitignored) and fill in ONE provider's values.
 # run.sh sources set_keys.sh automatically; or export these some other way.
 #
+# Per-provider setup, model ids, and gotchas (Gemini free-tier limits, local Ollama, etc.): see SETUP.md
+#
 # The model provider is auto-detected from whichever key you set. To force it, set:
 #   export LLM_PROVIDER=azure   # or: openai | gemini
 
@@ -24,10 +26,23 @@ export EMBED_DEPLOYMENT="your-embedding-deployment-name"    # a text-embedding-3
 
 # ============================================================================
 # Option C — Gemini  (via its OpenAI-compatible endpoint)
+#   NOTE: the FREE tier is ~20 requests/day — about 3-4 questions. Enable billing to explore.
+#   Model ids drift; if one 404s/429s, list yours (see SETUP.md). embed model is gemini-embedding-001.
 # ============================================================================
+# export LLM_PROVIDER=gemini
 # export GEMINI_API_KEY="..."                    # or GOOGLE_API_KEY
 # export CHAT_MODEL="gemini-2.0-flash"           # optional (this is the default)
-# export EMBED_MODEL="text-embedding-004"        # optional (this is the default)
+# export EMBED_MODEL="gemini-embedding-001"      # optional (this is the default)
+
+# ============================================================================
+# Option D — Local models via Ollama (or any OpenAI-compatible server) — see SETUP.md
+# ============================================================================
+# export LLM_PROVIDER=openai
+# export OPENAI_API_KEY="ollama"                 # any non-empty string
+# export OPENAI_BASE_URL="http://localhost:11434/v1"
+# export CHAT_MODEL="llama3.1"
+# export EMBED_MODEL="nomic-embed-text"
+# export ARD_RERANK=0                            # IMPORTANT for local: skip the slow 2nd-stage re-rank
 
 # ============================================================================
 # Optional, for any provider

@@ -8,7 +8,7 @@ Implements the ARD discovery contract over HTTP:
 
 The store is the embedded index built by registry/index.py (SEC + Treasury
 tables). Run with the Azure keys loaded:
-  set -a; source /Users/rvguha/code/test/AskAgent/set_keys.sh; set +a
+  set -a; source ./set_keys.sh; set +a
   python3 agent_finder.py            # serves on http://127.0.0.1:8088
 """
 import json, os

@@ -27,7 +27,8 @@ data/
 cache/
 
 # --- secrets (API keys live OUTSIDE the repo; never commit) --------------------------
-set_keys.sh
+set_keys.sh*
+set_keys*.local
 .env
 *.key
 

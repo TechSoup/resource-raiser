@@ -40,11 +40,19 @@ sleep 1
 nohup python3 agent_finder.py    > /tmp/ard_agent_finder.log 2>&1 &
 nohup python3 harness.py --serve > /tmp/ard_harness.log      2>&1 &
 
+up=""
 for i in $(seq 1 30); do
-  curl -s -m2 http://127.0.0.1:8088/ >/dev/null 2>&1 && \
-  curl -s -m2 http://127.0.0.1:8099/ >/dev/null 2>&1 && break
+  if curl -s -m2 http://127.0.0.1:8088/ >/dev/null 2>&1 && curl -s -m2 http://127.0.0.1:8099/ >/dev/null 2>&1; then
+    up=1; break
+  fi
   sleep 1
 done
+if [ -z "$up" ]; then
+  echo "ERROR: a service did not come up. Most often this is missing LLM credentials." >&2
+  echo "--- last lines of /tmp/ard_harness.log ---" >&2; tail -n 15 /tmp/ard_harness.log >&2
+  echo "--- last lines of /tmp/ard_agent_finder.log ---" >&2; tail -n 8 /tmp/ard_agent_finder.log >&2
+  exit 1
+fi
 
 echo "Agent Finder  : http://127.0.0.1:8088/  (POST /search)"
 echo "Harness/Web UI: http://127.0.0.1:8099/  (web UI + POST /ask)"

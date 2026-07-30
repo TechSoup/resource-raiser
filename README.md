@@ -43,12 +43,14 @@ in both directions.
 git clone https://github.com/TechSoup/resource-raiser.git
 cd resource-raiser
 
-pip install numpy pyyaml openai            # core deps
-pip install google-cloud-bigquery          # optional: BigQuery population sources
+pip install -r requirements.txt            # numpy, pyyaml, openai (+ optional google-cloud-bigquery)
 
-cp set_keys.example.sh set_keys.sh         # then fill in ONE provider's keys (see below)
+cp set_keys.example.sh set_keys.sh         # then fill in ONE provider's keys — see SETUP.md
 ./run.sh
 ```
+
+Full per-provider setup — **OpenAI, Gemini, Azure, or local Ollama**, with model ids and the
+free-tier/local gotchas — is in **[SETUP.md](SETUP.md)**.
 
 The **first `./run.sh` takes ~10 minutes** (see [below](#what-the-first-run-builds)); every run
 after that starts in a few seconds. When it's up, open **http://127.0.0.1:8099/** and try:
@@ -271,9 +273,17 @@ run.sh             build (first run) + serve
 ## Troubleshooting
 
 - **"No LLM credentials set"** — copy `set_keys.example.sh` to `set_keys.sh` and fill in one
-  provider, or export the keys yourself.
+  provider, or export the keys yourself. See [SETUP.md](SETUP.md).
+- **`CERTIFICATE_VERIFY_FAILED` on first run (macOS)** — a python.org framework build ships an empty
+  OpenSSL trust store. Run the installer's script once: `"/Applications/Python 3.xx/Install
+  Certificates.command"`. (Homebrew/pyenv Pythons are unaffected.) See [SETUP.md](SETUP.md).
+- **Queries hang / time out on a local model** — the second-stage LLM re-rank is slow on local
+  models. Set `ARD_RERANK=0` (embedding-only discovery is fast and accurate). See [SETUP.md](SETUP.md).
+- **Gemini stops after a few questions** — the free tier is ~20 requests/day (~3-4 questions).
+  Enable billing. See [SETUP.md](SETUP.md).
 - **First run is slow** — expected (~10 min): it's embedding ~8,900 table descriptors. It's
-  cached; later runs are fast. Rebuild with `python3 registry/index.py build`.
+  cached; later runs are fast, and an interrupted build resumes. Rebuild with
+  `python3 registry/index.py build`. To shrink it, park the SEC leaves (see [SETUP.md](SETUP.md)).
 - **Grant-graph questions return nothing** — run `python3 tools/grants_download.py` (and
   `tools/bmf_ntee.py`) to build the edge table.
 - **BigQuery sources dormant / population rankings refused** — set `GOOGLE_CLOUD_PROJECT` and run

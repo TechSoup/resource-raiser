@@ -7,7 +7,7 @@
     -> synthesize a cited answer
 
 Run as a CLI or as a server the connectors skill calls:
-  set -a; source /Users/rvguha/code/test/AskAgent/set_keys.sh; set +a
+  set -a; source ./set_keys.sh; set +a
   python3 harness.py "How much did Apple spend on R&D in 2023?"     # one-shot (prints JSON)
   python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
 """
@@ -1777,6 +1777,9 @@ def serve(port):
                     self._json(200, run(q))
                 except SystemExit as e:
                     self._json(200, {"question": q, "answer": None, "error": str(e)})
+                except Exception as e:                    # rate-limit / timeout / anything: return JSON,
+                    self._json(200, {"question": q, "answer": None,   # never close the socket silently
+                                     "error": f"{type(e).__name__}: {e}"})
                 return
             # Streaming play-by-play: emit each stage of the plan→find→resolve→fetch→check loop live.
             global _EMIT
@@ -1820,8 +1823,9 @@ def serve(port):
 
 
 def main(argv):
-    if not os.getenv("AZURE_OPENAI_API_KEY"):
-        sys.exit("Azure keys not set: set -a; source /Users/rvguha/code/test/AskAgent/set_keys.sh; set +a")
+    import llm
+    if not llm.have_credentials():
+        sys.exit(llm._NO_CREDS)
     if argv and argv[0] == "--serve":
         port = int(argv[argv.index("--port") + 1]) if "--port" in argv else 8099
         return serve(port)

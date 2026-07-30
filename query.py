@@ -7,7 +7,7 @@
 
 Usage:
   # first, load the Azure keys:
-  set -a; source /Users/rvguha/code/test/AskAgent/set_keys.sh; set +a
+  set -a; source ./set_keys.sh; set +a
 
   python3 query.py "How much did Apple spend on R&D in 2023?"
   python3 query.py            # interactive: type questions, Ctrl-D to quit
@@ -76,8 +76,9 @@ def answer(question, tk):
 
 
 def main(argv):
-    if not os.getenv("AZURE_OPENAI_API_KEY"):
-        sys.exit("Azure keys not set. Run:\n  set -a; source /Users/rvguha/code/test/AskAgent/set_keys.sh; set +a")
+    import llm
+    if not llm.have_credentials():
+        sys.exit(llm._NO_CREDS)
     tk = Toolkit()
     if argv:
         answer(" ".join(argv), tk)

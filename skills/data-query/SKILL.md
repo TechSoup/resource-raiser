@@ -15,10 +15,10 @@ a fetch; verify it actually answers what was asked, and if it doesn't, try the n
 
 ## Setup
 
-- Tools live in one script: `python3 /Users/rvguha/code/ard-data-demo/ard.py <cmd> ...` (every command
+- Tools live in one script: `python3 ./ard.py <cmd> ...` (every command
   prints JSON; on failure it prints `{"error": ...}` and exits non-zero — read the error and backtrack).
 - The Agent Finder service must be running (`http://127.0.0.1:8088`). If `find` reports it's
-  unreachable, start it: `python3 /Users/rvguha/code/ard-data-demo/agent_finder.py` (needs the Azure
+  unreachable, start it: `python3 ./agent_finder.py` (needs the Azure
   keys loaded — that service is the only component that uses an LLM).
 
 ## Meta requests (answer directly — do NOT run the query loop)

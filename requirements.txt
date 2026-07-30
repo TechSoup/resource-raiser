@@ -1,0 +1,6 @@
+numpy>=1.24
+pyyaml>=6.0
+openai>=1.40          # the one SDK for Azure OpenAI, OpenAI, Gemini (OpenAI-compat), and local (Ollama)
+
+# Optional — only for the BigQuery population sources (sec-bq, irs-990-bq, census-acs-bq):
+google-cloud-bigquery>=3.0
