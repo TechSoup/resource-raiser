@@ -24,6 +24,18 @@ access:
         entity_kind: fips
         entity_field: locationid
         rows_per_unit: {county: 1}
+# Declarative fetch spec — interpreted by the harness's generic _s_rest (no CDC-specific code).
+fetch:
+  op: by_measure
+  params: {measureid: ~measureid, place: $key}   # ~measureid pinned in the leaf; $key = resolved place
+  rows: objects                                  # response is a list of objects
+  pick: "first:data_value"                       # first row that actually has a value
+  fields:
+    place: col:locationname
+    measure: "title~ — CDC"
+    value: col:data_value
+    unit: col:data_value_unit
+  source: CDC PLACES (did:web:cdc.gov)
 entityType: "a US county, city, or place, for community health measures (e.g. Los Angeles, Cook County)"
 ---
 

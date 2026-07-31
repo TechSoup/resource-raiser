@@ -18,6 +18,19 @@ access:
         entity_kind: fips
         can_aggregate_to: [county, state, place]
         rows_per_unit: {county: 1, state: 1}
+# Declarative fetch spec — interpreted by the harness's generic _s_rest (no census-specific code).
+# The leaf supplies `get`/`variable`/`key`; this says how to call, read, and shape the answer.
+fetch:
+  op: acs
+  params: {geo: $geo}          # $geo = the entity's Census geography (native place names resolved)
+  rows: matrix                 # response is an array-of-arrays: header row + one data row
+  quirk: acs_pe                # ACS percent-column (E vs PE) + jam-sentinel handling
+  fields:
+    place: cell:1,0            # data row, first column
+    value: cell:1,1            # data row, second column
+    variable: leaf:get,variable
+    metric: "title~ — US Census"
+  source: US Census ACS (did:web:census.gov)
 entityType: "a US geographic area — a state, county, city, or place (e.g. California, Los Angeles County)"
 ---
 

@@ -643,58 +643,151 @@ def _s_fema(f):
     return fema.fetch(f.key or f.mention)
 
 
-def _s_variable(f):
-    """US Census ACS — one variable at a place, with the Data Profile percent-column quirk handled."""
-    geo = _resolve_geo(f.mention) if f.key == "__native__" else f.key
-    if not geo:
-        raise Backtrack("no geo")
-    def _jam(x):
+# --- generic point-lookup REST fetch, driven entirely by the source's OKF `fetch:` descriptor -------
+# Census, CDC and Treasury are not special-cased: each declares a `fetch:` block in its _access.md
+# (op, how to reach the row, how to map response cells/fields to the answer record), and _s_rest
+# interprets it. Adding another point-lookup REST source is a new _access.md `fetch:` block — no code.
+# (SEC/nonprofit/Wikidata/awards keep handlers because they RESOLVE ids and AGGREGATE, not merely
+# template-fill — that algorithmic work is the "smart accessor", not something config can express.)
+_FETCH_SPEC_CACHE = {}
+
+
+def _fetch_spec(f):
+    """The source's declarative fetch spec: the leaf's own `fetch:` if present, else the `fetch:` block
+    of the _access.md it links to (cached — the block is shared by every leaf of the source)."""
+    if f.fm.get("fetch"):
+        return f.fm["fetch"]
+    src = f.fm.get("source")
+    if not src:
+        return None
+    path = os.path.normpath(os.path.join(os.path.dirname(f.ident), src))
+    if path not in _FETCH_SPEC_CACHE:
         try:
-            return float(x) <= -100000000                # ACS jam sentinels are large negatives
+            _FETCH_SPEC_CACHE[path] = driver.frontmatter(path).get("fetch")
+        except Exception:
+            _FETCH_SPEC_CACHE[path] = None
+    return _FETCH_SPEC_CACHE[path]
+
+
+def _bind_param(b, f):
+    """Resolve an accessor-param binding. `$geo` = the entity's Census geography (native names resolved),
+    `$key` = the resolved entity key, `~field` = a value pinned in the leaf frontmatter, else literal."""
+    if b == "$geo":
+        geo = _resolve_geo(f.mention) if f.key == "__native__" else f.key
+        if not geo:
+            raise Backtrack("no geo")
+        return geo
+    if b == "$key":
+        if not f.key:
+            raise Backtrack("no key")
+        return f.key
+    if isinstance(b, str) and b.startswith("~"):
+        return f.fm.get(b[1:], "")
+    return b
+
+
+def _rows_of_resp(resp, rows_spec):
+    if rows_spec in ("matrix", "objects", None):
+        return resp
+    obj = resp                                               # a dotted path into the response, e.g. "data"
+    for part in str(rows_spec).split("."):
+        obj = obj[int(part)] if part.lstrip("-").isdigit() else (obj or {}).get(part, [])
+    return obj
+
+
+def _pick_row(rows, pick):
+    if not isinstance(rows, list):
+        return None
+    if pick == "index0":
+        return rows[0] if rows else None
+    if isinstance(pick, str) and pick.startswith("first:"):  # first object with a truthy field
+        fld = pick.split(":", 1)[1]
+        return next((r for r in rows if isinstance(r, dict) and r.get(fld)), None)
+    return None
+
+
+def _bind_field(b, f, resp, row):
+    """Resolve one output-record field binding to a value (None => omit the field). `cell:r,c` reads a
+    matrix response, `col:name` a picked object field, `col:~leaf` a field NAMED by a leaf value,
+    `leaf:a,b` the first present leaf field, `title`/`title~suffix` the leaf title, `filterval` the
+    Treasury filter's dimension value, `lit:x` a literal."""
+    if not isinstance(b, str):
+        return b
+    if b.startswith("lit:"):
+        return b[4:]
+    if b == "title":
+        return f.fm.get("title")
+    if b.startswith("title~"):
+        return (f.fm.get("title") or "").split(b[6:])[0]
+    if b.startswith("cell:"):
+        r, c = (int(x) for x in b[5:].split(","))
+        return resp[r][c] if isinstance(resp, list) and len(resp) > r and len(resp[r]) > c else None
+    if b.startswith("col:~"):
+        return (row or {}).get(f.fm.get(b[5:]))
+    if b.startswith("col:"):
+        return (row or {}).get(b[4:])
+    if b.startswith("leaf:"):
+        return next((f.fm[n] for n in b[5:].split(",") if f.fm.get(n)), None)
+    if b == "filterval":
+        flt = f.fm.get("filter") or ""
+        return flt.split(":eq:")[-1] if ":eq:" in flt else None
+    return b
+
+
+def _quirk_acs_pe(f, resp, rec):
+    """ACS Data Profile quirk: for a PERCENT row the value lives in the *PE* column while the *E* column
+    is -888888888 ("not applicable"). Read the percent sibling when the estimate is that sentinel — else
+    a poverty/unemployment RATE looks like missing data and the search backtracks forever over a value
+    that is simply in the other column. Also enforce the jam-sentinel = missing rule."""
+    if not (isinstance(resp, list) and len(resp) >= 2):
+        raise Backtrack("no census row")
+    def jam(x):
+        try:
+            return float(x) <= -100000000                    # ACS jam sentinels are large negatives
         except (TypeError, ValueError):
             return False
-    arr = driver.accessor(f.ident, "acs", geo=geo)
-    if not isinstance(arr, list) or len(arr) < 2:
-        raise Backtrack("no census row")
-    val, var = arr[1][1], (f.fm.get("get") or f.fm["variable"])
-    # ACS Data Profile quirk: for a PERCENT row the value lives in the *PE* column and the *E* column
-    # is -888888888 ("not applicable"). If the picked estimate is that sentinel, read the percent
-    # sibling — otherwise a poverty/unemployment RATE looks like missing data and the search backtracks
-    # forever over a value that is simply in the other column.
+    val, var = rec.get("value"), rec.get("variable")
     if str(val).strip() == "-888888888" and var.endswith("E") and not var.endswith("PE"):
         pe = var[:-1] + "PE"
+        geo = _resolve_geo(f.mention) if f.key == "__native__" else f.key
         a2 = driver.accessor(f.ident, "acs", geo=geo, get=pe)
-        if isinstance(a2, list) and len(a2) >= 2 and not _jam(a2[1][1]):
+        if isinstance(a2, list) and len(a2) >= 2 and not jam(a2[1][1]):
             val, var = a2[1][1], pe
-    if _jam(val):
+    if jam(val):
         raise Backtrack("jam null")
-    return {"place": arr[1][0], "metric": f.fm["title"].split(" — US Census")[0],
-            "variable": var, "value": val, "source": "US Census ACS (did:web:census.gov)"}
+    rec["value"], rec["variable"] = val, var
+    return rec
 
 
-def _s_measureid(f):
-    """CDC PLACES — one local health measure at a place."""
-    arr = driver.accessor(f.ident, "by_measure", measureid=f.fm["measureid"], place=f.key)
-    row = next((r for r in arr if r.get("data_value")), None) if isinstance(arr, list) else None
-    if not row:
-        raise Backtrack("no cdc row")
-    return {"place": row.get("locationname"), "measure": f.fm["title"].split(" — CDC")[0],
-            "value": row.get("data_value"), "unit": row.get("data_value_unit"),
-            "source": "CDC PLACES (did:web:cdc.gov)"}
+_QUIRKS = {"acs_pe": _quirk_acs_pe}
 
 
-def _s_tfield(f):
-    """US Treasury FiscalData — the latest value of a field, optionally within a filtered series."""
-    q = f"fields={f.fm['tfield']},record_date&sort=-record_date&page[size]=1"
-    if f.fm.get("filter"):
-        q += f"&filter={f.fm['filter']}"
-    rows = (driver.accessor(f.ident, "get", query=q) or {}).get("data", [])
-    if not rows:
-        raise Backtrack("no treasury data")
-    rec = {"metric": f.fm["title"], "value": rows[0].get(f.fm["tfield"]),
-           "as_of": rows[0].get("record_date"), "source": "US Treasury FiscalData (did:web:treasury.gov)"}
-    if f.fm.get("filter") and ":eq:" in f.fm["filter"]:
-        rec["series"] = f.fm["filter"].split(":eq:")[-1]     # the dimension value, e.g. "Euro Zone-Euro"
+def _s_rest(f):
+    """Execute a source's declarative `fetch:` spec — the ONE handler for every point-lookup REST
+    source (census, CDC, treasury, and any future one). No source-specific code lives here."""
+    spec = _fetch_spec(f)
+    if not spec:
+        raise Backtrack("no fetch spec for this source")
+    params = {k: _bind_param(v, f) for k, v in (spec.get("params") or {}).items()}
+    if spec.get("query"):                                    # build a query-string param (Treasury)
+        q = re.sub(r"~(\w+)", lambda m: str(f.fm.get(m.group(1), "")), spec["query"])
+        ff = spec.get("filter_field")
+        if ff and f.fm.get(ff):
+            q += f"&filter={f.fm[ff]}"
+        params["query"] = q
+    resp = driver.accessor(f.ident, spec.get("op", "get"), **params)
+    rows = _rows_of_resp(resp, spec.get("rows"))
+    row = _pick_row(rows, spec["pick"]) if spec.get("pick") else None
+    if spec.get("pick") and row is None:
+        raise Backtrack("no matching row")
+    rec = {}
+    for outkey, b in (spec.get("fields") or {}).items():
+        v = _bind_field(b, f, resp, row)
+        if v is not None:
+            rec[outkey] = v
+    if spec.get("quirk"):
+        rec = _QUIRKS[spec["quirk"]](f, resp, rec)
+    rec["source"] = spec.get("source")
     return rec
 
 
@@ -752,11 +845,13 @@ def _s_search(f):
 
 
 # The dispatch table: OKF marker key -> strategy. First marker the frontmatter declares wins, so the
-# order here is only a tie-break (a leaf declares exactly one). To add a shape, append one pair.
+# order here is only a tie-break (a leaf declares exactly one). To add a shape, append one pair — or,
+# for a point-lookup REST source, add no code at all: give it a `fetch:` block and one of the markers
+# routed to the generic _s_rest (variable/measureid/tfield are just its routing tags today).
 _STRATEGIES = [
     ("concept", _s_concept), ("classification", _s_classification), ("field", _s_field),
     ("bmf", _s_bmf), ("profile", _s_profile), ("scorecard", _s_scorecard), ("fema", _s_fema),
-    ("variable", _s_variable), ("measureid", _s_measureid), ("tfield", _s_tfield), ("search", _s_search),
+    ("variable", _s_rest), ("measureid", _s_rest), ("tfield", _s_rest), ("search", _s_search),
 ]
 
 

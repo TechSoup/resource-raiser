@@ -16,6 +16,20 @@ access:
       capability:
         page: {complete: true}
         population: {complete: true}
+# Declarative fetch spec — interpreted by the harness's generic _s_rest (no treasury-specific code).
+# The leaf supplies `tfield` (the value column) and optional `filter` (a series, e.g. a currency).
+fetch:
+  op: get
+  query: "fields=~tfield,record_date&sort=-record_date&page[size]=1"
+  filter_field: filter         # if the leaf pins `filter`, append it as &filter=<value>
+  rows: data                   # response is {data: [ ...objects... ]}
+  pick: index0                 # newest record (sorted desc, page size 1)
+  fields:
+    metric: title
+    value: col:~tfield         # the object field NAMED by the leaf's tfield
+    as_of: col:record_date
+    series: filterval          # the filter's dimension value (e.g. "Euro Zone-Euro"), if any
+  source: US Treasury FiscalData (did:web:treasury.gov)
 entityType: "the US federal government / national public finances (the whole country's fiscal data)"
 ---
 
