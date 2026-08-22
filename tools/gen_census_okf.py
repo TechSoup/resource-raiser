@@ -58,8 +58,18 @@ def main():
 
     import sys
     sys.path.insert(0, os.path.dirname(__file__))
-    import repr_queries
+    import repr_queries, descriptions
     byc = dict(selected)
+
+    # The formulaic one-liner below ("ACS variable DP03_0128E: concept (label)") says nothing about
+    # what the variable measures or which geographies it is reported for, so near-identical ACS
+    # labels are indistinguishable at discovery. Expand each into a full description.
+    scope = descriptions.scope_for("census")
+    detail = descriptions.for_items(
+        [(f"census:{c}", clean_label(v["label"]),
+          f"ACS 5-year Data Profile variable {c}: {v.get('concept')} ({clean_label(v['label'])})")
+         for c, v in selected],
+        "US Census ACS Data Profile variable", scope)
 
     def write_leaf(code, queries):                            # called per variable as its queries land
         v = byc[code]
@@ -67,7 +77,8 @@ def main():
         fm = {
             "type": "Census Variable",
             "title": f"{clean} — US Census ACS",
-            "description": f"ACS 5-year Data Profile variable {code}: {v.get('concept')} ({clean}).",
+            "description": (detail.get(f"census:{code}")
+                            or f"ACS 5-year Data Profile variable {code}: {v.get('concept')} ({clean})."),
             "tags": ["census", "acs", "demographics", "community", "needs-assessment"],
             "source": "./_access.md",
             "get": f"NAME,{code}",

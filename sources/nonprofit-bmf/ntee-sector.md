@@ -1,7 +1,12 @@
 ---
 type: Nonprofit BMF Fact
 title: NTEE Sector / Classification — IRS Business Master File (Nonprofit)
-description: The NTEE mission sector a US nonprofit works in (e.g. Human Services, Education, Health Care), decoded from its IRS NTEE code.
+description: This measure categorizes the NTEE mission sector in which a US nonprofit
+  operates, such as Human Services, Education, or Health Care, based on the IRS NTEE
+  code. It specifically pertains to the mission classification of nonprofits, distinguishing
+  it from financial metrics or compliance statuses. This measure does not provide
+  information on the organization's operational effectiveness or financial health,
+  focusing solely on its mission sector. The reporting is done per organization.
 tags:
 - nonprofit
 - irs

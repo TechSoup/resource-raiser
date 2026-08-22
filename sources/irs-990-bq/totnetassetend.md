@@ -1,8 +1,12 @@
 ---
 type: Nonprofit 990 Population Field (BigQuery)
 title: Net Assets — IRS 990 population (BigQuery)
-description: Rank, filter or count US nonprofits by net assets (totnetassetend) across
-  ALL filers.
+description: This measure counts the net assets of US tax-exempt nonprofits, enabling
+  users to rank, filter, or count across all filers. It specifically refers to net
+  assets, which represent the difference between total assets and total liabilities,
+  distinguishing it from total revenue or total expenses. The reporting is done per
+  organization for each fiscal year, providing insights into the financial stability
+  of nonprofits.
 tags:
 - nonprofit
 - irs

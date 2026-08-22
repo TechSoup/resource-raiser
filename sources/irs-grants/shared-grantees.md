@@ -1,9 +1,13 @@
 ---
 type: Grant Graph — Shared Grantees (intersection)
 title: Organizations funded by two funders — IRS 990 grant graph
-description: Given TWO named funders, the organizations they BOTH fund — a grant-graph
-  intersection showing where two foundations' giving overlaps, from IRS 990 e-file data,
-  2022-2024.
+description: This measure identifies organizations that receive funding from two specified
+  funders, illustrating the overlap in their grantmaking activities. It focuses on
+  the intersection of philanthropic grants between US nonprofits and foundations,
+  as reported in IRS Form 990 data. This measure is distinct from broader analyses
+  of grant funding, as it specifically examines the shared grantees between two funders
+  rather than overall funding patterns. The data is reported per pair of funders for
+  the fiscal years 2022 to 2024.
 tags:
 - grants
 - philanthropy

@@ -86,7 +86,7 @@ def slug(name):
 
 def main():
     import yaml
-    import repr_queries
+    import repr_queries, descriptions
     y = latest_year()
     base = f"{INDEX}{y}/elts"
     print(f"using us-gaap taxonomy {y}")
@@ -96,9 +96,6 @@ def main():
     print(f"{len(concepts)} reportable numeric concepts, {len(labels)} labels, {len(docs)} definitions")
 
     os.makedirs(OUT, exist_ok=True)
-    for f in glob.glob(os.path.join(OUT, "*.md")):          # idempotent: clear old leaves
-        if os.path.basename(f) != "_access.md":
-            os.remove(f)
 
     kept = []                                                 # (concept, period, label, unit)
     for concept, (period, unit) in concepts.items():
@@ -111,12 +108,28 @@ def main():
 
     info = {c: (period, label, unit) for c, period, label, unit in kept}
 
+    # SEC descriptions are the FASB taxonomy's OWN documentation — authoritative, and kept verbatim
+    # wherever it is substantial. But a terse one ("Amount of assets.") carries almost no signal for
+    # telling a concept apart from its siblings, and a leaf is discovered by what its description
+    # says. So expand only the thin ones, and hand the expander the concept's unit and period type
+    # so it can state the grain without guessing at it.
+    THIN = int(os.getenv("SEC_DESC_MIN_CHARS", "200"))
+    thin = [(c, label, period, unit) for c, period, label, unit in kept
+            if len(docs.get(c) or "") < THIN]
+    print(f"expanding {len(thin)} terse definitions (< {THIN} chars) of {len(kept)} concepts…")
+    scope = descriptions.scope_for("sec-edgar")
+    detail = descriptions.for_items(
+        [(f"sec-edgar:{c}", label,
+          f"{docs.get(c) or label} (us-gaap:{c}, reported as a {period} value in {unit})")
+         for c, label, period, unit in thin],
+        "US-GAAP financial statement concept", scope)
+
     def write_leaf(concept, queries):                          # called per concept as its queries land
         period, label, unit = info[concept]
         fm = {
             "type": "Financial Statement Concept",
             "title": f"{label} — SEC EDGAR",
-            "description": docs.get(concept, label),
+            "description": detail.get(f"sec-edgar:{concept}") or docs.get(concept, label),
             "tags": ["finance", "sec", "edgar", "us-gaap"] + [w for w in slug(concept).split("-") if len(w) > 2][:4],
             "source": "./_access.md",
             "taxonomy": "us-gaap",
@@ -130,6 +143,13 @@ def main():
                 f"operation; see [SEC EDGAR access](./_access.md).\n")
         with open(os.path.join(OUT, slug(concept) + ".md"), "w", encoding="utf-8") as fh:
             fh.write("---\n" + yaml.safe_dump(fm, sort_keys=False, allow_unicode=True) + "---\n\n" + body)
+
+    # Clear the old leaves only NOW — after the (slow) description pass. Deleting up front would
+    # leave the largest source empty for the whole expansion, and an index rebuild in that window
+    # would quietly drop every SEC concept.
+    for f in glob.glob(os.path.join(OUT, "*.md")):          # idempotent: clear old leaves
+        if os.path.basename(f) != "_access.md":
+            os.remove(f)
 
     print(f"generating queries + writing {len(kept)} concept leaves incrementally…")
     repr_queries.for_items([(c, lab, docs.get(c, lab)) for c, _p, lab, _u in kept],

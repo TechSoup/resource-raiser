@@ -1,7 +1,12 @@
 ---
 type: Organization Profile Fact
 title: Official Website — Organization Profile (Nonprofit)
-description: A nonprofit's official website URL.
+description: This measure indicates the official website URL of a nonprofit organization,
+  serving as a digital point of access for information about its mission, programs,
+  and activities. It specifically pertains to the primary online presence of the nonprofit
+  and does not include social media profiles or secondary websites. The reporting
+  is at the organizational level, reflecting the official web address as recorded
+  in the latest available data.
 tags:
 - nonprofit
 - profile

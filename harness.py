@@ -11,8 +11,8 @@ Run as a CLI or as a server the connectors skill calls:
   python3 harness.py "How much did Apple spend on R&D in 2023?"     # one-shot (prints JSON)
   python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
 """
-import os, sys, json, time, math, re
-import driver, ard_client, planner, store
+import os, sys, json, time, math, re, urllib.parse
+import driver, ard_client, planner, store, llm, nlweb
 from core import Toolkit
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -45,11 +45,18 @@ def _with_emitter(fn):
     """Bind the CALLING thread's stream writer onto a callable run on a worker thread. The fan-out
     helpers hand work to a ThreadPoolExecutor, and a fresh pool thread has no thread-local writer —
     so without this every event from a parallel stage is dropped. Always assign (even None): pool
-    threads are reused, so a stale writer would otherwise publish into an already-closed socket."""
+    threads are reused, so a stale writer would otherwise publish into an already-closed socket.
+
+    The question's usage ledger rides along for the same reason: a fan-out stage can issue most of
+    the LLM calls, and they would go uncounted on a pool thread that never had the ledger bound."""
     cb = getattr(_EMIT, "cb", None)
+    led = llm.ledger()
+    disc = ard_client.usage()
 
     def wrapped(*a, **k):
         _EMIT.cb = cb
+        llm.bind_ledger(led)
+        ard_client.bind_usage(disc)
         return fn(*a, **k)
 
     return wrapped
@@ -299,7 +306,7 @@ def _normalize_shape(ctx):
     return ctx
 
 
-def discover(question):
+def discover(question, sites=None):
     """Pass 1: extract the ENTITY, the entity-expunged ATTRIBUTE, and (via the entity's
     TYPE) which SOURCE(s) apply. Pass 2: match the attribute to fields within those sources."""
     _say("status", icon="🔍", msg="Reading your question…")
@@ -349,7 +356,7 @@ def discover(question):
         "  'performance' -> ['total revenue','net income','diluted earnings per share']\n"
         "Return [] ONLY for a measure that is already precise ('total revenue', 'net income', 'poverty "
         "rate', 'diabetes rate') — do NOT invent ambiguity for a specific measure.\n"
-        "SOURCES:\n" + src_list, question, json_mode=True))
+        "SOURCES:\n" + src_list, question, json_mode=True, stage="classify"))
     ctx = _normalize_shape(ctx)
     # Robustness: the classifier sometimes drops the place from a "<measure> in <Place>" question
     # (leaving an empty entity). Recover it from the question so a place lookup doesn't fail with no geo.
@@ -358,6 +365,13 @@ def discover(question):
         if m:
             ctx["entity"] = m.group(1).strip()
     sources = [s for s in (ctx.get("sources") or []) if s in SOURCE_TYPES] or list(SOURCE_TYPES)
+    sources = _ensure_grant_graph(question, sources)
+    if sites:
+        # An explicit NLWeb `site=` is the caller stating the corpus. That outranks the
+        # classifier's guess — the point of the parameter is to constrain, not to suggest.
+        wanted = [s for s in sites if s in SOURCE_TYPES]
+        if wanted:
+            sources = wanted
     # A per-entity question (about ONE named entity) must never be confined to population-only sources
     # (the BigQuery *-bq sources answer rankings/aggregates, not a single point lookup). If the
     # classifier picked only those, widen to all sources so the per-entity source is discoverable.
@@ -384,6 +398,75 @@ def discover(question):
     _say("candidates", items=[{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")}
                               for h in hits[:6]])
     return ctx, hits
+
+
+# The philanthropic grant graph (IRS 990: who funds whom) and the FEDERAL grant sources
+# (grants.gov opportunities, USAspending awards) share the word "grant", and the classifier
+# picks between them by wording alone. "Which states receive the most grant dollars" reads as
+# federal to it about as often as philanthropic — same prompt, same model, different answer run
+# to run. When the wording is clearly about the 990 grant graph, put irs-grants in the candidate
+# pool rather than leave it to chance. This WIDENS the pool, it does not override the classifier:
+# discovery and the planner still choose, so a genuinely federal question is unaffected.
+_GRANT_GRAPH_RE = re.compile(
+    r"\bgrant graph\b|\bgrantmaker|\bgrant-?making\b|\bwho funds\b|\bfoundations? (that )?fund\b"
+    r"|\bgrants? (made|received|given)\b|\bgrant dollars\b|\bgrant money\b|\bbiggest (recipients|funders)\b"
+    r"|\bphilanthrop", re.I)
+
+
+def _ensure_grant_graph(question, sources):
+    if _GRANT_GRAPH_RE.search(question or "") and "irs-grants" not in sources:
+        return sources + ["irs-grants"]
+    return sources
+
+
+# --- ARD entry browsing --------------------------------------------------------------------
+# The demo's claim is that discovery is a SERVICE — so browsing the registry goes through the ARD
+# API (GET /agents, GET /agents/entry, POST /explore) exactly as searching it does. An earlier cut
+# read registry/meta.json directly from here; it worked, but it quietly made the browser a special
+# case that reached around the very interface being demonstrated.
+
+
+def _ard_list(source, page=1, per=50, q=""):
+    """One page of catalog entries. ARD paginates by opaque pageToken; the UI wants page numbers,
+    so walk tokens forward to the requested page — cheap at these sizes, and it keeps the client
+    honest about the cursor being opaque."""
+    per = max(1, min(per, 100))                       # the spec caps pageSize at 100
+    token, page = "", max(1, page)
+    for _ in range(page - 1):
+        d = ard_client.agents(publisher=source, q=q, page_size=per, page_token=token)
+        token = d.get("pageToken")
+        if not token:
+            break
+    d = ard_client.agents(publisher=source, q=q, page_size=per, page_token=token or "")
+    total = d.get("totalSize", 0)
+    return {"source": source, "total": total, "page": page,
+            "pages": max(1, (total + per - 1) // per), "per": per, "query": q,
+            "pageToken": d.get("pageToken"),
+            "entries": [{"identifier": e["identifier"], "title": e.get("displayName", ""),
+                         "description": e.get("description", ""), "scope": e.get("scope", ""),
+                         "queries": (e.get("representativeQueries") or [])[:4]}
+                        for e in d.get("entries", [])]}
+
+
+def _ard_entry(identifier):
+    """The ARD catalog entry, passed through UNCHANGED under `ard_entry`.
+
+    The browser shows the actual JSON the registry serves rather than a summary of it — for a demo
+    about a discovery protocol, a hand-picked subset of the fields is the least interesting thing
+    to look at."""
+    e = ard_client.entry(identifier)
+    if not e:
+        return None
+    return {"identifier": e["identifier"], "source": e.get("publisher", ""),
+            "ard_entry": e,                                   # verbatim, every field
+            "raw": (e.get("data") or {}).get("content", ""),
+            "access_doc": e.get("accessDescriptor", "")}
+
+
+def _ard_publishers():
+    """Facet counts from POST /explore — what the source picker is built from."""
+    f = (ard_client.explore("publisher").get("facets") or {}).get("publisher") or {}
+    return [{"dir": b["value"], "count": b["count"]} for b in f.get("buckets", [])]
 
 
 def _geo_from_fips(keys):
@@ -482,7 +565,8 @@ def _entity_options(mention, thint):
     try:
         order = json.loads(TK.llm(
             f'Rank the candidates by how well each is the {thint or "entity"} named "{mention}", best first. '
-            'JSON {"order":[<indices>]}.\n' + listing, mention, json_mode=True)).get("order", [])
+            'JSON {"order":[<indices>]}.\n' + listing, mention, json_mode=True,
+            stage="resolve-entity")).get("order", [])
     except Exception:
         order = []
     order = [i for i in order if isinstance(i, int) and 0 <= i < len(cands)] or list(range(len(cands)))
@@ -593,7 +677,7 @@ def _s_concept(f):
         return driver.fetch_metric(f.attribute, cik=f.key, period=f.period, log=False)
     if f.mention not in _TICKER_CACHE:                   # same mention on every backtrack — resolve once
         _TICKER_CACHE[f.mention] = json.loads(TK.llm(
-            'JSON {"ticker":"<US stock ticker or empty>"}.', f.mention, json_mode=True)).get("ticker")
+            'JSON {"ticker":"<US stock ticker or empty>"}.', f.mention, json_mode=True, stage="resolve-entity")).get("ticker")
     ticker = _TICKER_CACHE[f.mention]
     if not ticker:
         raise Backtrack("no ticker")
@@ -880,7 +964,7 @@ def _answers(question, data):
     exchange-rate direction, and 'future' dates (its training cutoff makes recent data look fake), so
     letting it fact-check the number causes false rejections of correct answers. Fail-open on error."""
     try:
-        v = json.loads(TK.llm(
+        v = json.loads(TK.llm(  # acceptance check
             "You route data: decide whether the DATA record is ABOUT the right thing for the QUESTION. "
             "Accept when its MEASURE, UNIT, CURRENCY, and PLACE/ENTITY match what the question asks. "
             "Reject ONLY for a clear mismatch in one of those: a different measure (e.g. 'intragovernmental "
@@ -899,7 +983,7 @@ def _answers(question, data):
             "Rates of Exchange: Euro Zone-Euro' answers a euro exchange-rate question) — ACCEPT. Reject only "
             "when you are CONFIDENT it is a different currency/place/measure (e.g. China-Renminbi when the "
             'euro was asked). When in doubt, ACCEPT. Return JSON {"ok": true|false, "why": "<short reason>"}.',
-            json.dumps({"question": question, "data": data}), json_mode=True))
+            json.dumps({"question": question, "data": data}), json_mode=True, stage="check"))
         ok, why = bool(v.get("ok", True)), v.get("why", "")
         # BACKSTOP: never reject on a DATE/PERIOD mismatch. The period is handled by the fetch's own
         # backtracking (requested -> latest), and a period NEWER than the latest published data can
@@ -1018,7 +1102,11 @@ def _grant_direction(question, ctx, grants):
                 "grants for", "money for", "directed to", "support for", "given to")))):
         return "theme"
     if any(w in ql for w in ("in total", "total value", "total amount", "overall", "altogether",
-                             "how many grant", "average grant", "how much grant money was", "total grant")):
+                             "how many grant", "average grant", "how much grant money was", "total grant",
+                             # the words people actually use to ask for the headline numbers — note
+                             # "overview" itself was missing, so "give me an overview of the grant
+                             # graph" fell through to the biggest-grantmakers ranking
+                             "overview", "summary", "summarize", "big picture", "snapshot")):
         return "overview"
     if (ctx.get("threshold") or {}).get("value") is not None:
         return "ranking"                                          # funders_above (threshold branch)
@@ -1574,11 +1662,65 @@ def retrieve_for(question):
     return {"source": hit["title"], "value": val, "data": data}
 
 
-def run(question):
+_CONCEPT_LEAF = None
+
+
+def _spent():
+    """This thread's usage so far — a refused or failed question still burned calls, and hiding
+    that would make the cheap failures look free."""
+    led = llm.ledger()
+    return led.snapshot() if led is not None else None
+
+
+def _spent_discovery():
+    u = ard_client.usage()
+    return u.snapshot() if u is not None else None
+
+
+def _leaf_for_concept(concept):
+    """The SEC leaf that pins a given us-gaap concept, keyed off the built index metadata."""
+    global _CONCEPT_LEAF
+    if _CONCEPT_LEAF is None:
+        from registry import index as _ix
+        _CONCEPT_LEAF = {}
+        try:
+            for m in json.load(open(_ix.CACHE_META)):
+                if m.get("concept"):
+                    _CONCEPT_LEAF.setdefault(m["concept"], m)
+        except Exception:
+            pass
+    return _CONCEPT_LEAF.get(concept)
+
+
+def _cite_concept_actually_used(hit, data):
+    """Cite the concept that ANSWERED, not the one discovery ranked.
+
+    driver.fetch_metric re-discovers the us-gaap concept from the attribute and returns the first
+    one the company actually reports, so a leaf that 404s (AssetsNet for a carmaker) can be the
+    ranked hit while the number comes from another concept (Assets). Reporting the ranked leaf then
+    labels a correct figure with the wrong table. The grant-graph branch already re-cites for the
+    same reason; this does it for SEC."""
+    used = (data or {}).get("concept") or ""
+    if not used.startswith("us-gaap:"):
+        return hit
+    leaf = _leaf_for_concept(used.split(":", 1)[1])
+    if not leaf or leaf["identifier"] == hit.get("identifier"):
+        return hit
+    return {"identifier": leaf["identifier"], "title": leaf.get("title", hit.get("title", "")),
+            "publisher": hit.get("publisher") or "sec-edgar"}
+
+
+def run(question, sites=None):
+    # Account for the LLM calls this question makes IN THIS PROCESS. The ARD Agent Finder runs as
+    # a separate service and bills its own discovery work — reported alongside as `discovery_usage`,
+    # deliberately a SIBLING of `usage` rather than nested in it, so nothing reads as part of the
+    # question's own total.
+    _ledger = llm.start_ledger()
+    _disc = ard_client.start_usage()
     # PLAN BEFORE FETCH. The shape of the question and the DECLARED capability of the candidate
     # sources decide whether this is one call, several, or impossible — and an impossible question
     # is refused here, without issuing a single request.
-    ctx, hits = discover(question)
+    ctx, hits = discover(question, sites)
     if not hits:
         raise SystemExit("agent finder returned no sources")
     shape = ctx.get("shape") if ctx.get("shape") in planner.SHAPES else "point"
@@ -1586,7 +1728,9 @@ def run(question):
     # (earnings -> net income, EBITDA, EPS…) instead of a silently-chosen one.
     if len(ctx.get("interpretations") or []) >= 2 and shape in ("point", "status", "entity-list"):
         data = _run_ambiguous(question, ctx)
-        return {"question": question, "answer": TK.synthesize(question, data), "shape": shape,
+        _answer = TK.synthesize(question, data)
+        return {"question": question, "answer": _answer, "shape": shape, "usage": _ledger.snapshot(),
+                "discovery_usage": _disc.snapshot(),
                 "plan": f"ambiguous measure → {len(data['interpretations'])} interpretations answered separately",
                 "source": {"identifier": hits[0]["identifier"], "title": hits[0]["title"],
                            "publisher": hits[0].get("publisher")},
@@ -1620,7 +1764,9 @@ def run(question):
             fm = driver.frontmatter(leaf_id) or {}
             hit = {"identifier": leaf_id, "title": fm.get("title", grant_hit["title"]),
                    "publisher": grant_hit.get("publisher")}
-        return {"question": question, "answer": TK.synthesize(question, data), "shape": shape,
+        _answer = TK.synthesize(question, data)
+        return {"question": question, "answer": _answer, "shape": shape, "usage": _ledger.snapshot(),
+                "discovery_usage": _disc.snapshot(),
                 "plan": planner.describe(shape, p),
                 "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
                 "candidates": [{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")} for h in hits],
@@ -1652,9 +1798,13 @@ def run(question):
         hit = p["hit"]
     else:
         _ctx, hits, hit, _tried, data, _state = _search(question, ctx=ctx, hits=hits)
+    hit = _cite_concept_actually_used(hit, data)
+    answer = TK.synthesize(question, data)       # synthesize BEFORE snapshotting: it is a chat call
     return {
         "question": question,
-        "answer": TK.synthesize(question, data),
+        "answer": answer,
+        "usage": _ledger.snapshot(),
+        "discovery_usage": _disc.snapshot(),
         "shape": shape,
         "plan": planner.describe(shape, p),
         "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
@@ -1693,6 +1843,15 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .ln{opacity:0;transform:translateY(4px);animation:in .32s ease forwards;margin:2px 0;display:flex;gap:9px;align-items:flex-start}
  @keyframes in{to{opacity:1;transform:none}}
  .ic{flex:0 0 auto;width:1.4em;text-align:center} .txt{flex:1}
+ .ardlink{display:inline-block;margin-top:7px;font-size:.83em;color:#1a73e8;text-decoration:none}
+ .ardlink:hover{text-decoration:underline}
+ .cost{color:#8b949e;margin-top:6px;font-size:.86em}
+ table.costs{border-collapse:collapse;margin:8px 0;font-size:.86em;color:#8b949e;width:100%;max-width:460px}
+ table.costs th,table.costs td{padding:3px 10px 3px 0;text-align:left;border-bottom:1px solid #21262d}
+ table.costs th{color:#6e7681;font-weight:500}
+ table.costs td.n,table.costs th.n{text-align:right;font-variant-numeric:tabular-nums}
+ table.costs tr.sep td{border-top:1px solid #30363d}
+ table.costs tr.tot td{color:#c9d1d9;font-weight:600;border-bottom:none}
  .plan{color:#e3b341} .plan b{color:#f0f6fc;font-weight:600} .scan{color:#8b949e;margin-top:3px;font-size:.9em}
  .cand{color:#8b949e;margin:1px 0 1px 2.3em;display:flex;align-items:center;gap:8px;font-size:.92em}
  .bar{height:7px;border-radius:4px;background:#58a6ff;min-width:4px} .ct{color:#c9d1d9;flex:1}
@@ -1713,7 +1872,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .amt{color:#137333;font-weight:700}
 </style></head><body>
 <h1>Agentic Data Query</h1>
-<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="/techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
+<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
 <form id="f"><input id="q" placeholder="e.g. Is the American Red Cross a 501(c)(3)?" autofocus><button id="b">Ask</button></form>
 <div id="out"></div>
 <h2 class="sh">Example questions</h2>
@@ -1736,7 +1895,9 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
      var cats=(s.categories||[]).map(function(c){return '<span class="cat">'+esc(c)+'</span>'}).join('');
      return '<div class="src-card"><div class="src-head"><span class="src-name">'+esc(s.name)+'</span>'
        +'<span class="cnt">'+s.count+(s.count==1?' endpoint':' tables')+'</span></div>'
-       +'<div class="covers">'+esc(s.covers)+'</div>'+(cats?'<div class="cats">'+cats+'</div>':'')+'</div>';
+       +'<div class="covers">'+esc(s.covers)+'</div>'+(cats?'<div class="cats">'+cats+'</div>':'')
+       +'<a class="ardlink" href="ard?source='+encodeURIComponent(s.dir)+'">browse '+s.count
+       +' ARD '+(s.count==1?'entry':'entries')+' \u2192</a></div>';
    }).join('');}
  function showPanel(i){var t=TABS[i]||{queries:[]};
    document.getElementById('panel').innerHTML=(t.queries||[]).map(function(qy){
@@ -1751,7 +1912,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
      [].forEach.call(bar.querySelectorAll('.tab'),function(x){x.classList.remove('on')});
      el.classList.add('on');showPanel(+el.getAttribute('data-i'));};});
    showPanel(0);}
- fetch('/sources').then(function(r){return r.json()}).then(function(d){
+ fetch('sources').then(function(r){return r.json()}).then(function(d){
    SRCS=d.sources||[];renderTabs(d.tabs);
  });
  f.onsubmit=function(e){e.preventDefault();var question=q.value.trim();if(!question)return;
@@ -1768,7 +1929,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    function beat(){if(wd)clearTimeout(wd);wd=setTimeout(function(){stalled=true;
      status('⚠️','The server stopped sending updates. It may still be working — check the terminal, or ask again.','back');fin();},120000);}
    beat();
-   fetch('/ask_stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:question})})
+   fetch('ask?sse_format=named&max_results=8&query='+encodeURIComponent(question))
     .then(function(resp){
       var reader=resp.body.getReader(),dec=new TextDecoder(),buf='';
       function pump(){return reader.read().then(function(res){
@@ -1777,42 +1938,44 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
         beat();
         buf+=dec.decode(res.value,{stream:true});
         var parts=buf.split('\n\n');buf=parts.pop();
-        parts.forEach(function(p){p=p.replace(/^data: /,'').trim();if(!p)return;var ev;try{ev=JSON.parse(p)}catch(_){return;}handle(ev);});
+        // An SSE frame may carry event:/id: lines before data:, so pull the data line out rather
+        // than assuming the frame starts with it — with sse_format=named it never does.
+        parts.forEach(function(p){
+          var payload=null;
+          p.split('\n').forEach(function(ln){if(ln.indexOf('data:')===0)payload=ln.slice(5).trim();});
+          if(!payload)return;
+          var ev;try{ev=JSON.parse(payload)}catch(_){return;}
+          handle(ev);});
         return pump();
       });}
       return pump();
     }).catch(function(err){if(!stalled){status('⚠️',esc(String(err)),'back');fin();}});
    function handle(ev){
-     if(ev.kind==='status'){status(ev.icon||'•',esc(ev.msg),ev.icon==='↩️'?'back':'');}
-     else if(ev.kind==='plan'){
-       var t='';if(ev.entity)t+='Entity <b>'+esc(ev.entity)+'</b> · ';
-       t+='Metric <b>'+esc(ev.attribute||'—')+'</b> · Period '+esc(ev.period);
-       t+='<div class="scan">Scanning '+ev.sources.length+' source'+(ev.sources.length==1?'':'s')+': '+esc(ev.sources.join(', '))+'</div>';
-       status('\u{1F9ED}',t,'plan');
-     }
-     else if(ev.kind==='candidates'){
-       status('\u{1F4DA}','Agent Finder ranked '+ev.items.length+' candidate table'+(ev.items.length==1?'':'s')+':');
-       var mx=Math.max.apply(null,ev.items.map(function(c){return c.score||0}).concat([1]));
-       ev.items.forEach(function(c,i){var w=Math.round(6+((c.score||0)/mx)*120);
-         var d=document.createElement('div');d.className='cand';
-         d.innerHTML='<span class="cs">'+(c.score||0)+'</span><span class="bar'+(i===0?' win':'')+'" style="width:'+w+'px"></span><span class="ct'+(i===0?' win':'')+'">'+esc(c.title)+'</span>';
-         log.insertBefore(d,cursor);});
-       log.scrollTop=log.scrollHeight;
-     }
-     else if(ev.kind==='plan_chosen'){
-       var vd=ev.verdict==='infeasible'?'<span class="back">INFEASIBLE</span>'
-              :(ev.verdict==='exact'?'one direct query':esc(ev.verdict.replace('compose:','')+' (several queries)'));
-       status('\u{1F9ED}','Shape <b>'+esc(ev.shape)+'</b> → '+vd+(ev.why?' — '+esc(ev.why):''),'shape');
-     }
-     else if(ev.kind==='resolve'){
-       var keys=Object.keys(ev.keys||{}).map(function(k){return '<span class="keyk">'+esc(k)+'</span> '+esc(String(ev.keys[k]))}).join(' · ');
-       status('\u{1F9E9}','Resolved “'+esc(ev.mention)+'” → <b>'+esc(ev.label)+'</b>'+(keys?'  ('+keys+')':''),'rslv');
-     }
-     else if(ev.kind==='answer'){renderAnswer(ev);}
-     else if(ev.kind==='error'){status('⚠️',esc(ev.error||'No answer.'),'back');}
+     // NLWeb message stream: lifecycle, narration, results, then the generated answer.
+     var t=ev.message_type, c=ev.content;
+     if(t==='intermediate_message'){
+       // the engine prefixes its narration with an emoji; split it back out so the icon column
+       // lines up the way it always has
+       var s0=String(c||'').trim(), m=s0.match(/^(\p{Extended_Pictographic}\uFE0F?)\s*([\s\S]*)$/u);
+       status(m?m[1]:'\u2022', esc(m?m[2]:s0), s0.indexOf('backtrack')>=0?'back':'');}
+     else if(t==='result'){renderItems(c||[]);}
+     else if(t==='nlws'){renderAnswer(c||{});}
+     else if(t==='error'){status('⚠️',esc(String(c||'No answer.')),'back');}
+     else if(t==='end-nlweb-response'){fin();}
+   }
+   function renderItems(items){
+     status('\u{1F4DA}','ARD returned '+items.length+' candidate table'+(items.length==1?'':'s')+':');
+     var mx=Math.max.apply(null,items.map(function(c){return c.score||0}).concat([1]));
+     items.forEach(function(c,i){var w=Math.round(6+((c.score||0)/mx)*120);
+       var d=document.createElement('div');d.className='cand';
+       d.innerHTML='<span class="cs">'+(c.score||0)+'</span><span class="bar'+(i===0?' win':'')
+         +'" style="width:'+w+'px"></span><span class="ct'+(i===0?' win':'')+'">'+esc(c.name)
+         +'</span> <span class="pub">'+esc(c.site||'')+' · '+esc(c.tier||'')+'</span>';
+       log.insertBefore(d,cursor);});
+     log.scrollTop=log.scrollHeight;
    }
    function renderAnswer(d){
-     if(d.error||!d.answer){status('⚠️',esc(d.error||'No answer.'),'back');return;}
+     if(!d.answer){status('⚠️','No answer.','back');return;}
      var h='<div class="answer">'+esc(d.answer)+'</div>';
      if(d.data&&d.data.ambiguous&&Array.isArray(d.data.interpretations))h+=renderInterp(d.data.interpretations);
      if(d.data&&d.data.match==='name'&&d.data.matched_entities>1)h+=renderScope(d.data);
@@ -1821,10 +1984,57 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
         d.data.series.filter(function(s){return s.value!=null}).map(function(s){
           return {label:s.label,value:s.value}}),' ');
      if(d.data&&Array.isArray(d.data.results)&&d.data.results.length)h+=renderRecords(d.data.results);
-     if(d.source)h+='<div class="src">\u{1F4DA} '+esc(d.source.title)+' <span class="pub">['+esc(d.source.publisher||'')+']</span></div>';
-     if(d.candidates){h+='<details><summary>Agent Finder candidates</summary><ul>';
-       d.candidates.forEach(function(c){h+='<li>'+c.score+' — '+esc(c.title)+'</li>'});h+='</ul></details>';}
+     var it=(d.items||[])[0];
+     if(it)h+='<div class="src">\u{1F4DA} <a href="'+esc(it.url)+'">'+esc(it.name)
+       +'</a> <span class="pub">['+esc(it.site||'')+']</span></div>';
+     if((d.items||[]).length>1){h+='<details><summary>ARD candidates</summary><ul>';
+       d.items.forEach(function(c){h+='<li>'+(c.score||0)+' — '+esc(c.name)+'</li>'});h+='</ul></details>';}
+     if(d.usage)h+=renderUsage(d.usage,d.discovery_usage);
      var box=document.createElement('div');box.style.marginTop='16px';box.innerHTML=h;log.parentNode.appendChild(box);
+   }
+   function usd(c){return c>=0.01?'$'+c.toFixed(3):(c>0?'$'+c.toFixed(5):'$0');}
+   // Steps in PIPELINE order, not sorted by cost — the point of the report is to show where a
+   // question's spend goes as it moves through the engine, and ordering by size hides that shape.
+   var STEP_ORDER = ['classify','resolve-entity','resolve-concept','check','synthesize','other'];
+   var STEP_LABEL = {
+     'classify':'classify the question', 'resolve-entity':'resolve the entity',
+     'resolve-concept':'resolve the measure', 'check':'check the answer fits',
+     'synthesize':'write the answer', 'other':'other'};
+   function renderUsage(u,dz){
+     var h='<div class="cost">\u26A1 this query: '+u.llm_calls+' LLM calls ('+u.chat_calls+' chat, '
+         + u.embed_calls+' embed) \u00B7 '+Number(u.total_tokens).toLocaleString()+' tokens \u00B7 '
+         + usd(u.cost_usd)+'<span class="pub"> ['+(u.cost_source==='provider'?'billed':'estimated')
+         + ']</span></div>';
+     if(dz&&dz.searches)h+='<div class="cost">\u{1F50E} agent finder (separate service, not counted '
+         + 'above): '+dz.searches+' searches \u00B7 '+dz.llm_calls+' LLM calls \u00B7 '
+         + Number(dz.total_tokens).toLocaleString()+' tokens \u00B7 '+usd(dz.cost_usd)+'</div>';
+
+     var st=u.by_stage||{}, keys=Object.keys(st);
+     STEP_ORDER.forEach(function(k){if(keys.indexOf(k)<0)keys.push(k)});
+     var rows='', tot=0, toks=0;
+     STEP_ORDER.forEach(function(k){
+       var v=st[k]; if(!v) return;
+       tot+=v.cost_usd; toks+=v.tokens;
+       rows+='<tr><td>'+esc(STEP_LABEL[k]||k)+'</td><td class="n">'+v.calls+'</td><td class="n">'
+           + Number(v.tokens).toLocaleString()+'</td><td class="n">'+usd(v.cost_usd)+'</td></tr>';
+     });
+     if(dz&&dz.llm_calls)
+       rows+='<tr class="sep"><td>discovery <span class="pub">(agent finder)</span></td><td class="n">'
+           + dz.llm_calls+'</td><td class="n">'+Number(dz.total_tokens).toLocaleString()
+           + '</td><td class="n">'+usd(dz.cost_usd)+'</td></tr>';
+     var grand=tot+((dz&&dz.cost_usd)||0), gtok=toks+((dz&&dz.total_tokens)||0);
+     rows+='<tr class="tot"><td>total</td><td class="n">'+(u.llm_calls+((dz&&dz.llm_calls)||0))
+         + '</td><td class="n">'+Number(gtok).toLocaleString()+'</td><td class="n">'+usd(grand)+'</td></tr>';
+     if(rows)h+='<details><summary>Cost report \u2014 per step</summary>'
+         + '<table class="costs"><thead><tr><th>step</th><th class="n">calls</th>'
+         + '<th class="n">tokens</th><th class="n">cost</th></tr></thead><tbody>'+rows
+         + '</tbody></table>'
+         + '<p class="pub">prompt '+Number(u.prompt_tokens).toLocaleString()+' \u00B7 completion '
+         + Number(u.completion_tokens).toLocaleString()+' \u00B7 embedding '
+         + Number(u.embed_tokens).toLocaleString()
+         + '. Resolution steps are cached per process, so a repeat question about the same entity '
+         + 'skips them.</p></details>';
+     return h;
    }
    function trunc(s,n){s=String(s);return s.length>n?s.slice(0,n-1)+'…':s;}
    function clean(v){if(v==null)return null;v=String(v).trim();return (v===''||v==='null'||v==='undefined')?null:v;}
@@ -1895,13 +2105,13 @@ TECHSOUP_PAGE = (PAGE
     .replace('<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which '
              'dataset answers it; the data is fetched live, the answer is checked, and the search '
              'backtracks until it actually answers your question. '
-             '<a href="/techsoup" style="color:#1a73e8">TechSoup view ›</a></p>',
+             '<a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>',
              '<p class="sub">A curated view for TechSoup and the nonprofits, libraries, and '
              'foundations it serves — validate an organization, measure the digital divide, read a '
              "nonprofit's finances, understand the communities it serves, and find funding. Ask in "
              'plain English; the answer is fetched live and cited. '
-             '<a href="/" style="color:#1a73e8">‹ full data explorer</a></p>')
-    .replace("fetch('/sources')", "fetch('/techsoup-sources')")
+             '<a href="./" style="color:#1a73e8">‹ full data explorer</a></p>')
+    .replace("fetch('sources')", "fetch('techsoup-sources')")
     .replace('placeholder="e.g. Is the American Red Cross a 501(c)(3)?"',
              'placeholder="e.g. Is Feeding America in good standing with the IRS?"')
     .replace("<h2 class=\"sh\">Example questions</h2>\n"
@@ -1912,13 +2122,317 @@ TECHSOUP_PAGE = (PAGE
              '<h2 class="sh">Sources behind this view</h2>'))
 
 
+# --- per-source daily request cap ---------------------------------------------------------
+# /ask is unauthenticated and every call spends model credits, so one loop can run up a bill.
+# This caps how many questions a single source may ask per UTC day.
+#
+# Counts are per PROCESS and in memory: a restart clears them. That is a deliberate limit rather
+# than an oversight — the cap exists to stop a runaway script, not a determined attacker, and
+# persisting it would mean a write on every request. If it ever needs to survive restarts or span
+# instances, this is the seam to put Redis behind.
+# Running totals since process start, for GET /costs. Per-question numbers answer "what did that
+# cost"; this answers "what has this instance spent", which is the one that shows up on a bill.
+_TOTALS = {"questions": 0, "llm_calls": 0, "total_tokens": 0, "cost_usd": 0.0,
+           "discovery_calls": 0, "discovery_tokens": 0, "discovery_cost_usd": 0.0,
+           "by_stage": {}, "by_model": {}}
+_TOTALS_LOCK = threading.Lock()
+
+
+def _accumulate(usage, discovery):
+    with _TOTALS_LOCK:
+        _TOTALS["questions"] += 1
+        for k in ("llm_calls", "total_tokens"):
+            _TOTALS[k] += (usage or {}).get(k, 0)
+        _TOTALS["cost_usd"] += (usage or {}).get("cost_usd", 0.0)
+        _TOTALS["discovery_calls"] += (discovery or {}).get("llm_calls", 0)
+        _TOTALS["discovery_tokens"] += (discovery or {}).get("total_tokens", 0)
+        _TOTALS["discovery_cost_usd"] += (discovery or {}).get("cost_usd", 0.0)
+        for field in ("by_stage", "by_model"):
+            for k, v in ((usage or {}).get(field) or {}).items():
+                b = _TOTALS[field].setdefault(k, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+                b["calls"] += v.get("calls", 0)
+                b["tokens"] += v.get("tokens", 0)
+                b["cost_usd"] += v.get("cost_usd", 0.0)
+
+
+ASK_LIMIT_PER_DAY = int(os.getenv("ASK_LIMIT_PER_DAY", "200"))     # 0 disables the cap
+TRUST_PROXY = os.getenv("TRUST_PROXY", "0").lower() in ("1", "true", "yes")
+_QUOTA = {}                                     # ip -> [utc_day, count]
+_QUOTA_LOCK = threading.Lock()
+
+
+def _client_ip(handler):
+    """The address to bill a request to.
+
+    X-Forwarded-For is only consulted when TRUST_PROXY says something in front of us sets it.
+    Trusting it unconditionally would make the cap trivially bypassable: the header is
+    client-supplied, so anyone could send a fresh value per request and get a fresh quota. When a
+    proxy IS trusted, the LAST entry is the one it appended (the peer that actually connected to
+    it); earlier entries came from the client and are spoofable."""
+    if TRUST_PROXY:
+        xff = handler.headers.get("X-Forwarded-For", "")
+        if xff:
+            ip = xff.split(",")[-1].strip()
+            if ip.count(":") == 1:              # strip a :port that some proxies append
+                ip = ip.split(":")[0]
+            if ip:
+                return ip
+    return handler.client_address[0]
+
+
+def _quota_check(ip):
+    """(allowed, used, seconds_until_reset). Counts every ask, including ones that fail — a
+    refused question still paid for its classification and re-rank."""
+    if ASK_LIMIT_PER_DAY <= 0:
+        return True, 0, 0
+    now = time.time()
+    day = int(now // 86400)
+    reset_in = int((day + 1) * 86400 - now)
+    with _QUOTA_LOCK:
+        rec = _QUOTA.get(ip)
+        if rec is None or rec[0] != day:
+            if len(_QUOTA) > 50_000:            # bound the table; stale days are dead weight
+                for k in [k for k, v in _QUOTA.items() if v[0] != day]:
+                    _QUOTA.pop(k, None)
+            rec = [day, 0]
+            _QUOTA[ip] = rec
+        if rec[1] >= ASK_LIMIT_PER_DAY:
+            return False, rec[1], reset_in
+        rec[1] += 1
+        return True, rec[1], reset_in
+
+
+
+
+ARD_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARD entries</title>
+<style>
+ body{font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:960px;margin:36px auto;padding:0 20px;color:#1a1a1a}
+ h1{font-size:1.5em;margin:0 0 4px} a{color:#1a73e8;text-decoration:none} a:hover{text-decoration:underline}
+ .sub{color:#5f6368;margin:0 0 20px}
+ .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:14px 0}
+ select,input{font:inherit;padding:7px 9px;border:1px solid #dadce0;border-radius:8px}
+ input{flex:1;min-width:220px}
+ .meta{color:#5f6368;font-size:.9em;margin:8px 0}
+ .row{border:1px solid #e8eaed;border-radius:10px;padding:10px 13px;margin:8px 0;cursor:pointer;background:#fff}
+ .row:hover{border-color:#1a73e8;background:#f8fbff}
+ .row h3{margin:0 0 3px;font-size:.98em}
+ .id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78em;color:#80868b;word-break:break-all}
+ .desc{color:#3c4043;font-size:.88em;margin:4px 0 0}
+ .q{display:inline-block;background:#f1f3f4;border-radius:11px;padding:1px 9px;margin:4px 4px 0 0;font-size:.79em;color:#3c4043}
+ .pager{display:flex;gap:8px;align-items:center;justify-content:center;margin:18px 0;flex-wrap:wrap}
+ .pager button{font:inherit;padding:6px 12px;border:1px solid #dadce0;background:#fff;border-radius:8px;cursor:pointer}
+ .pager button:disabled{opacity:.4;cursor:default}
+ pre{background:#0d1117;color:#c9d1d9;padding:14px;border-radius:10px;overflow:auto;font-size:.82em;line-height:1.45}
+ .back{display:inline-block;margin-bottom:12px}
+ .lbl{font-size:.78em;text-transform:uppercase;letter-spacing:.05em;color:#80868b;margin:16px 0 5px}
+ .api{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78em;color:#5f6368;background:#f8f9fa;border:1px solid #e8eaed;border-radius:8px;padding:7px 11px;margin:0 0 6px}
+ .api b{color:#1a73e8;font-weight:600}
+ .pale{color:#9aa0a6;font-weight:400;text-transform:none;letter-spacing:0}
+</style></head><body>
+<h1>ARD entries</h1>
+<p class="sub">Every table is described once as an <b>OKF</b> document — markdown with actionable
+frontmatter — and served by the <b>ARD</b> Agent Finder. This page is an ARD <i>client</i>: it
+enumerates the registry over the same API an agent would.
+<a href="ard/manifest" target="_blank">/.well-known/ard.json</a> ·
+<a href="./">‹ back to the query UI</a></p>
+<div id="api" class="api"></div>
+<div id="view"></div>
+<script>
+ function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+   return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+ function qp(){var o={},p=new URLSearchParams(location.search);p.forEach(function(v,k){o[k]=v});return o}
+ function go(o){var p=new URLSearchParams(o);history.pushState({},'', 'ard?'+p);render()}
+ var SOURCES=[];
+ function render(){
+   var o=qp();
+   if(o.id) return renderEntry(o.id);
+   var src=o.source||(SOURCES[0]&&SOURCES[0].dir)||'sec-edgar';
+   fetch('ard/list?source='+encodeURIComponent(src)+'&page='+(o.page||1)
+        +'&per='+(o.per||50)+'&q='+encodeURIComponent(o.q||''))
+     .then(function(r){return r.json()}).then(function(d){renderList(d)});
+ }
+ function api(call){var el=document.getElementById('api'); if(el)el.innerHTML='ARD call: <b>'+esc(call)+'</b>'}
+ function renderList(d){
+   api('GET /agents?publisher='+d.source+(d.query?'&q='+d.query:'')+'&pageSize='+d.per
+       +(d.page>1?'&pageToken=\u2026':''));
+   var opts=SOURCES.map(function(s){return '<option value="'+esc(s.dir)+'"'
+     +(s.dir===d.source?' selected':'')+'>'+esc(s.dir)+' ('+s.count+')</option>'}).join('');
+   var h='<div class="bar"><select id="src">'+opts+'</select>'
+     +'<input id="q" placeholder="filter by title, description or example query…" value="'+esc(d.query)+'">'
+     +'</div>';
+   h+='<div class="meta">'+d.total.toLocaleString()+' entr'+(d.total===1?'y':'ies')
+     +(d.query?' matching “'+esc(d.query)+'”':'')+' · page '+d.page+' of '+d.pages+'</div>';
+   h+=d.entries.map(function(e){
+     return '<div class="row" data-id="'+esc(e.identifier)+'">'
+       +'<h3>'+esc(e.title)+'</h3><div class="id">'+esc(e.identifier)+'</div>'
+       +(e.description?'<p class="desc">'+esc(e.description.slice(0,240))
+         +(e.description.length>240?'…':'')+'</p>':'')
+       +(e.queries||[]).map(function(q){return '<span class="q">'+esc(q)+'</span>'}).join('')
+       +'</div>'}).join('') || '<p class="meta">no entries match.</p>';
+   h+=pager(d);
+   document.getElementById('view').innerHTML=h;
+   document.getElementById('src').onchange=function(){go({source:this.value})};
+   var qi=document.getElementById('q'), t;
+   qi.oninput=function(){clearTimeout(t);var v=this.value;
+     t=setTimeout(function(){go({source:d.source,q:v})},300)};
+   [].forEach.call(document.querySelectorAll('.row'),function(r){
+     r.onclick=function(){go({id:r.getAttribute('data-id')})}});
+ }
+ function pager(d){
+   if(d.pages<=1) return '';
+   function b(p,label,dis){return '<button '+(dis?'disabled':'')+' data-p="'+p+'">'+label+'</button>'}
+   var h='<div class="pager">'+b(1,'« first',d.page===1)+b(d.page-1,'‹ prev',d.page===1)
+     +'<span class="meta">page '+d.page+' / '+d.pages+'</span>'
+     +b(d.page+1,'next ›',d.page===d.pages)+b(d.pages,'last »',d.page===d.pages)+'</div>';
+   setTimeout(function(){[].forEach.call(document.querySelectorAll('.pager button'),function(bt){
+     bt.onclick=function(){go({source:d.source,q:d.query,page:bt.getAttribute('data-p')})}})},0);
+   return h;
+ }
+ function renderEntry(id){
+   fetch('ard/entry?id='+encodeURIComponent(id)).then(function(r){return r.json()}).then(function(e){
+     if(e.error){document.getElementById('view').innerHTML='<p>'+esc(e.error)+'</p>';return}
+     api('GET /agents/entry?id='+e.identifier);
+     var a=e.ard_entry||{}, fm=(a.data&&a.data.frontmatter)||{};
+     // the entry as the API serves it, minus the inlined document — that is shown as markdown
+     // below, and repeating it here as an escaped one-line string helps nobody read it
+     var slim=JSON.parse(JSON.stringify(a));
+     if(slim.data){slim.data={mediaType:(a.data||{}).mediaType,
+        frontmatter:fm, content:'‹shown below›'};}
+     var h='<a class="back" href="#" id="bk">‹ back to '+esc(e.source)+' entries</a>'
+       +'<h1 style="font-size:1.25em">'+esc(a.displayName||e.identifier)+'</h1>'
+       +'<div class="id">'+esc(e.identifier)+'</div>'
+       +'<div class="lbl">the ARD entry <span class="pale">— GET /agents/entry?id='
+       +esc(e.identifier)+'</span></div>'
+       +'<pre>'+esc(JSON.stringify(slim,null,2))+'</pre>'
+       +'<p><a href="ard-api-entry?id='+encodeURIComponent(e.identifier)+'" id="rawjson">'
+       +'open the raw JSON ›</a></p>'
+       +'<div class="lbl">the OKF document this entry is generated from</div>'
+       +'<pre>'+esc(e.raw)+'</pre>'
+       +'<div class="lbl">source access descriptor</div>'
+       +'<p><a href="ard?id='+encodeURIComponent(e.access_doc)+'">'+esc(e.access_doc)+'</a>'
+       +' — the endpoint and query operations every leaf in this source inherits</p>';
+     document.getElementById('view').innerHTML=h;
+     document.getElementById('bk').onclick=function(ev){ev.preventDefault();go({source:e.source})};
+     var rj=document.getElementById('rawjson');
+     if(rj)rj.setAttribute('href','ard/entry?id='+encodeURIComponent(e.identifier));
+   });
+ }
+ window.onpopstate=render;
+ fetch('ard/publishers').then(function(r){return r.json()}).then(function(d){
+   SOURCES=d.publishers||[];render()});
+</script></body></html>"""
+
+
+
+# --- the NLWeb query, over this engine -------------------------------------------------------
+def _nlweb_text(ev):
+    """One engine progress event as a line of NLWeb intermediate_message prose."""
+    k = ev.get("kind")
+    if k == "status":
+        return f"{ev.get('icon','')} {ev.get('msg','')}".strip()
+    if k == "plan":
+        bits = [b for b in (f"entity {ev.get('entity')}" if ev.get("entity") else "",
+                            f"measure {ev.get('attribute')}" if ev.get("attribute") else "",
+                            f"period {ev.get('period')}" if ev.get("period") else "") if b]
+        return "🧭 " + " · ".join(bits) + f" · scanning {len(ev.get('sources') or [])} sources"
+    if k == "candidates":
+        return "📚 ARD returned " + str(len(ev.get("items") or [])) + " candidate tables"
+    if k == "plan_chosen":
+        return "🧭 " + (ev.get("summary") or ev.get("verdict") or "")
+    if k == "resolve":
+        return f"🧩 resolved “{ev.get('mention','')}” → {ev.get('label','')}"
+    return ""
+
+
+def run_nlweb(req):
+    """Generator of NLWeb messages for one query. The engine already narrates itself through
+    `_say`; those events become intermediate_message frames, so the protocol carries the same
+    play-by-play the native UI always showed rather than going quiet until the answer lands."""
+    st = nlweb.Stream(req.get("conversation_id"))
+    yield st.message(nlweb.BEGIN, "", "system")
+
+    pending = []
+    _EMIT.cb = lambda ev: pending.append(ev)          # collect narration on THIS thread
+    result, error = None, None
+    try:
+        result = run(req["query"], sites=req.get("sites") or None)
+    except SystemExit as e:                            # an honest refusal, not a crash
+        error = str(e)
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+    finally:
+        _EMIT.cb = None
+
+    for ev in pending:
+        line = _nlweb_text(ev)
+        if line:
+            yield st.message(nlweb.INTERMEDIATE, line, "system")
+
+    if error or not result:
+        yield st.message(nlweb.ERROR, error or "no answer", "system")
+        yield st.message(nlweb.END, "", "system")
+        return
+
+    site_of = {c["title"]: c.get("publisher") for c in (result.get("candidates") or [])}
+    items = [nlweb.item(c) for c in (result.get("candidates") or [])
+             if (c.get("score") or 0) >= req.get("min_score", 0)][:req.get("max_results", 10)]
+    # the table that actually answered belongs at the head of the list, whatever discovery ranked
+    src = result.get("source") or {}
+    if src.get("identifier"):
+        chosen = nlweb.item({"identifier": src["identifier"], "title": src.get("title"),
+                             "publisher": src.get("publisher"), "score": 100,
+                             "description": result.get("plan", ""),
+                             "schema_object": driver.frontmatter(src["identifier"]) or {}})
+        items = [chosen] + [i for i in items if i["url"] != chosen["url"]]
+        items = items[:max(1, req.get("max_results", 10))]
+    if items:
+        yield st.message(nlweb.RESULT, items)
+
+    if req.get("mode") != "list":
+        # `answer` and `items` are the GeneratedAnswer contract; the rest are additive fields a
+        # strict NLWeb client ignores and this engine's own UI uses to render rankings, record
+        # lists and the cost report. One protocol, no second endpoint.
+        yield st.message(nlweb.NLWS, {
+            "@type": "GeneratedAnswer",
+            "answer": result.get("answer") or "",
+            "items": items,
+            "shape": result.get("shape"),
+            "plan": result.get("plan"),
+            "data": result.get("data"),
+            "usage": result.get("usage"),
+            "discovery_usage": result.get("discovery_usage"),
+        })
+    if req.get("debug"):
+        yield st.message(nlweb.INTERMEDIATE,
+                         json.dumps({"shape": result.get("shape"), "plan": result.get("plan"),
+                                     "usage": result.get("usage"),
+                                     "discovery_usage": result.get("discovery_usage"),
+                                     "data": result.get("data")})[:20000], "system")
+    yield st.message(nlweb.COMPLETE, "", "system")
+    yield st.message(nlweb.END, "", "system")
+
+
 def serve(port):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 
     class H(BaseHTTPRequestHandler):
+        def _cors(self):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self._cors()
+            self.send_header("Access-Control-Max-Age", "86400")
+            self.end_headers()
+
         def _json(self, code, obj):
             b = json.dumps(obj).encode()
             self.send_response(code)
+            self._cors()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
@@ -1933,11 +2447,69 @@ def serve(port):
             self.wfile.write(body)
 
         def do_GET(self):
-            p = self.path.rstrip("/")
+            # split the query string off before routing — /ard/list?source=… must still match
+            # "/ard/list", which a raw self.path comparison never does
+            p = urllib.parse.urlparse(self.path).path.rstrip("/")
             if p in ("", "/"):
                 return self._html(PAGE)
             if p == "/techsoup":
                 return self._html(TECHSOUP_PAGE)
+            if p == "/healthz":
+                # Liveness for a load balancer / App Service health check: is the index loaded and
+                # is the finder reachable? Deliberately does NOT call the LLM — a health probe that
+                # costs money per poll is a bill, not a health check.
+                try:
+                    n = len(json.load(open(os.path.join(ROOT, "registry", "meta.json"))))
+                except Exception:
+                    n = 0
+                finder = False
+                try:
+                    ard_client.search("healthz", k=1, rerank=False)
+                    finder = True
+                except Exception:
+                    pass
+                code = 200 if (n and finder) else 503
+                return self._json(code, {"ok": code == 200, "tables": n, "agent_finder": finder})
+            if p == "/costs":
+                with _TOTALS_LOCK:
+                    t = json.loads(json.dumps(_TOTALS))     # snapshot under the lock
+                n = max(1, t["questions"])
+                t["avg_cost_per_question_usd"] = round((t["cost_usd"] + t["discovery_cost_usd"]) / n, 6)
+                t["combined_cost_usd"] = round(t["cost_usd"] + t["discovery_cost_usd"], 6)
+                t["cost_usd"] = round(t["cost_usd"], 6)
+                t["discovery_cost_usd"] = round(t["discovery_cost_usd"], 6)
+                for field in ("by_stage", "by_model"):
+                    t[field] = {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
+                                for k, v in sorted(t[field].items(),
+                                                   key=lambda kv: -kv[1]["cost_usd"])}
+                t["note"] = ("since process start; discovery_* is the ARD Agent Finder, a separate "
+                             "service, and is not included in cost_usd")
+                return self._json(200, t)
+            if p == "/ask":
+                return self._ask(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
+            if p == "/sites":
+                # an OKF source IS an NLWeb site: the corpus a result came from
+                return self._json(200, {"message_type": "sites",
+                                        "sites": [s["dir"] for s in _sources_catalog()]})
+            if p == "/health":
+                return self._json(200, {"status": "ok"})
+            if p in ("/ard", "/ard/"):
+                return self._html(ARD_PAGE)
+            if p == "/ard/publishers":
+                return self._json(200, {"publishers": _ard_publishers()})
+            if p == "/ard/manifest":
+                return self._json(200, ard_client.manifest())
+            if p == "/ard/list":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                return self._json(200, _ard_list(
+                    (qs.get("source") or [""])[0],
+                    int((qs.get("page") or ["1"])[0] or 1),
+                    int((qs.get("per") or ["50"])[0] or 50),
+                    (qs.get("q") or [""])[0]))
+            if p == "/ard/entry":
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                e = _ard_entry((qs.get("id") or [""])[0])
+                return self._json(200, e) if e else self._json(404, {"error": "no such entry"})
             if p == "/sources":
                 return self._json(200, {"sources": _sources_catalog(), "tabs": EXAMPLE_TABS})
             if p == "/techsoup-sources":
@@ -1947,75 +2519,115 @@ def serve(port):
                 return self._json(200, {"sources": srcs, "tabs": TECHSOUP_TABS})
             self._json(404, {"error": "not found"})
 
+        def _ask(self, params):
+            """The one query contract: NLWeb. Streams by default; `streaming=false` returns the
+            same messages as a single JSON document, which is what NLWeb clients expect."""
+            req = nlweb.parse_request(params)
+            if not req["query"]:
+                return self._json(400, {"error": "missing 'query'"})
+            ip = _client_ip(self)
+            allowed, used, reset_in = _quota_check(ip)
+            if not allowed:
+                self.send_response(429)
+                self._cors()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Retry-After", str(reset_in))
+                body = json.dumps({"error": f"daily limit reached: {ASK_LIMIT_PER_DAY} queries per "
+                                            f"day per source", "retry_after_seconds": reset_in}).encode()
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if not req["streaming"]:
+                msgs = list(run_nlweb(req))
+                _accumulate(_spent(), _spent_discovery())
+                return self._json(200, {"messages": msgs})
+
+            self.send_response(200)
+            self._cors()
+            for k, v in nlweb.SSE_HEADERS.items():
+                self.send_header(k, v)
+            self.end_headers()
+            try:
+                for m in run_nlweb(req):
+                    self.wfile.write(nlweb.encode(m, named=req["named_events"]))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass                                   # client hung up mid-stream; nothing to do
+            _accumulate(_spent(), _spent_discovery())
+
         def do_POST(self):
-            path = self.path.rstrip("/")
-            if path not in ("/ask", "/ask_stream"):
+            path = urllib.parse.urlparse(self.path).path.rstrip("/")
+            if path != "/ask":
                 return self._json(404, {"error": "not found"})
             n = int(self.headers.get("Content-Length", 0))
-            q = json.loads(self.rfile.read(n) or b"{}").get("question", "")
-            if not q:
-                return self._json(400, {"error": "missing 'question'"})
-            if path == "/ask":
-                try:
-                    self._json(200, run(q))
-                except driver.CredentialError as e:
-                    self._json(200, {"question": q, "answer": None, "error": f"Missing credential: {e}"})
-                except SystemExit as e:
-                    self._json(200, {"question": q, "answer": None, "error": str(e)})
-                except Exception as e:                    # rate-limit / timeout / anything: return JSON,
-                    self._json(200, {"question": q, "answer": None,   # never close the socket silently
-                                     "error": f"{type(e).__name__}: {e}"})
-                return
-            # Streaming play-by-play: emit each stage of the plan→find→resolve→fetch→check loop live.
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            self.end_headers()
-
-            def emit(ev):
-                try:
-                    self.wfile.write(("data: " + json.dumps(ev) + "\n\n").encode())
-                    self.wfile.flush()
-                    if ev.get("kind") in ("status", "resolve"):
-                        time.sleep(0.55)          # let each beat land — deliberate drama
-                    elif ev.get("kind") in ("plan", "candidates"):
-                        time.sleep(0.7)
-                except Exception:
-                    pass
-
-            _EMIT.cb = emit                # this thread only — never other in-flight requests
             try:
-                emit({"kind": "answer", **run(q)})
-            except driver.CredentialError as e:
-                emit({"kind": "error", "question": q, "error": f"Missing credential: {e}"})
-            except SystemExit as e:
-                emit({"kind": "error", "question": q, "error": str(e)})
-            except Exception as e:
-                emit({"kind": "error", "question": q, "error": str(e)})
-            finally:
-                _EMIT.cb = None
-                try:
-                    self.wfile.write(b"data: {\"kind\":\"done\"}\n\n")
-                    self.wfile.flush()
-                except Exception:
-                    pass
+                params = json.loads(self.rfile.read(n) or b"{}")
+            except ValueError:
+                return self._json(400, {"error": "invalid JSON body"})
+            self._ask(params if isinstance(params, dict) else {})
 
         def log_message(self, *a):
             pass
 
-    print(f"Query harness on http://127.0.0.1:{port}/  (POST /ask)")
-    HTTPServer(("127.0.0.1", port), H).serve_forever()
+    # Loopback by default — the /ask endpoint spends LLM credits per call and has no auth, so it
+    # is not something to bind to the world without saying so. Set BIND_HOST to expose it.
+    host = os.getenv("BIND_HOST", "127.0.0.1")
+    print(f"Query harness on http://{host}:{port}/  (POST /ask)")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print("  NOTE: bound beyond loopback. /ask is unauthenticated and each call costs money — "
+              "put it behind a proxy that terminates TLS and authenticates.")
+    HTTPServer((host, port), H).serve_forever()
+
+
+_STEP_ORDER = ["classify", "resolve-entity", "resolve-concept", "check", "synthesize", "other"]
+_STEP_LABEL = {"classify": "classify the question", "resolve-entity": "resolve the entity",
+               "resolve-concept": "resolve the measure", "check": "check the answer fits",
+               "synthesize": "write the answer", "other": "other"}
+
+
+def _print_cost_report(u, d, out=None):
+    """Per-step cost report, in pipeline order. Goes to stderr so piping the JSON stays clean."""
+    out = out or sys.stderr
+    if not u:
+        return
+    print(f"\n{'step':24}{'calls':>7}{'tokens':>10}{'cost':>12}", file=out)
+    print("-" * 53, file=out)
+    tot_cost = tot_tok = tot_calls = 0
+    for k in _STEP_ORDER:
+        v = (u.get("by_stage") or {}).get(k)
+        if not v:
+            continue
+        tot_cost += v["cost_usd"]; tot_tok += v["tokens"]; tot_calls += v["calls"]
+        print(f"{_STEP_LABEL.get(k, k):24}{v['calls']:>7}{v['tokens']:>10,}"
+              f"{'$' + format(v['cost_usd'], '.5f'):>12}", file=out)
+    if d.get("llm_calls"):
+        print("-" * 53, file=out)
+        print(f"{'discovery (agent finder)':24}{d['llm_calls']:>7}{d['total_tokens']:>10,}"
+              f"{'$' + format(d['cost_usd'], '.5f'):>12}", file=out)
+        tot_cost += d["cost_usd"]; tot_tok += d["total_tokens"]; tot_calls += d["llm_calls"]
+    print("-" * 53, file=out)
+    print(f"{'TOTAL':24}{tot_calls:>7}{tot_tok:>10,}{'$' + format(tot_cost, '.5f'):>12}", file=out)
+    src = "billed by provider" if u.get("cost_source") == "provider" else "estimated from a price table"
+    print(f"({src}; resolution steps are cached per process)", file=out)
+
 
 
 def main(argv):
-    import llm
     if not llm.have_credentials():
         sys.exit(llm._NO_CREDS)
     if argv and argv[0] == "--serve":
-        port = int(argv[argv.index("--port") + 1]) if "--port" in argv else 8099
+        # --port wins; then PORT/WEBSITES_PORT, which is how App Service and most PaaS hosts tell
+        # an app where to listen; then the local default.
+        if "--port" in argv:
+            port = int(argv[argv.index("--port") + 1])
+        else:
+            port = int(os.getenv("PORT") or os.getenv("WEBSITES_PORT") or 8099)
         return serve(port)
-    print(json.dumps(run(" ".join(argv) or "How much did Apple spend on R&D in 2023?"), indent=2))
+    res = run(" ".join(argv) or "How much did Apple spend on R&D in 2023?")
+    print(json.dumps(res, indent=2))
+    _print_cost_report(res.get("usage") or {}, res.get("discovery_usage") or {})
 
 
 if __name__ == "__main__":

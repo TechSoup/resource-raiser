@@ -1,7 +1,11 @@
 ---
 type: Organization Profile Fact
 title: Year Founded — Organization Profile (Nonprofit)
-description: The year a nonprofit was founded or established.
+description: This measure captures the year in which a nonprofit organization was
+  founded or established, marking its inception in the nonprofit sector. It specifically
+  refers to the founding year and does not include subsequent milestones or changes
+  in status. The reporting is at the organizational level, providing a historical
+  reference point for the nonprofit's existence.
 tags:
 - nonprofit
 - profile

@@ -1,8 +1,13 @@
 ---
 type: Grant Graph — Biggest Recipients (ranking)
 title: The biggest grant recipients — IRS 990 grant graph
-description: Rank organizations by the grant money they RECEIVE, or by how many different
-  funders back them (an in-degree over the grant graph), from IRS 990 e-file data, 2022-2024.
+description: This measure reports on the largest organizations that receive grant
+  funding, ranking them based on the total amount of grant money they receive or the
+  number of different funders supporting them. It specifically focuses on the philanthropic
+  grants between US nonprofits and foundations, as reported in IRS Form 990 data.
+  Unlike broader measures that may include all types of funding, this data is limited
+  to grants received and does not account for other forms of income. The reporting
+  is done per organization for the fiscal years 2022 to 2024.
 tags:
 - grants
 - recipients

@@ -1,8 +1,20 @@
 ---
 type: Federal Funding Dataset
 title: Federal Funding Opportunities — Grants.gov
-description: Open federal grant opportunities an organization can apply for, searchable by topic or program area.
-tags: [nonprofit, funding, grants, opportunities, grants-gov, apply]
+description: This measure reports on open federal grant funding opportunities available
+  for organizations to apply for, categorized by various topics or program areas.
+  It specifically describes the landscape of federal funding options, allowing users
+  to search for grants that align with their interests or needs. This measure is distinct
+  from other funding reports as it focuses solely on current opportunities rather
+  than historical data or completed grants. The reporting is organized per opportunity,
+  providing a comprehensive view of available funding options.
+tags:
+- nonprofit
+- funding
+- grants
+- opportunities
+- grants-gov
+- apply
 source: ./_access.md
 search:
   operation: search_opportunities
@@ -10,9 +22,9 @@ search:
   want: keyword
   extract: data.oppHits
 representativeQueries:
-  - "What federal grants can a nonprofit apply for in education?"
-  - "Open grant opportunities for health programs"
-  - "Find funding opportunities for the arts"
+- What federal grants can a nonprofit apply for in education?
+- Open grant opportunities for health programs
+- Find funding opportunities for the arts
 ---
 
 # Schema

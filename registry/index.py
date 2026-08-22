@@ -36,9 +36,42 @@ def frontmatter(path):
     return yaml.safe_load(fm) or {}
 
 
-def index_text(fm):
+_SCOPE_CACHE = {}
+
+
+def scope_of(path, fm):
+    """The SUBJECT SCOPE of a leaf — the kind of entity its source describes — taken from the
+    source's `_access.md` `entityType`.
+
+    Leaves are otherwise scope-blind, and that is what makes near-duplicate measures unstable:
+    "Total revenue for the year" reads identically for a nonprofit's Form 990 and a public
+    company's 10-K, so the two embed within 0.001 of each other and discovery picks one on a
+    coin flip. The scope text is already authored per source (the classifier uses it to choose
+    sources); this puts it in front of the embedding and the re-ranker too."""
+    src = fm.get("source")
+    if not (path and src):
+        return ""
+    ap = os.path.normpath(os.path.join(os.path.dirname(path), src))
+    if ap not in _SCOPE_CACHE:
+        try:
+            _SCOPE_CACHE[ap] = ((frontmatter(ap) or {}).get("entityType") or "").strip()
+        except Exception:
+            _SCOPE_CACHE[ap] = ""
+    return _SCOPE_CACHE[ap]
+
+
+def index_text(fm, path=None):
+    """The text a leaf is embedded as: title, the questions people ask for it, its subject
+    scope, and its FULL definition. The description is no longer truncated — the tail of a
+    definition is where a concept's exclusions live, and those are exactly what separate it
+    from its siblings."""
     rq = fm.get("representativeQueries", []) or []
-    return ". ".join([fm.get("title", "")] + rq + [(fm.get("description", "") or "")[:200]])
+    scope = scope_of(path, fm)
+    parts = [fm.get("title", "")] + rq
+    if scope:
+        parts.append(f"Describes {scope}")
+    parts.append(fm.get("description", "") or "")
+    return ". ".join(p for p in parts if p)
 
 
 def normed(v):
@@ -64,11 +97,12 @@ def build(batch=96, limit=None):
         fm = frontmatter(path)
         if not fm or not fm.get("representativeQueries"):
             continue                                   # skip _access docs / non-entries
-        text = index_text(fm)
+        text = index_text(fm, path)
         docs.append({
             "identifier": os.path.relpath(path, ROOT),
             "title": fm.get("title", ""),
-            "description": (fm.get("description") or "")[:280],
+            "scope": scope_of(path, fm),
+            "description": (fm.get("description") or "")[:600],
             "concept": fm.get("concept"),
             "source": fm.get("source"),
             "queries": (fm.get("representativeQueries") or [])[:6],
@@ -128,9 +162,18 @@ def build(batch=96, limit=None):
 
 
 def _card(i, c):
-    """Everything the reranker knows about a candidate: title, description, example queries."""
+    """What the re-ranker sees for one candidate: what the table is, whose data it covers, and how
+    people ask for it.
+
+    NOT the description. The description exists to make the EMBEDDING discriminate — that is where
+    a long definition earns its cost, and the prefilter has already used it by the time we get
+    here. Repeating it to the re-ranker doubles the prompt (838 -> 429 chars per card, and a
+    re-rank sends 60 of them) to restate what the title, scope and example queries already say.
+    Set ARD_RERANK_DESC=1 to put it back."""
     s = f"{i}. {c['title']}"
-    if c.get("description"):
+    if c.get("scope"):
+        s += f"\n   covers: {c['scope']}"
+    if c.get("description") and os.getenv("ARD_RERANK_DESC", "0").lower() in ("1", "true", "yes"):
         s += f"\n   about: {c['description']}"
     if c.get("queries"):
         s += "\n   people ask: " + " | ".join(c["queries"][:6])
@@ -157,7 +200,8 @@ def _rerank(query, candidates, k):
             "For an amount prefer a dollar/count/median value; for a rate or share prefer a percentage. "
             f'Return JSON {{"ranked":[{{"i":<candidate number>,"score":<0-100 relevance>}}]}} '
             f"for the {k} most relevant tables, best first. Omit only the CLEARLY irrelevant.",
-            f"Query: {query}\n\nCandidate tables:\n{listing}", json_mode=True)).get("ranked", [])
+            f"Query: {query}\n\nCandidate tables:\n{listing}", json_mode=True,
+            model=llm.rerank_model())).get("ranked", [])
     except Exception:
         return []
     out = []
@@ -181,12 +225,34 @@ def _srcdir(identifier):
     return parts[1] if len(parts) > 2 else None
 
 
-def search(query, k=5, prefilter=60, sources=None, rerank=True):
+# How many embedding hits get handed to the LLM re-rank. The single biggest lever on discovery
+# cost, since the re-rank prompt is prefilter x one candidate card.
+#
+# Measured on the 193-case routing corpus (tests/route_eval.py), smaller is BOTH cheaper and more
+# accurate — it is not a cost/quality trade-off:
+#
+#   prefilter   top-1   top-3   $/question
+#      60       91.2%   93.3%   $0.00096
+#      40       92.2%   93.3%   $0.00080
+#      25       92.2%   93.8%   $0.00061
+#      15       93.8%   93.8%   $0.00051
+#   no re-rank  89.1%   93.3%   $0.00000
+#
+# Handing the re-ranker 60 candidates gives it 45 more chances to prefer a plausible sibling over
+# the right table; the embedding prefilter, now that leaves carry full descriptions, is the better
+# judge of which tables are even in contention. The re-rank still earns its keep (+4.7pt over none)
+# — it just wants a short list. Raise it if a source's leaves are so alike that the embedding
+# cannot separate them.
+PREFILTER = int(os.getenv("ARD_PREFILTER", "15"))
+
+
+def search(query, k=5, prefilter=None, sources=None, rerank=True):
     """Two-stage retrieval: embedding cosine prefilter (optionally scoped to given
     source directories — pass 2 of the entity->source, attribute->field design),
     then small-LM re-rank of the attribute against the fields in scope."""
     if os.getenv("ARD_RERANK", "1").lower() in ("0", "false", "no"):
         rerank = False                                 # embedding-only (fast on slow/local models)
+    prefilter = prefilter or PREFILTER
     vecs, meta = _store()
     q = normed(embed([query]))[0]
     scores = vecs @ q

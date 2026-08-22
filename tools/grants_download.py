@@ -3,7 +3,7 @@
 
 Disk-frugal: download one monthly ZIP, unzip to a temp dir, extract edges, delete both. Peak
 disk is ~one ZIP (a few hundred MB), never the whole corpus — but it still streams the entire
-2022-2024 e-file set over the wire (~50-70 GB, ~9-13 h). Resumable — a ZIP already recorded in the
+2022-2024 e-file set over the wire (26 monthly ZIPs, ~13 GB, ~1-2 h). Resumable — a ZIP already recorded in the
 done_files table is skipped, so a re-run continues where it stopped.
 
 NOTE: while this runs, the SQLite writer holds data/990/grants.sqlite, so the read-only grant query

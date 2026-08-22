@@ -1,7 +1,13 @@
 ---
 type: Census ACS Population Field (BigQuery)
 title: Median Home Value by county — US Census ACS (BigQuery)
-description: Rank, filter or aggregate US COUNTIES by median home value (owner_occupied_housing_units_median_value).
+description: This measure indicates the median home value for owner-occupied housing
+  units in US counties, representing the middle value of homes owned by residents.
+  It describes the real estate market and property values within the county, providing
+  insights into housing affordability and investment potential. Unlike average home
+  value measures, which can be influenced by outliers, the median home value focuses
+  on the midpoint, offering a clearer picture of typical home prices. The unit is
+  reported in dollars, reflecting the median value of homes.
 tags:
 - census
 - acs

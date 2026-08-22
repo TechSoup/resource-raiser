@@ -1,7 +1,13 @@
 ---
 type: Census ACS Population Field (BigQuery)
 title: Median Household Income by county — US Census ACS (BigQuery)
-description: Rank, filter or aggregate US COUNTIES by median household income (median_income).
+description: This measure reports the median household income for US counties, indicating
+  the middle income level of households within the area. It describes the economic
+  conditions of families and individuals living in the county, allowing for comparisons
+  of financial health across different regions. Unlike per capita income, which averages
+  individual earnings, median household income focuses on the income of entire households,
+  providing a different perspective on economic status. The unit is reported in dollars,
+  representing the median income level.
 tags:
 - census
 - acs

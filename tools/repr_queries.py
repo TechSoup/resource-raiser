@@ -8,12 +8,39 @@ variants. Uniform across every source; no per-concept curation.
 
 Batched and cached to repr_queries_cache.json, so a rebuild is cheap and stable.
 """
-import os, sys, json
+import os, re, sys, json
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..")))
 import driver                                                   # reuse the Azure client + ask_llm
 
 CACHE = os.path.join(os.path.dirname(__file__), "repr_queries_cache.json")
 _cache = json.load(open(CACHE)) if os.path.exists(CACHE) else {}
+
+
+_PLACEHOLDER = re.compile(r"[{<]\s*\w+\s*[}>]")
+
+
+def _clean(raw, label, lo=2, hi=5):
+    """Normalise a batch of generated queries.
+
+    ARD builds its semantic index from these, so junk here is not cosmetic — a duplicate is dead
+    weight in the embedding, and a template placeholder ("tuition at {school}") embeds the literal
+    braces. The spec's conformance tester also warns outside 2-5 examples, so cap the count.
+    """
+    out, seen = [], set()
+    for q in raw:
+        if not isinstance(q, str):
+            continue
+        q = " ".join(q.split())                                 # collapse stray whitespace
+        if len(q) < 12 or _PLACEHOLDER.search(q):
+            continue
+        key = q.lower().rstrip("?.")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+        if len(out) >= hi:
+            break
+    return out if len(out) >= lo else (out or [label])
 
 
 def for_items(items, domain, batch=25, on_ready=None):
@@ -47,8 +74,7 @@ def for_items(items, domain, batch=25, on_ready=None):
         except Exception:
             got = {}
         for j, (k, lab, _defn) in enumerate(pending):
-            qs = [q for q in got.get(j, []) if isinstance(q, str) and q.strip()]
-            _cache[k] = qs or [lab]                             # fall back to the label alone
+            _cache[k] = _clean(got.get(j, []), lab)
         json.dump(_cache, open(CACHE, "w"))
         for k, _lab, _defn in pending:
             emit(k, _cache[k])
@@ -58,7 +84,7 @@ def for_items(items, domain, batch=25, on_ready=None):
     for it in items:
         k = it[0]
         if k in _cache:
-            emit(k, _cache[k])                                  # already known — write it out now
+            emit(k, _clean(_cache[k], it[1]))                   # clean cached entries too
         else:
             pending.append(it)
             if len(pending) >= batch:

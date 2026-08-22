@@ -1,7 +1,12 @@
 ---
 type: Census ACS Population Field (BigQuery)
 title: Median Gross Rent by county — US Census ACS (BigQuery)
-description: Rank, filter or aggregate US COUNTIES by median gross rent (median_rent).
+description: This measure provides the median gross rent for housing units in US counties,
+  reflecting the middle rent price paid by tenants. It describes the rental market
+  conditions and affordability for residents within the county. Unlike average rent
+  measures, which can be skewed by extremely high or low rents, the median gross rent
+  focuses on the midpoint, offering a more stable indicator of rental costs. The unit
+  is reported in dollars, representing the median rent amount.
 tags:
 - census
 - acs

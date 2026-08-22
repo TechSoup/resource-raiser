@@ -1,8 +1,12 @@
 ---
 type: Nonprofit 990 Population Field (BigQuery)
 title: Officer Compensation — IRS 990 population (BigQuery)
-description: Rank, filter or count US nonprofits by officer compensation (compnsatncurrofcr)
-  across ALL filers.
+description: This measure reports the total compensation paid to officers of US tax-exempt
+  nonprofits, allowing for ranking, filtering, or counting across all filers. It specifically
+  focuses on officer compensation, distinguishing it from other financial metrics
+  such as total expenses or revenue. The data is presented as a count per organization
+  for each fiscal year, providing insights into compensation practices within the
+  nonprofit sector.
 tags:
 - nonprofit
 - irs

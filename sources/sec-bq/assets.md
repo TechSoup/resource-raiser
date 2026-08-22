@@ -1,8 +1,12 @@
 ---
 type: SEC Financials Population Field (BigQuery)
 title: Total Assets by company — SEC financials (BigQuery)
-description: Rank, filter or count US public companies by total assets across ALL
-  SEC filers.
+description: Total Assets measures the overall value of all assets owned by SEC-reporting
+  public companies, providing a comprehensive view of their financial strength. This
+  measure specifically pertains to the population of SEC-reporting public companies,
+  allowing for ranking, filtering, and counting based on total assets. It is distinct
+  from other financial measures as it focuses solely on assets, excluding liabilities
+  or equity. The reporting is done per organization for each fiscal year.
 tags:
 - sec
 - edgar

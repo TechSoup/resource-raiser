@@ -14,19 +14,132 @@ when possible. The funder EIN is always present (it is the filer); recipient EIN
 Schedule I but not for 990-PF, so reverse also falls back to a name match and says which it used.
 Credential-free and local: the edge table is a small sqlite file, so this needs no GCP project.
 """
-import os, sqlite3, re
+import os, sqlite3, re, decimal, threading
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB = os.getenv("GRANTS_DB") or os.path.join(ROOT, "data", "990", "grants.sqlite")
+# Managed Postgres holding the same edge table. Set GRANTS_URL (or DATABASE_URL) and the queries
+# below run against it instead of the local file; unset, everything falls back to sqlite.
+URL = os.getenv("GRANTS_URL") or os.getenv("DATABASE_URL")
 SOURCE = "IRS Form 990 e-file grants (Schedule I + 990-PF, 2022-2024)"
 
 
+class _Rows:
+    """Cursor wrapper that hands back plain Python numbers.
+
+    Postgres returns `numeric` for SUM() over an integer column, which psycopg maps to Decimal —
+    and Decimal is not JSON-serializable, so it reaches the caller as a 500 at response-encoding
+    time, far from the query that produced it. sqlite has no such type, so every value here is
+    expected to be int/float/str."""
+
+    def __init__(self, cur):
+        self._cur = cur
+
+    @staticmethod
+    def _plain(v):
+        if isinstance(v, decimal.Decimal):
+            return int(v) if v == v.to_integral_value() else float(v)
+        return v
+
+    def _row(self, r):
+        return None if r is None else tuple(self._plain(v) for v in r)
+
+    def fetchone(self):
+        return self._row(self._cur.fetchone())
+
+    def fetchall(self):
+        return [self._row(r) for r in self._cur.fetchall()]
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class _Pg:
+    """The sqlite3 connection surface this module already uses, backed by Postgres.
+
+    Every query here is portable aggregate SQL, so the port is two dialect fixes rather than a
+    rewrite:
+
+      `?` -> `%s`     placeholder style.
+      LIKE -> ILIKE   sqlite's LIKE ignores ASCII case; Postgres's does not. The lookups here
+                      match an upper-cased needle (`%STANFORD%`) against names that are only
+                      ~89% upper-case in the IRS data, so a literal port would silently drop
+                      about one match in nine — the kind of loss that reads as "no grants found"
+                      rather than as an error.
+
+    Connections are POOLED, not opened per query. Opening one costs a TCP handshake plus a TLS
+    negotiation, which is a few round trips — trivial on a local socket, ~1.5s when the caller and
+    the database are on different continents. sqlite made a fresh handle per call essentially free,
+    so the code was written that way; against a managed database that pattern dominated the
+    response time. Handles are kept per THREAD (the server is threaded, and a psycopg connection
+    is not safe to share across threads) and reused for the life of the process."""
+
+    _local = threading.local()
+
+    def __init__(self, url):
+        self._url = url
+        self._c = self._acquire(url)
+
+    @classmethod
+    def _acquire(cls, url):
+        """This thread's connection, opened once and revived if the server dropped it."""
+        import psycopg
+        c = getattr(cls._local, "conn", None)
+        if c is not None and getattr(cls._local, "url", None) == url:
+            if not c.closed and not _broken(c):
+                return c
+            try:
+                c.close()
+            except Exception:
+                pass
+        c = psycopg.connect(url, connect_timeout=20, autocommit=True)
+        cls._local.conn, cls._local.url = c, url
+        return c
+
+    @staticmethod
+    def _translate(sql):
+        return re.sub(r"\bLIKE\b", "ILIKE", sql.replace("?", "%s"), flags=re.I)
+
+    def execute(self, sql, params=()):
+        try:
+            cur = self._c.cursor()
+            cur.execute(self._translate(sql), tuple(params))
+        except Exception:
+            # A pooled handle can go stale between questions (idle timeout, failover, restart).
+            # Reconnect once and retry, so a recycled connection is not a failed answer.
+            type(self)._local.conn = None
+            self._c = self._acquire(self._url)
+            cur = self._c.cursor()
+            cur.execute(self._translate(sql), tuple(params))
+        return _Rows(cur)
+
+    def close(self):
+        pass                               # pooled: the handle outlives the caller
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False                       # nothing to release — see close()
+
+
+def _broken(c):
+    """True if the server has gone away on this handle."""
+    try:
+        from psycopg.pq import TransactionStatus
+        return bool(c.closed) or c.info.transaction_status == TransactionStatus.UNKNOWN
+    except Exception:
+        return True
+
+
 def _conn():
+    if URL:
+        return _Pg(URL)
     return sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 
 
 def available():
-    if not os.path.exists(DB):
+    if not URL and not os.path.exists(DB):
         return False
     try:
         with _conn() as c:
@@ -56,9 +169,24 @@ def _disp(v):
     return "${:,.0f}".format(v or 0)
 
 
+# --- population-scale queries ---------------------------------------------------------------
+# "Across the whole graph" answers (top grantmakers, biggest recipients, dollars by cause, by
+# state, the overview) each scan all 7.8M edges. sqlite does that from a local file in seconds; a
+# 1-vCore managed server takes 45s for a GROUP BY and ~280s for the cause join — a timeout, not a
+# slow query. The edge table never changes, so tools/grants_to_postgres.py precomputes those
+# aggregates once into agg_* tables and these read from them.
+ROLLUPS = bool(URL)
+
+
+def _rollup_or(sql_rollup, sql_scan):
+    """The rollup query when the aggregates exist, else the full scan."""
+    return sql_rollup if ROLLUPS else sql_scan
+
+
+
 def _forward_rows(c, where, arg, n):
     rows = c.execute(
-        f"SELECT recipient_name, recipient_ein, SUM(amount) amt, COUNT(*) k "
+        f"SELECT recipient_name, MAX(recipient_ein), SUM(amount) amt, COUNT(*) k "
         f"FROM grant_edges WHERE {where} AND amount>0 GROUP BY recipient_name "
         f"ORDER BY amt DESC LIMIT ?", arg + (n,)).fetchall()
     tot = c.execute(f"SELECT SUM(amount), COUNT(*), COUNT(DISTINCT recipient_name) "
@@ -106,7 +234,7 @@ def _dominant_recipient_ein(c, name):
     the most money is the real Stanford — more reliable than the generic name resolver, which can
     latch onto a tiny similarly-named org. Returns (ein, label) or (None, None) if no EIN'd match."""
     row = c.execute(
-        "SELECT recipient_ein, recipient_name, SUM(amount) amt FROM grant_edges "
+        "SELECT recipient_ein, MAX(recipient_name), SUM(amount) amt FROM grant_edges "
         "WHERE recipient_name LIKE ? AND recipient_ein<>'' AND amount>0 "
         "GROUP BY recipient_ein ORDER BY amt DESC LIMIT 1", (f"%{name.upper()}%",)).fetchone()
     return (row[0], row[1]) if row else (None, None)
@@ -133,7 +261,7 @@ def reverse(name, n=12):
         else:
             disp = name  # no EIN'd match — show what the user asked
         rows = c.execute(
-            f"SELECT funder_name, funder_ein, SUM(amount) amt, COUNT(*) k "
+            f"SELECT MAX(funder_name), funder_ein, SUM(amount) amt, COUNT(*) k "
             f"FROM grant_edges WHERE {where} AND amount>0 GROUP BY funder_ein "
             f"ORDER BY amt DESC LIMIT ?", arg + (n,)).fetchall()
         tot = c.execute(f"SELECT SUM(amount), COUNT(DISTINCT funder_ein) "
@@ -169,10 +297,13 @@ def biggest_recipients(n=10, by="dollars", ascending=False):
     order = "COUNT(DISTINCT funder_ein)" if by == "funders" else "SUM(amount)"
     direction = "ASC" if ascending else "DESC"
     with _conn() as c:
-        rows = c.execute(
+        rows = c.execute(_rollup_or(
+            f"SELECT recipient_name, amount amt, funders fn FROM agg_recipient "
+            f"WHERE recipient_name<>'' ORDER BY {'funders' if by == 'funders' else 'amount'} "
+            f"{direction} LIMIT ?",
             f"SELECT recipient_name, SUM(amount) amt, COUNT(DISTINCT funder_ein) fn "
             f"FROM grant_edges WHERE amount>0 AND recipient_name<>'' "
-            f"GROUP BY recipient_name ORDER BY {order} {direction} LIMIT ?", (n,)).fetchall()
+            f"GROUP BY recipient_name ORDER BY {order} {direction} LIMIT ?"), (n,)).fetchall()
     rank = [{"label": r[0], "entity": f"recipient/{r[0]}",
              "value": (r[2] if by == "funders" else r[1]),
              "value_display": (f"{r[2]} funders" if by == "funders" else _disp(r[1])),
@@ -234,16 +365,21 @@ def geo(mode="recipients", from_state=None, to_state=None, n=12, ascending=False
     direction = "ASC" if ascending else "DESC"
     with _conn() as c:
         if mode == "flow" and from_state and to_state:
-            row = c.execute("SELECT SUM(amount), COUNT(*) FROM grant_edges WHERE funder_state=? "
-                            "AND recipient_state=? AND amount>0", (from_state, to_state)).fetchone()
+            row = c.execute(_rollup_or(
+                "SELECT SUM(amount), SUM(grants) FROM agg_state WHERE funder_state=? "
+                "AND recipient_state=?",
+                "SELECT SUM(amount), COUNT(*) FROM grant_edges WHERE funder_state=? "
+                "AND recipient_state=? AND amount>0"), (from_state, to_state)).fetchone()
             return {"direction": "geo_flow", "from_state": _ABBR.get(from_state, from_state),
                     "to_state": _ABBR.get(to_state, to_state),
                     "total_display": _disp(row[0] or 0), "grant_count": row[1] or 0, "source": SOURCE}
         col = "funder_state" if mode == "funders" else "recipient_state"
-        rows = c.execute(
+        rows = c.execute(_rollup_or(
+            f"SELECT {col}, SUM(amount) amt, SUM(grants) k FROM agg_state "
+            f"WHERE {col} IS NOT NULL AND {col}<>'' GROUP BY {col} ORDER BY amt {direction} LIMIT ?",
             f"SELECT {col}, SUM(amount) amt, COUNT(*) k FROM grant_edges "
             f"WHERE amount>0 AND {col} IS NOT NULL AND {col}<>'' "
-            f"GROUP BY {col} ORDER BY amt {direction} LIMIT ?", (n,)).fetchall()
+            f"GROUP BY {col} ORDER BY amt {direction} LIMIT ?"), (n,)).fetchall()
     rank = [{"label": _ABBR.get(r[0], r[0]), "entity": f"state/{r[0]}", "value": r[1],
              "value_display": _disp(r[1]), "grants": r[2]} for r in rows]
     verb = "sent" if mode == "funders" else "received"
@@ -259,11 +395,17 @@ def overview(year=None):
     if year:
         where, arg = ("WHERE amount>0 AND tax_year=?", (year,))
     with _conn() as c:
-        n, tot, avg, nf, nr = c.execute(
-            f"SELECT COUNT(*), SUM(amount), AVG(amount), COUNT(DISTINCT funder_ein), "
-            f"COUNT(DISTINCT recipient_name) FROM grant_edges {where}", arg).fetchone()
-        by_year = c.execute("SELECT tax_year, COUNT(*), SUM(amount) FROM grant_edges "
-                            "WHERE amount>0 GROUP BY tax_year ORDER BY tax_year").fetchall()
+        if ROLLUPS and not year:       # the whole-graph figures are precomputed; a single year is not
+            n, tot, avg, nf, nr = c.execute(
+                "SELECT grants, amount, avg_amount, funders, recipients FROM agg_overview").fetchone()
+        else:
+            n, tot, avg, nf, nr = c.execute(
+                f"SELECT COUNT(*), SUM(amount), AVG(amount), COUNT(DISTINCT funder_ein), "
+                f"COUNT(DISTINCT recipient_name) FROM grant_edges {where}", arg).fetchone()
+        by_year = c.execute(_rollup_or(
+            "SELECT tax_year, grants, amount FROM agg_year ORDER BY tax_year",
+            "SELECT tax_year, COUNT(*), SUM(amount) FROM grant_edges "
+            "WHERE amount>0 GROUP BY tax_year ORDER BY tax_year")).fetchall()
     return {"direction": "overview", "scope": (f"tax year {year}" if year else "2022-2024 filings"),
             "grant_count": n or 0, "total_display": _disp(tot or 0), "avg_grant_display": _disp(avg or 0),
             "funder_count": nf or 0, "recipient_count": nr or 0,
@@ -277,8 +419,11 @@ def funders_above(threshold, n=60, ascending=False):
     op = "<" if ascending else ">"
     with _conn() as c:
         rows = c.execute(
-            f"SELECT funder_name, SUM(amount) amt, COUNT(*) k FROM grant_edges WHERE amount>0 "
-            f"GROUP BY funder_ein HAVING SUM(amount) {op} ? ORDER BY amt {direction} LIMIT ?",
+            _rollup_or(
+                f"SELECT funder_name, amount amt, grants k FROM agg_funder WHERE amount {op} ? "
+                f"ORDER BY amt {direction} LIMIT ?",
+                f"SELECT MAX(funder_name), SUM(amount) amt, COUNT(*) k FROM grant_edges WHERE amount>0 "
+                f"GROUP BY funder_ein HAVING SUM(amount) {op} ? ORDER BY amt {direction} LIMIT ?"),
             (float(threshold), n)).fetchall()
     rank = [{"label": r[0], "entity": f"grantmaker/{r[0]}", "value": r[1],
              "value_display": _disp(r[1]), "grants": r[2]} for r in rows]
@@ -319,17 +464,25 @@ def grants_by_cause(cause=None, n=15):
     joining recipient_ein to the BMF NTEE lookup. Schedule I slice only (see coverage)."""
     major, word = cause_of(cause) if cause else (None, None)
     with _conn() as conn:
-        conn.execute("ATTACH DATABASE ? AS ntee", (f"file:{NTEE_DB}?mode=ro",))
+        # The NTEE lookup is a SEPARATE sqlite file, so sqlite has to ATTACH it before it can be
+        # joined. Postgres has no ATTACH — both tables live in the one database — so the only
+        # difference is what the table is called.
+        nt = "ntee"
+        if not ROLLUPS:                    # only the live join needs the lookup attached
+            conn.execute("ATTACH DATABASE ? AS ntee", (f"file:{NTEE_DB}?mode=ro",))
+            nt = "ntee.ntee"
         if major:
-            row = conn.execute(
-                "SELECT n.category, SUM(g.amount), COUNT(*) FROM grant_edges g JOIN ntee.ntee n "
-                "ON g.recipient_ein=n.ein WHERE g.amount>0 AND n.major=?", (major,)).fetchone()
+            row = conn.execute(_rollup_or(
+                "SELECT category, amount, grants FROM agg_cause WHERE major=?",
+                f"SELECT MAX(n.category), SUM(g.amount), COUNT(*) FROM grant_edges g JOIN {nt} n "
+                f"ON g.recipient_ein=n.ein WHERE g.amount>0 AND n.major=?"), (major,)).fetchone()
             return {"direction": "by_cause_one", "cause": (row[0] if row and row[0] else word),
                     "total_display": _disp((row[1] if row else 0) or 0),
                     "grant_count": (row[2] if row else 0) or 0, "coverage": _COVERAGE, "source": SOURCE}
-        rows = conn.execute(
-            "SELECT n.category, SUM(g.amount) amt, COUNT(*) k FROM grant_edges g JOIN ntee.ntee n "
-            "ON g.recipient_ein=n.ein WHERE g.amount>0 GROUP BY n.major ORDER BY amt DESC LIMIT ?",
+        rows = conn.execute(_rollup_or(
+            "SELECT category, amount amt, grants k FROM agg_cause ORDER BY amt DESC LIMIT ?",
+            f"SELECT MAX(n.category), SUM(g.amount) amt, COUNT(*) k FROM grant_edges g JOIN {nt} n "
+            f"ON g.recipient_ein=n.ein WHERE g.amount>0 GROUP BY n.major ORDER BY amt DESC LIMIT ?"),
             (n,)).fetchall()
     rank = [{"label": r[0], "entity": f"cause/{r[0]}", "value": r[1], "value_display": _disp(r[1]),
              "grants": r[2]} for r in rows]
@@ -341,9 +494,10 @@ def top_grantmakers(n=10, ascending=False):
     """Population ranking: the biggest grantmakers by total dollars granted, 2022-2024."""
     order = "ASC" if ascending else "DESC"
     with _conn() as c:
-        rows = c.execute(
-            f"SELECT funder_name, SUM(amount) amt, COUNT(*) k FROM grant_edges "
-            f"WHERE amount>0 GROUP BY funder_ein ORDER BY amt {order} LIMIT ?", (n,)).fetchall()
+        rows = c.execute(_rollup_or(
+            f"SELECT funder_name, amount amt, grants k FROM agg_funder ORDER BY amt {order} LIMIT ?",
+            f"SELECT MAX(funder_name), SUM(amount) amt, COUNT(*) k FROM grant_edges "
+            f"WHERE amount>0 GROUP BY funder_ein ORDER BY amt {order} LIMIT ?"), (n,)).fetchall()
     rank = [{"label": r[0], "entity": f"grantmaker/{r[0]}", "value": r[1],
              "value_display": _disp(r[1]), "grants": r[2]} for r in rows]
     return {"measure": "total granted", "complete": True, "ranking": rank,

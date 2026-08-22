@@ -1,8 +1,13 @@
 ---
 type: SEC Financials Population Field (BigQuery)
 title: Net Income by company — SEC financials (BigQuery)
-description: Rank, filter or count US public companies by net income across ALL SEC
-  filers.
+description: Net Income represents the profit of SEC-reporting public companies after
+  all expenses, taxes, and costs have been deducted from total revenue. This measure
+  is relevant to the population of SEC-reporting public companies, enabling users
+  to rank, filter, or count companies based on their profitability. It is different
+  from revenue or total assets, as it specifically reflects the bottom line of financial
+  performance rather than overall income or asset value. The reporting is done per
+  organization for each fiscal year.
 tags:
 - sec
 - edgar
