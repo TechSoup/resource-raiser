@@ -1,7 +1,11 @@
 ---
 type: Organization Profile Fact
 title: Number of Employees — Organization Profile (Nonprofit)
-description: How many people a nonprofit employs (Wikidata).
+description: This measure reports the total number of individuals employed by a nonprofit
+  organization, offering a snapshot of its workforce size. It pertains specifically
+  to paid employees and does not account for volunteers or unpaid staff, which are
+  often significant in the nonprofit sector. The count is provided on an organizational
+  basis, reflecting the employment status during a specific reporting period.
 tags:
 - nonprofit
 - profile

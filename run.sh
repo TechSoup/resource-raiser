@@ -37,6 +37,9 @@ fi
 pkill -f "agent_finder.py" 2>/dev/null || true
 pkill -f "harness.py --serve" 2>/dev/null || true
 sleep 1
+# BIND_HOST defaults to loopback (see agent_finder.py / harness.py). A server deployment sets
+# BIND_HOST=0.0.0.0 for the harness; the finder should stay on loopback unless something outside
+# the box needs to query the index directly.
 nohup python3 agent_finder.py    > /tmp/ard_agent_finder.log 2>&1 &
 nohup python3 harness.py --serve > /tmp/ard_harness.log      2>&1 &
 
@@ -60,4 +63,4 @@ echo "Logs: /tmp/ard_agent_finder.log  /tmp/ard_harness.log"
 echo "Stop: pkill -f agent_finder.py; pkill -f 'harness.py --serve'"
 echo
 echo "Note: the IRS 990 grant-graph queries need a one-time data extraction:"
-echo "      python3 tools/grants_download.py   (downloads ~12GB, builds data/990/grants.sqlite)"
+echo "      python3 tools/grants_download.py   (downloads ~13GB over ~1-2h, builds data/990/grants.sqlite)"

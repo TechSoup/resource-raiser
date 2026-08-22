@@ -25,16 +25,23 @@ def main():
 
     import sys
     sys.path.insert(0, os.path.dirname(__file__))
-    import repr_queries
+    import repr_queries, descriptions
     kept = [(m["measureid"], m["measure"]) for m in measures if m.get("measureid") and m.get("measure")]
     label_of = dict(kept)
+
+    scope = descriptions.scope_for("cdc-places")
+    detail = descriptions.for_items(
+        [(f"cdc-places:{mid}", short(lab), f"Local prevalence estimate: {lab} (CDC PLACES).")
+         for mid, lab in kept],
+        "CDC PLACES local health measure", scope)
 
     def write_leaf(mid, queries):                             # called per measure as its queries land
         label = label_of[mid]
         fm = {
             "type": "Community Health Measure",
             "title": f"{label} — CDC PLACES",
-            "description": f"Local prevalence estimate: {label} (CDC PLACES, county/place level).",
+            "description": (detail.get(f"cdc-places:{mid}")
+                            or f"Local prevalence estimate: {label} (CDC PLACES, county/place level)."),
             "tags": ["nonprofit", "health", "cdc", "places", "community", "needs-assessment"],
             "source": "./_access.md",
             "measureid": mid,

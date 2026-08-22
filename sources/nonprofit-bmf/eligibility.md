@@ -1,7 +1,13 @@
 ---
 type: Nonprofit BMF Fact
 title: Eligibility / Good Standing — IRS Business Master File (Nonprofit)
-description: Whether a US nonprofit is an active, recognized 501(c)(3) in good standing with the IRS — the validation check for nonprofit discount/donation eligibility (e.g. TechSoup, software-donation programs).
+description: This measure indicates whether a US nonprofit is an active and recognized
+  501(c)(3) organization in good standing with the IRS, which is essential for validating
+  eligibility for nonprofit discounts and donation programs. It specifically addresses
+  the compliance status of nonprofits, distinguishing it from other classifications
+  or financial metrics. This measure does not assess the financial performance or
+  mission impact of the organization, focusing instead on its IRS standing. The reporting
+  is done per organization.
 tags:
 - nonprofit
 - irs

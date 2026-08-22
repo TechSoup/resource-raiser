@@ -1,7 +1,13 @@
 ---
 type: Census ACS Population Field (BigQuery)
 title: Per Capita Income by county — US Census ACS (BigQuery)
-description: Rank, filter or aggregate US COUNTIES by per capita income (income_per_capita).
+description: This measure provides the per capita income for residents of US counties,
+  reflecting the average income earned per person. It describes the economic status
+  of individuals within the county, allowing for comparisons of financial well-being
+  across different areas. Unlike median income measures, which focus on the middle
+  point of income distribution, per capita income averages all incomes, including
+  those of lower earners. The unit is reported in dollars, representing the average
+  income per person.
 tags:
 - census
 - acs

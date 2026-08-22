@@ -1,7 +1,12 @@
 ---
 type: Census ACS Population Field (BigQuery)
 title: Median Age by county — US Census ACS (BigQuery)
-description: Rank, filter or aggregate US COUNTIES by median age (median_age).
+description: This measure indicates the median age of the population in US counties,
+  representing the age at which half the residents are younger and half are older.
+  It describes the demographic composition of the county, providing insights into
+  the age distribution of its residents. Unlike measures that report average age,
+  the median age specifically highlights the midpoint, which can be less affected
+  by extreme values. The unit is a count of years, reflecting the age of the population.
 tags:
 - census
 - acs

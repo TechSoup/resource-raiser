@@ -1,7 +1,11 @@
 ---
 type: Organization Profile Fact
 title: Headquarters City — Organization Profile (Nonprofit)
-description: The city where a nonprofit is headquartered (Wikidata).
+description: This measure specifies the city where a nonprofit organization is headquartered,
+  providing geographical context for its operations. It pertains solely to the primary
+  location of the nonprofit's main office and does not include branch locations or
+  regional offices. The reporting is at the organizational level, reflecting the headquarters
+  city as recorded in the latest available data.
 tags:
 - nonprofit
 - profile

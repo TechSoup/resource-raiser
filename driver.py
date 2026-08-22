@@ -63,10 +63,11 @@ def _sec_concept(cik, concept):
     return data
 
 
-def ask_llm(system, user, json_mode=False):
+def ask_llm(system, user, json_mode=False, model=None, stage="other"):
     """One chat turn via the configured provider. Built lazily inside llm.client(), so the
-    deterministic tools (fetch/resolve/accessor) import driver without needing any LLM keys."""
-    return llm.chat(system, user, json_mode)
+    deterministic tools (fetch/resolve/accessor) import driver without needing any LLM keys.
+    `model` selects a non-default model for this call (e.g. the ranking model)."""
+    return llm.chat(system, user, json_mode, model=model, stage=stage)
 
 
 def frontmatter(rel):
@@ -240,7 +241,7 @@ def _pick_by_data(metric_query, reported, log=True):
             "measure: for a 'total'/overall figure prefer the largest current concept in that family; "
             "for a named variant (e.g. diluted vs basic EPS) pick that exact one, not the largest. "
             'Return JSON {"i": <index>}.\nMEASURE: ' + metric_query + "\nCANDIDATES:\n" + listing,
-            metric_query, json_mode=True)).get("i")
+            metric_query, json_mode=True, stage="resolve-concept")).get("i")
     except Exception:
         pick = None
     if not isinstance(pick, int) or not (0 <= pick < len(cands)):
@@ -257,7 +258,7 @@ def main(question):
     info = json.loads(ask_llm(
         "Extract the company stock ticker and fiscal period from the question. "
         'Respond JSON: {"ticker": "<TICKER or empty>", "period": "FY<year> or latest"}.',
-        question, json_mode=True))
+        question, json_mode=True, stage="resolve-entity"))
     if not info.get("ticker"):
         raise SystemExit("could not identify a company in the question")
     r = fetch_metric(question, info["ticker"], info.get("period", "latest"))

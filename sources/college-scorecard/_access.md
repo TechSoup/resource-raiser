@@ -15,8 +15,8 @@ access:
     school:
       method: GET
       url: https://api.data.gov/ed/collegescorecard/v1/schools?school.name={name}&fields=school.name,{fields}&per_page=1&api_key={key}
-entityType: a US college or university (e.g. Stanford, MIT, Ohio State) — mostly nonprofit
-  institutions
+entityType: a US college or university (e.g. Stanford, MIT, Ohio State) — public, private
+  nonprofit, and for-profit institutions alike
 ---
 
 # About

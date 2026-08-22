@@ -1,9 +1,10 @@
 ---
 type: Grant Graph — By Cause (thematic)
 title: Grant money by cause — IRS 990 grant graph
-description: How grant dollars break down by the CAUSE of the recipient — education, health,
-  environment, housing, arts, human services, and so on — and how much goes to any one cause,
-  by joining recipients to their IRS NTEE classification. IRS 990 e-file data, 2022-2024.
+description: How grant dollars break down by the CAUSE of the recipient — education,
+  health, environment, housing, arts, human services, and so on — and how much goes
+  to any one cause, by joining recipients to their IRS NTEE classification. IRS 990
+  e-file data, 2022-2024.
 tags:
 - grants
 - philanthropy
@@ -22,7 +23,6 @@ representativeQueries:
 - How much funding goes to health versus education?
 - What kinds of causes do grants support?
 - How much grant money is directed to the environment?
-- Which cause areas receive the most grants?
 ---
 
 # Schema

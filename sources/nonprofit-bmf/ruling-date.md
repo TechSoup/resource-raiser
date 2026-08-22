@@ -1,7 +1,12 @@
 ---
 type: Nonprofit BMF Fact
 title: IRS Ruling Date (Tax-Exempt Since) — IRS Business Master File (Nonprofit)
-description: The date the IRS granted a US nonprofit its tax-exempt status (ruling date).
+description: This measure records the date on which the IRS granted a US nonprofit
+  its tax-exempt status, known as the ruling date. It specifically pertains to the
+  timeline of tax-exempt recognition for nonprofits, distinguishing it from other
+  measures that may focus on current operational status or financial data. This measure
+  does not assess the ongoing compliance or performance of the organization, concentrating
+  solely on the initial tax-exempt ruling. The reporting is done per organization.
 tags:
 - nonprofit
 - irs

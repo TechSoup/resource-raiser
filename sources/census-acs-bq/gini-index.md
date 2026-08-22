@@ -1,8 +1,12 @@
 ---
 type: Census ACS Population Field (BigQuery)
 title: Income Inequality (Gini Index) by county — US Census ACS (BigQuery)
-description: Rank, filter or aggregate US COUNTIES by income inequality (gini index)
-  (gini_index).
+description: This measure reports the Gini Index, a statistical representation of
+  income inequality within US counties. It specifically describes the distribution
+  of income among residents, indicating how evenly or unevenly income is spread across
+  the population. Unlike broader measures of income or wealth, the Gini Index focuses
+  solely on inequality rather than total income levels. The unit of measurement is
+  a ratio ranging from 0 to 1, with higher values indicating greater inequality.
 tags:
 - census
 - acs

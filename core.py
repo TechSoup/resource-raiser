@@ -16,8 +16,8 @@ class Toolkit:
         return ard_client.search(query, k)
 
     # --- LLM (also usable as the inline "SLM" for resolution) ---
-    def llm(self, system, user, json_mode=False):
-        return driver.ask_llm(system, user, json_mode)
+    def llm(self, system, user, json_mode=False, stage="other"):
+        return driver.ask_llm(system, user, json_mode, stage=stage)
 
     # --- entity resolution (SLM-assisted name -> ids) ---
     def resolve_entity(self, name):
@@ -106,4 +106,4 @@ class Toolkit:
             "affiliates). Say so explicitly and scope the total as being across those N recipients — never "
             "present it as one organization's figure. "
             "Write plain prose: no markdown bullets, headers, or bold.",
-            json.dumps({"question": question, "data": data}))
+            json.dumps({"question": question, "data": data}), stage="synthesize")

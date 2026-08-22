@@ -1,8 +1,11 @@
 ---
 type: Nonprofit 990 Population Field (BigQuery)
 title: Total Expenses — IRS 990 population (BigQuery)
-description: Rank, filter or count US nonprofits by total expenses (totfuncexpns)
-  across ALL filers.
+description: This measure reports the total expenses incurred by US tax-exempt nonprofits,
+  allowing for ranking, filtering, or counting across all filers. It focuses solely
+  on total expenses, which encompasses all costs associated with the organization's
+  operations, distinguishing it from total revenue or net assets. The data is provided
+  per organization for each fiscal year, reflecting the financial outflows of nonprofits.
 tags:
 - nonprofit
 - irs

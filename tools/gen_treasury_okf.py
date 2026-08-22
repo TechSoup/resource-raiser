@@ -89,12 +89,17 @@ def main():
 
     import sys
     sys.path.insert(0, os.path.dirname(__file__))
-    import repr_queries
+    import repr_queries, descriptions
     by_qkey = {qkey: (slug, fm, body) for slug, fm, body, qkey in leaves}
+
+    scope = descriptions.scope_for("treasury")
+    detail = descriptions.for_items([(f"treasury:{k}", lab, defn) for k, lab, defn in items],
+                                    "US Treasury FiscalData field or series", scope)
 
     def write_leaf(qkey, queries):                            # called per leaf as its queries land
         slug, fm, body = by_qkey[qkey]
         fm["representativeQueries"] = queries
+        fm["description"] = detail.get(f"treasury:{qkey}") or fm["description"]
         write(slug, fm, body)
 
     repr_queries.for_items(items, "US Treasury FiscalData field or series", on_ready=write_leaf)

@@ -1,8 +1,13 @@
 ---
 type: Grant Graph — Top Grantmakers (ranking)
 title: The biggest grantmakers — IRS 990 grant graph
-description: Rank US nonprofits and foundations by total grant dollars paid out, across
-  all grantmakers, from IRS 990 e-file data (Schedule I + 990-PF), 2022-2024.
+description: This measure ranks US nonprofits and foundations based on the total amount
+  of grant dollars they have paid out, providing insight into the largest grantmakers
+  in the philanthropic sector. It specifically addresses the philanthropic grants
+  between US nonprofits and foundations, as reported in IRS Form 990 data. Unlike
+  measures that focus on grant recipients or geographic distributions, this data emphasizes
+  the outflows of grant money from grantmaking organizations. The reporting is done
+  per organization for the fiscal years 2022 to 2024.
 tags:
 - grants
 - foundation

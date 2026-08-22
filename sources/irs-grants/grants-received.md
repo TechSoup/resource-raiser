@@ -2,8 +2,8 @@
 type: Grant Graph — Grants Received (reverse)
 title: Who funds an organization — IRS 990 grant graph
 description: The funders that gave grants TO a given organization (a school, church,
-  nonprofit) — the charities and foundations behind it, the amounts, and the total it
-  received — from IRS 990 e-file data (Schedule I + 990-PF), 2022-2024.
+  nonprofit) — the charities and foundations behind it, the amounts, and the total
+  it received — from IRS 990 e-file data (Schedule I + 990-PF), 2022-2024.
 tags:
 - grants
 - funders
@@ -21,8 +21,6 @@ representativeQueries:
 - What charities have funded this university?
 - Which foundations give money to Feeding America?
 - Who are the funders of this organization?
-- What foundations support the ACLU?
-- Which charities funded this church?
 ---
 
 # Schema

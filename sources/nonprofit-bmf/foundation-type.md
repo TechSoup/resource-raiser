@@ -1,7 +1,13 @@
 ---
 type: Nonprofit BMF Fact
 title: Foundation Type — IRS Business Master File (Nonprofit)
-description: Whether a US 501(c)(3) is a public charity or a private foundation (and its subtype), decoded from its IRS foundation code.
+description: This measure identifies whether a US 501(c)(3) organization is classified
+  as a public charity or a private foundation, including its specific subtype, based
+  on the IRS foundation code. It specifically pertains to the classification of nonprofits,
+  distinguishing it from other measures that may focus on financial data or operational
+  status. This measure does not provide information on the organization's activities
+  or mission, concentrating solely on its foundational type. The reporting is done
+  per organization.
 tags:
 - nonprofit
 - irs

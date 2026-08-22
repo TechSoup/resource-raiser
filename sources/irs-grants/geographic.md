@@ -1,9 +1,13 @@
 ---
 type: Grant Graph — Geographic Flows
 title: Grant money by place — IRS 990 grant graph
-description: Where grant money goes and comes from — which US states receive the most grant
-  dollars, which send the most, and how much flows from one state to another, from IRS 990
-  e-file data, 2022-2024.
+description: This measure details the flow of grant money across US states, indicating
+  which states receive the most grant dollars and which ones contribute the most to
+  grant funding. It encompasses the philanthropic grants between US nonprofits and
+  foundations, as captured in IRS Form 990 data. This measure is distinct from others
+  that may focus solely on individual organizations or specific grant amounts, as
+  it provides a geographic overview of grant distribution. The data is reported in
+  dollars and reflects the fiscal years 2022 to 2024.
 tags:
 - grants
 - philanthropy

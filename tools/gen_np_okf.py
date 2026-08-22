@@ -6,7 +6,7 @@ XBRL taxonomy), so we hand-map the meaningful ones. One OKF leaf per field, keye
 by EIN at query time (the organization is a parameter). Each leaf cross-links to
 nonprofit-990/_access.md for the query mechanics.
 """
-import os, yaml
+import os, re, yaml
 
 OUT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "sources", "nonprofit-990"))
 
@@ -73,19 +73,35 @@ FIELDS = {
 }
 
 
+def _label_tags(label, n=3):
+    """Keyword tags from a field label. Splitting on whitespace alone turns "Cost Basis — Other
+    Assets" into a tag of "—" and "Gifts/Grants Received (170)" into "(170)": punctuation is not a
+    keyword. Keep alphanumeric words only, and drop the ones too short to filter on."""
+    words = re.findall(r"[a-z0-9][a-z0-9-]*", label.lower())
+    return [w for w in words if len(w) > 2][:n]
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     import sys
     sys.path.insert(0, os.path.dirname(__file__))
-    import repr_queries
+    import repr_queries, descriptions
+
+    # The one-clause definitions above ("Total revenue for the year.") do not say WHOSE revenue,
+    # so they embed almost identically to a public company's us-gaap revenue concept. Expand each
+    # into a full description that names the subject and what the measure excludes.
+    scope = descriptions.scope_for("nonprofit-990")
+    detail = descriptions.for_items(
+        [(f"nonprofit-990:{field}", label, desc) for field, (label, desc) in FIELDS.items()],
+        "IRS Form 990 nonprofit financial field", scope)
 
     def write_leaf(field, queries):                           # called per field as its queries land
         label, desc = FIELDS[field]
         fm = {
             "type": "Nonprofit 990 Field",
             "title": f"{label} — IRS Form 990 (Nonprofit)",
-            "description": desc,
-            "tags": ["nonprofit", "irs", "form-990", "charity", "ein"] + label.lower().split()[:3],
+            "description": detail.get(f"nonprofit-990:{field}") or desc,
+            "tags": ["nonprofit", "irs", "form-990", "charity", "ein"] + _label_tags(label),
             "source": "./_access.md",
             "field": field,
             "representativeQueries": queries,
