@@ -1872,7 +1872,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .amt{color:#137333;font-weight:700}
 </style></head><body>
 <h1>Agentic Data Query</h1>
-<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
+<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
 <form id="f"><input id="q" placeholder="e.g. Is the American Red Cross a 501(c)(3)?" autofocus><button id="b">Ask</button></form>
 <div id="out"></div>
 <h2 class="sh">Example questions</h2>
@@ -2105,11 +2105,12 @@ TECHSOUP_PAGE = (PAGE
     .replace('<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which '
              'dataset answers it; the data is fetched live, the answer is checked, and the search '
              'backtracks until it actually answers your question. '
-             '<a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>',
+             '<a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>',
              '<p class="sub">A curated view for TechSoup and the nonprofits, libraries, and '
              'foundations it serves — validate an organization, measure the digital divide, read a '
              "nonprofit's finances, understand the communities it serves, and find funding. Ask in "
              'plain English; the answer is fetched live and cited. '
+             '<a href="how-it-works" style="color:#1a73e8">How it works ›</a> · '
              '<a href="./" style="color:#1a73e8">‹ full data explorer</a></p>')
     .replace("fetch('sources')", "fetch('techsoup-sources')")
     .replace('placeholder="e.g. Is the American Red Cross a 501(c)(3)?"',
@@ -2414,6 +2415,90 @@ def run_nlweb(req):
     yield st.message(nlweb.END, "", "system")
 
 
+
+HOW_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How Resource Raiser works</title>
+<style>
+ body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1a1a1a}
+ h1{font-size:1.5em;margin:0 0 6px} h2{font-size:1.05em;margin:30px 0 8px}
+ p{margin:10px 0} a{color:#1a73e8;text-decoration:none} a:hover{text-decoration:underline}
+ .sub{color:#5f6368;margin-bottom:22px}
+ pre{background:#0d1117;color:#c9d1d9;padding:14px 16px;border-radius:10px;overflow:auto;font-size:.82em;line-height:1.5}
+ table{border-collapse:collapse;width:100%;margin:10px 0;font-size:.92em}
+ th,td{text-align:left;padding:7px 12px 7px 0;border-bottom:1px solid #e8eaed;vertical-align:top}
+ th{color:#5f6368;font-weight:600}
+ code{background:#f1f3f4;border-radius:4px;padding:1px 5px;font-size:.88em}
+ .note{color:#5f6368;font-size:.92em}
+</style></head><body>
+<h1>How it works</h1>
+<p class="sub">Describe each dataset once; discover it by meaning; fetch from the source at
+question time. <a href="./">‹ back</a></p>
+
+<h2>Control flow</h2>
+<p>One question moves through six steps. Each can send it back a step, which is why a wrong
+first guess degrades into a slower answer instead of a wrong one.</p>
+<pre>question
+  │
+  ├─ classify    what entity, what measure, what SHAPE (point, ranking, ratio, timeseries…)
+  ├─ discover    ARD: embed the question, retrieve candidate tables, re-rank them
+  ├─ plan        does a candidate's declared capability support that shape?
+  │                 no  → refuse here, before any request is made
+  ├─ fetch       one generic accessor fills the URL template from the OKF descriptor
+  ├─ check       is this record actually about what was asked?
+  │                 no  → backtrack: next table, next entity, next period
+  └─ synthesize  answer grounded in the returned record, quoting its figure and source</pre>
+<p>The planning step is the unusual one. A source that lists one nonprofit's grants can compare
+two named organizations but cannot rank the whole population — so a ranking question over it is
+refused, not approximated. Refusing costs one classification; guessing costs credibility.</p>
+
+<h2>Data flow</h2>
+<p>Nothing is ingested. The only thing this system stores is <em>descriptions</em>:</p>
+<pre>OKF descriptors  ──embed──▶  ARD index     (~8,900 tables, ~50 MB of vectors)
+                                  │
+question ─────────────────────────┘  picks ONE table
+                                  │
+                                  ▼
+                        the source's own API  ──▶  answer
+                        (SEC, Census, Treasury, CDC, IRS, …)</pre>
+<p>The record that answers your question is fetched from the publisher, in that moment, and
+discarded. There is no copy to refresh and no schema to migrate. Adding a source means adding a
+folder with a Markdown file in it — no per-source query code.</p>
+
+<h2>Why not a warehouse</h2>
+<p>The usual approach — Data Commons, a lakehouse, any central warehouse — normalizes many
+sources into one schema and loads the data into one place. That buys real things: arbitrary joins,
+fast aggregates, one query language. It costs real things too.</p>
+<table>
+<tr><th></th><th>Warehouse / Data Commons</th><th>This</th></tr>
+<tr><td>Unit of work</td><td>a pipeline per source</td><td>a description per source</td></tr>
+<tr><td>Schema</td><td>normalize everything up front</td><td>keep each source's own</td></tr>
+<tr><td>Data location</td><td>copied into the centre</td><td>stays at the publisher</td></tr>
+<tr><td>Freshness</td><td>as of the last load</td><td>as of the request</td></tr>
+<tr><td>Adding a source</td><td>model it, map it, backfill it</td><td>write one document</td></tr>
+<tr><td>Good at</td><td>joins and aggregates over everything</td><td>breadth, currency, provenance</td></tr>
+<tr><td>Bad at</td><td>long tail — the 8,000th field is never worth a pipeline</td><td>cross-source joins, population scans</td></tr>
+</table>
+<p>The trade is deliberate. Normalization is what makes the long tail unaffordable: nobody funds a
+pipeline for the 8,096th us-gaap concept, so it never arrives. A description is cheap enough to
+write for all of them, which is why this covers ~8,900 measures rather than a curated few.</p>
+<p>The cost is equally real. Cross-source joins are the warehouse's home ground and this system's
+weak spot, and questions over a whole population need a source that can scan one — which is
+exactly what the planner checks before it answers.</p>
+
+<h2>The exception that shows the rule</h2>
+<p>One source is not live: the IRS 990 grant graph, ~7.8 M funder→recipient edges. The IRS
+publishes no query API for it, only bulk filings, so there is nothing to call at question time and
+the edges are built once into a database. Every other source stayed live because its publisher
+offered a way to ask.</p>
+
+<p class="note">Descriptors are <a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf">OKF</a>
+documents; discovery speaks <a href="https://agenticresourcediscovery.org/">ARD</a>; the query
+interface is <a href="https://github.com/nlweb-ai/NLWeb">NLWeb</a>.
+<a href="ard">Browse the descriptors ›</a></p>
+</body></html>"""
+
+
 def serve(port):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 
@@ -2493,6 +2578,8 @@ def serve(port):
                                         "sites": [s["dir"] for s in _sources_catalog()]})
             if p == "/health":
                 return self._json(200, {"status": "ok"})
+            if p in ("/how-it-works", "/how"):
+                return self._html(HOW_PAGE)
             if p in ("/ard", "/ard/"):
                 return self._html(ARD_PAGE)
             if p == "/ard/publishers":
