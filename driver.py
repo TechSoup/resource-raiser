@@ -71,7 +71,8 @@ def ask_llm(system, user, json_mode=False, model=None, stage="other"):
 
 
 def frontmatter(rel):
-    t = open(os.path.join(ROOT, rel), encoding="utf-8").read()
+    with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+        t = f.read()
     return yaml.safe_load(t.split("---", 2)[1])
 
 

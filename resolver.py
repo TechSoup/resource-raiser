@@ -21,7 +21,11 @@ PROPS = {
     "P774": "fips_place", "P882": "fips_county", "P5087": "fips_state", "P590": "gnis",
 }
 
-_cache = json.load(open(CACHE)) if os.path.exists(CACHE) else {}
+if os.path.exists(CACHE):
+    with open(CACHE) as f:
+        _cache = json.load(f)
+else:
+    _cache = {}
 
 
 def _get(url):

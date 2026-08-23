@@ -20,6 +20,9 @@ sources/nonprofit-990/*.md
 # vectors.npy is 100MB+ (over GitHub's file limit); meta.json is its derived companion.
 registry/vectors.npy
 registry/meta.json
+registry/builds/
+registry/current
+registry/current.tmp
 
 # --- other caches / derived data -----------------------------------------------------
 resolver_cache.json

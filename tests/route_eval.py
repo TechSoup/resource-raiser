@@ -17,7 +17,8 @@ never fetches, so a missing Census key cannot skew the result.
     python3 tests/route_eval.py --limit 60          # a quick slice
     python3 tests/route_eval.py --json before.json  # save, to diff against a later run
 """
-import os, sys, json, argparse, collections
+import os, sys, json, argparse, collections, hashlib, subprocess
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -81,8 +82,28 @@ def main(argv=None):
             print(f"  {v:>3}  {k}")
 
     if a.json:
-        json.dump({"n": n, "top1": ok1, "top3": ok3, "discovery_cost_usd": round(cost, 5),
-                   "rows": rows}, open(a.json, "w"), indent=1)
+        root = os.path.normpath(os.path.join(HERE, ".."))
+        def digest(name):
+            with open(os.path.join(root, "tools", name), "rb") as f:
+                return hashlib.sha256(f.read()).hexdigest()[:16]
+        try:
+            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                                    capture_output=True, text=True).stdout.strip()
+        except Exception:
+            commit = "unknown"
+        report = {
+            "manifest": {"created_at": datetime.now(timezone.utc).isoformat(),
+                         "command": " ".join([sys.executable, __file__, *(argv or sys.argv[1:])]),
+                         "commit": commit, "provider": __import__("llm").provider(),
+                         "chat_model": __import__("llm").chat_model(),
+                         "embedding_model": __import__("llm").embed_model(),
+                         "live": True,
+                         "prompt_versions": {n: digest(n) for n in ("descriptions.py", "repr_queries.py")}},
+            "n": n, "top1": ok1, "top3": ok3, "discovery_cost_usd": round(cost, 5),
+            "rows": rows,
+        }
+        with open(a.json, "w") as f:
+            json.dump(report, f, indent=1)
         print(f"\nsaved -> {a.json}")
     return 0
 

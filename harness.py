@@ -11,8 +11,9 @@ Run as a CLI or as a server the connectors skill calls:
   python3 harness.py "How much did Apple spend on R&D in 2023?"     # one-shot (prints JSON)
   python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
 """
-import os, sys, json, time, math, re, urllib.parse
-import driver, ard_client, planner, store, llm, nlweb
+import os, sys, json, time, math, re, signal, urllib.parse, queue
+import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime
+from domain import Attempt, QueryIntent
 from core import Toolkit
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +33,7 @@ _EMIT_LOCK = threading.Lock()          # parallel executors emit from worker thr
 
 
 def _say(kind, **data):
+    runtime.check()
     cb = getattr(_EMIT, "cb", None)
     if cb:
         try:
@@ -52,11 +54,13 @@ def _with_emitter(fn):
     cb = getattr(_EMIT, "cb", None)
     led = llm.ledger()
     disc = ard_client.usage()
+    cancel, deadline = runtime.capture()
 
     def wrapped(*a, **k):
         _EMIT.cb = cb
         llm.bind_ledger(led)
         ard_client.bind_usage(disc)
+        runtime.bind(cancel, deadline)
         return fn(*a, **k)
 
     return wrapped
@@ -306,7 +310,7 @@ def _normalize_shape(ctx):
     return ctx
 
 
-def discover(question, sites=None):
+def discover(question, sites=None, assumptions=None):
     """Pass 1: extract the ENTITY, the entity-expunged ATTRIBUTE, and (via the entity's
     TYPE) which SOURCE(s) apply. Pass 2: match the attribute to fields within those sources."""
     _say("status", icon="🔍", msg="Reading your question…")
@@ -358,6 +362,10 @@ def discover(question, sites=None):
         "rate', 'diabetes rate') — do NOT invent ambiguity for a specific measure.\n"
         "SOURCES:\n" + src_list, question, json_mode=True, stage="classify"))
     ctx = _normalize_shape(ctx)
+    if assumptions:
+        allowed = {"entity", "type", "attribute", "period", "shape"}
+        ctx.update({k: v for k, v in assumptions.items() if k in allowed and v not in (None, "")})
+        ctx = _normalize_shape(ctx)
     # Robustness: the classifier sometimes drops the place from a "<measure> in <Place>" question
     # (leaving an empty entity). Recover it from the question so a place lookup doesn't fail with no geo.
     if ctx.get("type") == "place" and not (ctx.get("entity") or "").strip():
@@ -955,7 +963,7 @@ def _fetch(state, ctx):
     raise Backtrack("no structured retrieval for this source")
 
 
-def _answers(question, data):
+def _answers(question, data, structural=None):
     """Acceptance test at the goal of the search: is this record ABOUT the right thing for the question?
     This is a ROUTING check, not a fact-check — it turns backtracking from 'no data' into 'no WRONG
     data' by matching the record's qualifiers (measure, unit, currency, place/entity) to the question.
@@ -963,6 +971,11 @@ def _answers(question, data):
     It must NOT judge the value itself: the model's own world-knowledge is wrong about magnitudes,
     exchange-rate direction, and 'future' dates (its training cutoff makes recent data look fake), so
     letting it fact-check the number causes false rejections of correct answers. Fail-open on error."""
+    if structural is not None:
+        if not structural.accepted:
+            return False, structural.reason
+        if not structural.residual_semantic_check:
+            return True, ""
     try:
         v = json.loads(TK.llm(  # acceptance check
             "You route data: decide whether the DATA record is ABOUT the right thing for the QUESTION. "
@@ -1613,6 +1626,8 @@ def _search(question, ctx=None, hits=None):
     if not hits:
         raise SystemExit("agent finder returned no sources")
     p = ctx.get("period") or "latest"
+    intent = QueryIntent.from_context(question, ctx)
+    trace = []
     steps = [
         ("hit", lambda s: hits),
         ("entity", lambda s: _entity_options(ctx.get("entity"), ctx.get("type"))),
@@ -1632,14 +1647,26 @@ def _search(question, ctx=None, hits=None):
         ent = (s.get("entity") or {}).get("label")
         _say("status", icon="📥", msg=f"Fetching live from “{s['hit']['title']}”"
              + (f" for {ent}…" if ent else "…"))
-        data = _fetch(s, ctx)
+        attempt = Attempt(source=s["hit"].get("publisher") or s["hit"]["title"],
+                          identifier=s["hit"]["identifier"], entity=s.get("entity"),
+                          period=s.get("period") or "latest")
+        connector = connectors.for_hit(s["hit"])
         _say("status", icon="🔎", msg="Checking the result actually answers your question…")
-        ok, why = _answers(question, data)
-        if not ok:
-            _say("status", icon="↩️", msg=f"Wrong table ({why}) — backtracking to the next candidate…")
-            raise Backtrack(f"answer rejected: {why}")
+        try:
+            evidence = connector.execute(
+                intent, attempt, s["hit"], lambda: _fetch(s, ctx),
+                adjudicator=lambda data, verdict: _answers(question, data, verdict))
+        except connectors.Rejected as e:
+            trace.append(e.attempt)
+            _say("status", icon="↩️", msg=f"Wrong table ({e}) — backtracking to the next candidate…")
+            raise Backtrack(f"answer rejected: {e}")
+        except Backtrack as e:
+            trace.append(attempt)
+            _say("status", icon="↩️", msg=f"No usable data ({e}) — backtracking…")
+            raise
+        trace.append(attempt)
         _say("status", icon="✅", msg="Result checks out — composing the grounded answer…")
-        return {**s, "_data": data}
+        return {**s, "_data": evidence.payload, "_evidence": evidence, "_attempts": trace}
 
     try:
         state = _solve(steps, goal, {})
@@ -1710,7 +1737,26 @@ def _cite_concept_actually_used(hit, data):
             "publisher": hit.get("publisher") or "sec-edgar"}
 
 
-def run(question, sites=None):
+def _admit(intent, hit, data):
+    """Normalize a non-backtracking execution path through the same connector/validation boundary."""
+    attempt = Attempt(source=hit.get("publisher") or hit.get("title") or "",
+                      identifier=hit.get("identifier") or "", period=intent.period)
+    evidence = connectors.for_hit(hit).execute(
+        intent, attempt, hit, lambda: data,
+        adjudicator=lambda payload, verdict: _answers(intent.question, payload, verdict))
+    return evidence, [attempt]
+
+
+def _present(question, evidence):
+    """Validated evidence chooses the deterministic renderer. Complex evidence explicitly falls
+    back to synthesis; classifier shape never selects authoritative prose."""
+    rendered = renderers.render(evidence)
+    if rendered:
+        return rendered.text, rendered.renderer
+    return TK.synthesize(question, evidence.payload), "llm-fallback"
+
+
+def run(question, sites=None, assumptions=None):
     # Account for the LLM calls this question makes IN THIS PROCESS. The ARD Agent Finder runs as
     # a separate service and bills its own discovery work — reported alongside as `discovery_usage`,
     # deliberately a SIBLING of `usage` rather than nested in it, so nothing reads as part of the
@@ -1720,17 +1766,21 @@ def run(question, sites=None):
     # PLAN BEFORE FETCH. The shape of the question and the DECLARED capability of the candidate
     # sources decide whether this is one call, several, or impossible — and an impossible question
     # is refused here, without issuing a single request.
-    ctx, hits = discover(question, sites)
+    ctx, hits = discover(question, sites, assumptions)
     if not hits:
         raise SystemExit("agent finder returned no sources")
     shape = ctx.get("shape") if ctx.get("shape") in planner.SHAPES else "point"
+    intent = QueryIntent.from_context(question, ctx, sites)
     # A genuinely ambiguous measure over a single entity gets SEPARATE answers per interpretation
     # (earnings -> net income, EBITDA, EPS…) instead of a silently-chosen one.
     if len(ctx.get("interpretations") or []) >= 2 and shape in ("point", "status", "entity-list"):
         data = _run_ambiguous(question, ctx)
-        _answer = TK.synthesize(question, data)
+        evidence, attempts = _admit(intent, hits[0], data)
+        _answer, renderer = _present(question, evidence)
         return {"question": question, "answer": _answer, "shape": shape, "usage": _ledger.snapshot(),
                 "discovery_usage": _disc.snapshot(),
+                "intent": intent.to_dict(), "attempts": [a.to_dict() for a in attempts],
+                "evidence": evidence.to_dict(), "answer_renderer": renderer,
                 "plan": f"ambiguous measure → {len(data['interpretations'])} interpretations answered separately",
                 "source": {"identifier": hits[0]["identifier"], "title": hits[0]["title"],
                            "publisher": hits[0].get("publisher")},
@@ -1764,9 +1814,12 @@ def run(question, sites=None):
             fm = driver.frontmatter(leaf_id) or {}
             hit = {"identifier": leaf_id, "title": fm.get("title", grant_hit["title"]),
                    "publisher": grant_hit.get("publisher")}
-        _answer = TK.synthesize(question, data)
+        evidence, attempts = _admit(intent, hit, data)
+        _answer, renderer = _present(question, evidence)
         return {"question": question, "answer": _answer, "shape": shape, "usage": _ledger.snapshot(),
                 "discovery_usage": _disc.snapshot(),
+                "intent": intent.to_dict(), "attempts": [a.to_dict() for a in attempts],
+                "evidence": evidence.to_dict(), "answer_renderer": renderer,
                 "plan": planner.describe(shape, p),
                 "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
                 "candidates": [{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")} for h in hits],
@@ -1777,6 +1830,7 @@ def run(question, sites=None):
                 else "a capability none of the matching sources declare")
         raise SystemExit(f"this is a '{shape}' question, which needs {need}; {p['why']}.")
 
+    state = None
     if p["verdict"] == "compose:materialize-and-correlate":
         data = _run_correlate(question, ctx, p)
         hit = p["hit"]
@@ -1798,14 +1852,25 @@ def run(question, sites=None):
         hit = p["hit"]
     else:
         _ctx, hits, hit, _tried, data, _state = _search(question, ctx=ctx, hits=hits)
+        state = _state
     hit = _cite_concept_actually_used(hit, data)
-    answer = TK.synthesize(question, data)       # synthesize BEFORE snapshotting: it is a chat call
+    if state and state.get("_evidence"):
+        evidence, attempts = state["_evidence"], state.get("_attempts") or []
+        evidence.identifier = hit["identifier"]
+        evidence.provenance["source_document"] = hit["identifier"]
+    else:
+        evidence, attempts = _admit(intent, hit, data)
+    answer, renderer = _present(question, evidence)
     return {
         "question": question,
         "answer": answer,
         "usage": _ledger.snapshot(),
         "discovery_usage": _disc.snapshot(),
         "shape": shape,
+        "intent": intent.to_dict(),
+        "attempts": [a.to_dict() for a in attempts],
+        "evidence": evidence.to_dict(),
+        "answer_renderer": renderer,
         "plan": planner.describe(shape, p),
         "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
         "candidates": [{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")} for h in hits],
@@ -1884,6 +1949,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <div id="sources"></div>
 <script>
  var f=document.getElementById('f'),q=document.getElementById('q'),b=document.getElementById('b'),out=document.getElementById('out');
+ var ASSUMPTIONS=null;
  function bindChips(){[].forEach.call(document.querySelectorAll('.ex'),function(el){el.onclick=function(){
    var tag=el.querySelector('.extag'); var txt=el.textContent;
    if(tag)txt=txt.slice(0,txt.length-tag.textContent.length);      // strip the shape badge
@@ -1929,7 +1995,10 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    function beat(){if(wd)clearTimeout(wd);wd=setTimeout(function(){stalled=true;
      status('⚠️','The server stopped sending updates. It may still be working — check the terminal, or ask again.','back');fin();},120000);}
    beat();
-   fetch('ask?sse_format=named&max_results=8&query='+encodeURIComponent(question))
+   var askUrl='ask?sse_format=named&max_results=8&query='+encodeURIComponent(question);
+   if(ASSUMPTIONS){Object.keys(ASSUMPTIONS).forEach(function(k){
+     askUrl+='&assumption_'+k+'='+encodeURIComponent(ASSUMPTIONS[k]||'');});ASSUMPTIONS=null;}
+   fetch(askUrl)
     .then(function(resp){
       var reader=resp.body.getReader(),dec=new TextDecoder(),buf='';
       function pump(){return reader.read().then(function(res){
@@ -1989,8 +2058,31 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
        +'</a> <span class="pub">['+esc(it.site||'')+']</span></div>';
      if((d.items||[]).length>1){h+='<details><summary>ARD candidates</summary><ul>';
        d.items.forEach(function(c){h+='<li>'+(c.score||0)+' — '+esc(c.name)+'</li>'});h+='</ul></details>';}
+     if(d.intent||d.evidence||(d.attempts||[]).length){
+       h+='<details><summary>How this answer was produced</summary>';
+       if(d.intent)h+='<p><b>Interpretation:</b> '+esc(d.intent.operation||'')+' · '
+          +esc(d.intent.entity||'no named entity')+' · '+esc(d.intent.measure||'')+' · '
+          +esc(d.intent.period||'latest')+' <button type="button" class="edit-intent" data-intent="'
+          +encodeURIComponent(JSON.stringify(d.intent))+'">edit & rerun</button></p>';
+       if(d.attempts&&d.attempts.length){h+='<ol>';
+         d.attempts.forEach(function(a){h+='<li><code>'+esc(a.identifier||a.source||'candidate')+'</code> — '
+           +esc(a.outcome||'')+(a.reason?' · '+esc(a.reason):'');
+           if(a.validation&&a.validation.checks)h+='<ul>'+a.validation.checks.map(function(c){return '<li>'
+             +esc(c.name)+': '+esc(c.status)+(c.reason?' — '+esc(c.reason):'')+'</li>';}).join('')+'</ul>';
+           h+='</li>';});h+='</ol>';}
+       if(d.evidence)h+='<p><b>Evidence:</b> '+esc(d.evidence.kind||'')+' from '
+          +'<code>'+esc(d.evidence.identifier||'')+'</code> · renderer '+esc(d.answer_renderer||'')+'</p>';
+       h+='</details>';}
      if(d.usage)h+=renderUsage(d.usage,d.discovery_usage);
      var box=document.createElement('div');box.style.marginTop='16px';box.innerHTML=h;log.parentNode.appendChild(box);
+     var edit=box.querySelector('.edit-intent');if(edit)edit.onclick=function(){
+       var x=JSON.parse(decodeURIComponent(edit.getAttribute('data-intent')));
+       ASSUMPTIONS={operation:prompt('Operation',x.operation||'point')||x.operation,
+                    entity:prompt('Entity',x.entity||'')||'',
+                    type:prompt('Entity type',x.entity_type||'none')||x.entity_type,
+                    measure:prompt('Measure',x.measure||'')||x.measure,
+                    period:prompt('Period',x.period||'latest')||x.period};
+       f.requestSubmit();};
    }
    function usd(c){return c>=0.01?'$'+c.toFixed(3):(c>0?'$'+c.toFixed(5):'$0');}
    // Steps in PIPELINE order, not sorted by cost — the point of the report is to show where a
@@ -2137,6 +2229,44 @@ _TOTALS = {"questions": 0, "llm_calls": 0, "total_tokens": 0, "cost_usd": 0.0,
            "discovery_calls": 0, "discovery_tokens": 0, "discovery_cost_usd": 0.0,
            "by_stage": {}, "by_model": {}}
 _TOTALS_LOCK = threading.Lock()
+_TELEMETRY_LOCK = threading.Lock()
+TELEMETRY_PATH = os.getenv("TELEMETRY_PATH", os.path.join(ROOT, "cache", "telemetry.jsonl"))
+
+# A public endpoint that fans out into several provider calls needs a hard concurrency ceiling in
+# addition to the daily quota. Rejecting quickly is safer than allowing an unbounded ThreadingHTTPServer
+# queue to turn a traffic spike into provider spend and memory pressure.
+MAX_CONCURRENT_QUERIES = max(1, int(os.getenv("MAX_CONCURRENT_QUERIES", "4")))
+_QUERY_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES)
+
+
+def _usage_from_messages(messages):
+    """Usage is carried by the NLWS GeneratedAnswer frame. Query execution now runs on a worker so
+    the handler thread cannot read its thread-local ledgers directly."""
+    for m in reversed(messages or []):
+        if m.get("message_type") == nlweb.NLWS and isinstance(m.get("content"), dict):
+            return m["content"].get("usage"), m["content"].get("discovery_usage")
+    return None, None
+
+
+def _record_telemetry(ip, req, content, elapsed_ms, status="complete"):
+    """Durable JSONL request telemetry. Questions are represented by a hash by default so the
+    operational record is useful without silently retaining user text."""
+    import hashlib
+    content = content or {}
+    question = req.get("query") or ""
+    row = {"at": time.time(), "status": status, "latency_ms": round(elapsed_ms),
+           "client": hashlib.sha256(str(ip).encode()).hexdigest()[:12],
+           "question": hashlib.sha256(str(question).encode()).hexdigest()[:16],
+           "intent": content.get("intent"), "attempts": content.get("attempts") or [],
+           "evidence_kind": (content.get("evidence") or {}).get("kind"),
+           "answer_renderer": content.get("answer_renderer"),
+           "usage": content.get("usage"), "discovery_usage": content.get("discovery_usage")}
+    try:
+        os.makedirs(os.path.dirname(TELEMETRY_PATH), exist_ok=True)
+        with _TELEMETRY_LOCK, open(TELEMETRY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
+    except OSError:
+        pass
 
 
 def _accumulate(usage, discovery):
@@ -2354,22 +2484,45 @@ def run_nlweb(req):
     st = nlweb.Stream(req.get("conversation_id"))
     yield st.message(nlweb.BEGIN, "", "system")
 
-    pending = []
-    _EMIT.cb = lambda ev: pending.append(ev)          # collect narration on THIS thread
+    events = queue.Queue()
+    cancelled = threading.Event()
+    deadline = time.monotonic() + int(os.getenv("QUERY_TIMEOUT_SECONDS", "180"))
+
+    def work():
+        runtime.bind(cancelled, deadline)
+        _EMIT.cb = lambda ev: events.put(("event", ev))
+        try:
+            events.put(("done", run(req["query"], sites=req.get("sites") or None,
+                                    assumptions=req.get("assumptions") or None)))
+        except SystemExit as e:                        # an honest refusal, not a crash
+            events.put(("error", str(e)))
+        except Exception as e:
+            events.put(("error", f"{type(e).__name__}: {e}"))
+        finally:
+            _EMIT.cb = None
+
+    worker = threading.Thread(target=work, name="resource-raiser-query", daemon=True)
+    worker.start()
     result, error = None, None
     try:
-        result = run(req["query"], sites=req.get("sites") or None)
-    except SystemExit as e:                            # an honest refusal, not a crash
-        error = str(e)
-    except Exception as e:
-        error = f"{type(e).__name__}: {e}"
+        while result is None and error is None:
+            try:
+                kind, payload = events.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty:
+                cancelled.set()
+                error = "query deadline exceeded"
+                break
+            if kind == "event":
+                line = _nlweb_text(payload)
+                if line:
+                    yield st.message(nlweb.INTERMEDIATE, line, "system")
+            elif kind == "done":
+                result = payload
+            else:
+                error = payload
     finally:
-        _EMIT.cb = None
-
-    for ev in pending:
-        line = _nlweb_text(ev)
-        if line:
-            yield st.message(nlweb.INTERMEDIATE, line, "system")
+        if result is None:
+            cancelled.set()
 
     if error or not result:
         yield st.message(nlweb.ERROR, error or "no answer", "system")
@@ -2404,6 +2557,10 @@ def run_nlweb(req):
             "data": result.get("data"),
             "usage": result.get("usage"),
             "discovery_usage": result.get("discovery_usage"),
+            "intent": result.get("intent"),
+            "attempts": result.get("attempts") or [],
+            "evidence": result.get("evidence"),
+            "answer_renderer": result.get("answer_renderer"),
         })
     if req.get("debug"):
         yield st.message(nlweb.INTERMEDIATE,
@@ -2413,7 +2570,6 @@ def run_nlweb(req):
                                      "data": result.get("data")})[:20000], "system")
     yield st.message(nlweb.COMPLETE, "", "system")
     yield st.message(nlweb.END, "", "system")
-
 
 
 HOW_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -2499,7 +2655,7 @@ interface is <a href="https://github.com/nlweb-ai/NLWeb">NLWeb</a>.
 </body></html>"""
 
 
-def serve(port):
+def serve(port, ready=None):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 
     class H(BaseHTTPRequestHandler):
@@ -2543,16 +2699,13 @@ def serve(port):
                 # Liveness for a load balancer / App Service health check: is the index loaded and
                 # is the finder reachable? Deliberately does NOT call the LLM — a health probe that
                 # costs money per poll is a bill, not a health check.
+                health = {}
                 try:
-                    n = len(json.load(open(os.path.join(ROOT, "registry", "meta.json"))))
-                except Exception:
-                    n = 0
-                finder = False
-                try:
-                    ard_client.search("healthz", k=1, rerank=False)
-                    finder = True
+                    health = ard_client.health()
                 except Exception:
                     pass
+                finder = bool(health.get("ok"))
+                n = int(health.get("entries") or 0)
                 code = 200 if (n and finder) else 503
                 return self._json(code, {"ok": code == 200, "tables": n, "agent_finder": finder})
             if p == "/costs":
@@ -2588,10 +2741,14 @@ def serve(port):
                 return self._json(200, ard_client.manifest())
             if p == "/ard/list":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                try:
+                    page = max(1, int((qs.get("page") or ["1"])[0] or 1))
+                    per = max(1, min(int((qs.get("per") or ["50"])[0] or 50), 100))
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "page and per must be integers"})
                 return self._json(200, _ard_list(
                     (qs.get("source") or [""])[0],
-                    int((qs.get("page") or ["1"])[0] or 1),
-                    int((qs.get("per") or ["50"])[0] or 50),
+                    page, per,
                     (qs.get("q") or [""])[0]))
             if p == "/ard/entry":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -2610,6 +2767,7 @@ def serve(port):
             """The one query contract: NLWeb. Streams by default; `streaming=false` returns the
             same messages as a single JSON document, which is what NLWeb clients expect."""
             req = nlweb.parse_request(params)
+            request_started = time.monotonic()
             if not req["query"]:
                 return self._json(400, {"error": "missing 'query'"})
             ip = _client_ip(self)
@@ -2626,29 +2784,57 @@ def serve(port):
                 self.wfile.write(body)
                 return
 
+            if not _QUERY_SLOTS.acquire(blocking=False):
+                return self._json(503, {"error": "server is at its concurrent query limit"})
+
             if not req["streaming"]:
-                msgs = list(run_nlweb(req))
-                _accumulate(_spent(), _spent_discovery())
-                return self._json(200, {"messages": msgs})
+                try:
+                    msgs = list(run_nlweb(req))
+                    usage, discovery = _usage_from_messages(msgs)
+                    _accumulate(usage, discovery)
+                    content = next((m.get("content") for m in reversed(msgs)
+                                    if m.get("message_type") == nlweb.NLWS), {})
+                    _record_telemetry(ip, req, content,
+                                      (time.monotonic() - request_started) * 1000)
+                    return self._json(200, {"messages": msgs})
+                finally:
+                    _QUERY_SLOTS.release()
 
             self.send_response(200)
             self._cors()
             for k, v in nlweb.SSE_HEADERS.items():
                 self.send_header(k, v)
             self.end_headers()
+            usage = discovery = None
+            answer_content = {}
             try:
                 for m in run_nlweb(req):
+                    if m.get("message_type") == nlweb.NLWS and isinstance(m.get("content"), dict):
+                        answer_content = m["content"]
+                        usage = m["content"].get("usage")
+                        discovery = m["content"].get("discovery_usage")
                     self.wfile.write(nlweb.encode(m, named=req["named_events"]))
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass                                   # client hung up mid-stream; nothing to do
-            _accumulate(_spent(), _spent_discovery())
+            finally:
+                _accumulate(usage, discovery)
+                _record_telemetry(ip, req, answer_content,
+                                  (time.monotonic() - request_started) * 1000,
+                                  "complete" if answer_content else "disconnected-or-error")
+                _QUERY_SLOTS.release()
 
         def do_POST(self):
             path = urllib.parse.urlparse(self.path).path.rstrip("/")
             if path != "/ask":
                 return self._json(404, {"error": "not found"})
-            n = int(self.headers.get("Content-Length", 0))
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                return self._json(400, {"error": "invalid Content-Length"})
+            max_body = int(os.getenv("HARNESS_MAX_BODY", "65536"))
+            if n < 0 or n > max_body:
+                return self._json(413, {"error": f"request body exceeds {max_body} bytes"})
             try:
                 params = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
@@ -2660,12 +2846,23 @@ def serve(port):
 
     # Loopback by default — the /ask endpoint spends LLM credits per call and has no auth, so it
     # is not something to bind to the world without saying so. Set BIND_HOST to expose it.
-    host = os.getenv("BIND_HOST", "127.0.0.1")
+    host = os.getenv("HARNESS_BIND_HOST", "127.0.0.1")
     print(f"Query harness on http://{host}:{port}/  (POST /ask)")
     if host not in ("127.0.0.1", "localhost", "::1"):
         print("  NOTE: bound beyond loopback. /ask is unauthenticated and each call costs money — "
               "put it behind a proxy that terminates TLS and authenticates.")
-    HTTPServer((host, port), H).serve_forever()
+    server = HTTPServer((host, port), H)
+    if ready:
+        ready(server)
+    def _stop(*_):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 _STEP_ORDER = ["classify", "resolve-entity", "resolve-concept", "check", "synthesize", "other"]

@@ -135,8 +135,8 @@ def plan(shape, hits, quantifier="exhaustive"):
 
     Refusal happens HERE — before any HTTP request — because 'no point even trying' is a
     planning decision, not a failed fetch."""
-    scored, reasons = [], []
-    for h in hits:
+    scored, reasons, rejected = [], [], []
+    for position, h in enumerate(hits):
         v, op, cap, why = verdict(shape, h["identifier"])
         # EXISTENTIAL ("give me SOME X over N") asks only for examples, not for membership of the
         # whole set — a far weaker bar than the exhaustive form. It needs no population capability:
@@ -152,19 +152,32 @@ def plan(shape, hits, quantifier="exhaustive"):
                     v, op, cap, why = "compose:generate-and-test", _op, _cap, ""
                     break
         if v == "infeasible":
-            reasons.append(f"{h.get('publisher') or h['identifier']} {why}")
+            reason = f"{h.get('publisher') or h['identifier']} {why}"
+            reasons.append(reason)
+            rejected.append({"identifier": h["identifier"], "title": h.get("title", ""),
+                             "publisher": h.get("publisher"), "reason": why,
+                             "outcome": "structurally-infeasible"})
             continue
         if v not in IMPLEMENTED:
-            reasons.append(f"{h.get('publisher') or h['identifier']} needs {v} (not implemented)")
+            reason = f"needs {v} (not implemented)"
+            reasons.append(f"{h.get('publisher') or h['identifier']} {reason}")
+            rejected.append({"identifier": h["identifier"], "title": h.get("title", ""),
+                             "publisher": h.get("publisher"), "reason": reason,
+                             "outcome": "not-implemented"})
             continue
-        scored.append((0 if v == "exact" else 1, h, v, op, cap))
+        # Lexicographic fitness, not arbitrary weights: direct execution first, then complete
+        # population coverage, then the semantic order supplied by discovery.
+        population = cap.get("population") or {}
+        completeness = 0 if population.get("complete", True) is not False else 1
+        scored.append((0 if v == "exact" else 1, completeness, position, h, v, op, cap))
     if not scored:
         uniq = list(dict.fromkeys(reasons))[:3]
-        return {"verdict": "infeasible", "why": "; ".join(uniq) or "no candidate source"}
-    scored.sort(key=lambda s: s[0])
-    _, hit, v, op, cap = scored[0]
+        return {"verdict": "infeasible", "why": "; ".join(uniq) or "no candidate source",
+                "rejected": rejected}
+    scored.sort(key=lambda s: s[:3])
+    _, _, _, hit, v, op, cap = scored[0]
     return {"verdict": v, "hit": hit, "operation": op, "capability": cap,
-            "alternatives": [s[1] for s in scored[1:]]}
+            "alternatives": [s[3] for s in scored[1:]], "rejected": rejected}
 
 
 def describe(shape, p):

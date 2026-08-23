@@ -11,7 +11,7 @@ tables). Run with the Azure keys loaded:
   set -a; source ./set_keys.sh; set +a
   python3 agent_finder.py            # serves on http://127.0.0.1:8088
 """
-import base64, json, os, re, threading, time, urllib.parse
+import base64, json, os, re, signal, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 import llm
 from registry import index
@@ -20,7 +20,7 @@ PORT = int(os.getenv("AGENT_FINDER_PORT", "8088"))
 # Bind loopback by DEFAULT: this service has no auth, and an embedding index that answers anyone
 # who asks is not something to expose by accident. A deployment that needs it reachable sets
 # BIND_HOST explicitly (0.0.0.0 behind a reverse proxy / private network).
-HOST = os.getenv("BIND_HOST", "127.0.0.1")
+HOST = os.getenv("AGENT_FINDER_BIND_HOST", "127.0.0.1")
 SELF = os.getenv("AGENT_FINDER_SELF") or f"http://{'127.0.0.1' if HOST in ('0.0.0.0', '::') else HOST}:{PORT}/"
 
 
@@ -266,7 +266,11 @@ def _agents(qs):
                  or q in (e.get("description") or "").lower()
                  or q in e["identifier"].lower() or q in (e.get("_path") or "").lower()
                  or any(q in x.lower() for x in (e.get("representativeQueries") or []))]
-    size = max(1, min(int((qs.get("pageSize") or ["50"])[0] or 50), 100))   # spec: max 100
+    try:
+        size = int((qs.get("pageSize") or ["50"])[0] or 50)
+    except (TypeError, ValueError):
+        size = 50
+    size = max(1, min(size, 100))   # spec: max 100
     off = _offset((qs.get("pageToken") or [""])[0])
     page = items[off:off + size]
     nxt = _token(off + size) if off + size < len(items) else None
@@ -282,7 +286,10 @@ def _explore(req):
     limit = 100
     for f in ((req.get("resultType") or {}).get("facets") or []):
         if f.get("field") in ("publisher", "source"):
-            limit = int(f.get("limit") or 100)
+            try:
+                limit = max(1, min(int(f.get("limit") or 100), 1000))
+            except (TypeError, ValueError):
+                limit = 100
     buckets = sorted(({"value": k, "count": len(v)} for k, v in by_pub.items()),
                      key=lambda b: -b["count"])
     return {"resultType": "facets",
@@ -398,6 +405,17 @@ class Handler(BaseHTTPRequestHandler):
                                                   "list": "GET /agents",
                                                   "entry": "GET /agents/entry?id=",
                                                   "manifest": "GET /.well-known/ard.json"}})
+        if p == "/healthz":
+            # Cost-free liveness/readiness: validate the already-built artifacts without embedding
+            # a probe query, spending provider credits, or consuming the /search quota.
+            try:
+                vecs, meta = index._store()
+                ok = len(vecs) == len(meta) and len(meta) > 0 and len(vecs.shape) == 2
+                return self._json(200 if ok else 503,
+                                  {"ok": ok, "entries": len(meta),
+                                   "dimensions": int(vecs.shape[1]) if ok else 0})
+            except Exception as e:
+                return self._json(503, {"ok": False, "error": type(e).__name__})
         if p == "/.well-known/ard.json":
             return self._json(200, _manifest())
         if p == "/agents/entry":
@@ -411,8 +429,19 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
         if path not in ("/search", "/explore"):
             return self._json(404, {"error": "not found"})
-        n = int(self.headers.get("Content-Length", 0))
-        req = json.loads(self.rfile.read(n) or b"{}")
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            return self._json(400, {"error": "invalid Content-Length"})
+        max_body = int(os.getenv("AGENT_FINDER_MAX_BODY", "65536"))
+        if n < 0 or n > max_body:
+            return self._json(413, {"error": f"request body exceeds {max_body} bytes"})
+        try:
+            req = json.loads(self.rfile.read(n) or b"{}")
+        except (ValueError, UnicodeDecodeError):
+            return self._json(400, {"error": "invalid JSON body"})
+        if not isinstance(req, dict):
+            return self._json(400, {"error": "JSON body must be an object"})
         if path == "/explore":
             return self._json(200, _explore(req))
         ok, reset = quota_ok(client_ip(self))
@@ -420,8 +449,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(429, {"error": f"daily search limit reached "
                                              f"({SEARCH_LIMIT_PER_DAY}/day per source)",
                                     "retryAfterSeconds": reset})
-        text = (req.get("query") or {}).get("text", "")
-        k = int(req.get("pageSize", 10))
+        query = req.get("query") or {}
+        if not isinstance(query, dict) or not isinstance(query.get("text"), str) or not query["text"].strip():
+            return self._json(400, {"error": "query.text must be a non-empty string"})
+        text = query["text"].strip()
+        try:
+            k = int(req.get("pageSize", 10))
+        except (TypeError, ValueError):
+            return self._json(400, {"error": "pageSize must be an integer"})
+        k = max(1, min(k, 100))
         # Discovery's query embedding and its LLM re-rank are billed HERE, in this service. They
         # are reported per search so a caller can see what discovery cost — the finder has its own
         # lifecycle, so this is not part of any one question's bill.
@@ -446,4 +482,12 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"ARD Agent Finder on {SELF} (bind {HOST}:{PORT})  (POST /search) — "
           f"{len(json.load(open(index.CACHE_META)))} tables")
-    HTTPServer((HOST, PORT), Handler).serve_forever()
+    server = HTTPServer((HOST, PORT), Handler)
+    def _stop(*_):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()

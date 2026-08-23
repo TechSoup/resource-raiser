@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provider-agnostic chat + embeddings. Works with Azure OpenAI, OpenAI, or Gemini — all through
+"""Provider-agnostic chat + embeddings. Works with Azure OpenAI, OpenAI, OpenRouter, or Gemini — all through
 the OpenAI SDK (Gemini via its OpenAI-compatible endpoint), so the rest of the codebase calls one
 interface regardless of provider.
 
@@ -14,6 +14,7 @@ Pick a provider with LLM_PROVIDER, or leave it unset and it auto-detects from wh
 See set_keys.example.sh for the full list.
 """
 import os, time, threading
+import runtime
 
 _client = None
 _provider = None
@@ -23,6 +24,7 @@ _provider = None
 _CHAT_DEFAULT = {"openai": "gpt-4o-mini", "gemini": "gemini-2.0-flash"}
 _EMBED_DEFAULT = {"openai": "text-embedding-3-large", "gemini": "gemini-embedding-001"}
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 
 def provider():
@@ -33,13 +35,15 @@ def provider():
         if not p:
             if os.getenv("AZURE_OPENAI_API_KEY"):
                 p = "azure"
+            elif os.getenv("OPENROUTER_API_KEY"):
+                p = "openrouter"
             elif os.getenv("OPENAI_API_KEY"):
                 p = "openai"
             elif os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
                 p = "gemini"
             else:
                 raise SystemExit("No LLM credentials found. Set one provider's keys — "
-                                 "AZURE_OPENAI_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY "
+                                 "AZURE_OPENAI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY "
                                  "(see set_keys.example.sh).")
         _provider = p
     return _provider
@@ -49,11 +53,12 @@ def have_credentials():
     """True if ANY supported provider is configured — used by the servers to fail early with a
     clear, provider-agnostic message instead of assuming Azure."""
     return bool(os.getenv("LLM_PROVIDER") or os.getenv("AZURE_OPENAI_API_KEY")
+                or os.getenv("OPENROUTER_API_KEY")
                 or os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY")
                 or os.getenv("GOOGLE_API_KEY"))
 
 
-_NO_CREDS = ("No LLM credentials set. Configure ONE provider (Azure OpenAI, OpenAI, or Gemini) — "
+_NO_CREDS = ("No LLM credentials set. Configure ONE provider (OpenRouter, Azure OpenAI, OpenAI, or Gemini) — "
              "copy set_keys.example.sh to set_keys.sh and fill it in, or export the keys. See the README.")
 
 
@@ -77,6 +82,12 @@ def _build():
         return OpenAI(api_key=os.getenv("GEMINI_API_KEY") or os.environ["GOOGLE_API_KEY"],
                       base_url=os.getenv("OPENAI_BASE_URL", _GEMINI_BASE),
                       timeout=_TIMEOUT, max_retries=_RETRIES)
+    if p == "openrouter":
+        return OpenAI(api_key=os.environ["OPENROUTER_API_KEY"],
+                      base_url=os.getenv("OPENROUTER_BASE_URL", _OPENROUTER_BASE),
+                      default_headers={"HTTP-Referer": os.getenv("OPENROUTER_APP_URL", ""),
+                                       "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Resource Raiser")},
+                      timeout=_TIMEOUT, max_retries=_RETRIES)
     return OpenAI(api_key=os.environ["OPENAI_API_KEY"],       # plain OpenAI or an OpenAI-compatible host
                   base_url=os.getenv("OPENAI_BASE_URL") or None,
                   timeout=_TIMEOUT, max_retries=_RETRIES)
@@ -93,6 +104,8 @@ def chat_model():
     # Azure addresses a DEPLOYMENT name; OpenAI/Gemini address a model id.
     if provider() == "azure":
         return os.getenv("CHAT_DEPLOYMENT", "gpt-4o-mini")
+    if provider() == "openrouter":
+        return os.getenv("OPENROUTER_MODEL") or os.getenv("CHAT_MODEL", "openai/gpt-4o-mini")
     return os.getenv("CHAT_MODEL", _CHAT_DEFAULT[provider()])
 
 
@@ -107,6 +120,8 @@ def rerank_model():
 def embed_model():
     if provider() == "azure":
         return os.getenv("EMBED_DEPLOYMENT", "text-embedding-3-large")
+    if provider() == "openrouter":
+        return os.getenv("OPENROUTER_EMBEDDING_MODEL") or os.getenv("EMBED_MODEL", "openai/text-embedding-3-small")
     return os.getenv("EMBED_MODEL", _EMBED_DEFAULT[provider()])
 
 
@@ -230,7 +245,7 @@ def _record(kind, model, usage, reported_cost=None, stage="other"):
 
 
 def _openrouter():
-    return "openrouter.ai" in (os.getenv("OPENAI_BASE_URL") or "")
+    return provider() == "openrouter" or "openrouter.ai" in (os.getenv("OPENAI_BASE_URL") or "")
 
 
 def _reported_cost(usage):
@@ -249,6 +264,7 @@ def chat(system, user, json_mode=False, model=None, stage="other"):
     `model` overrides the default chat model for one call (see rerank_model()).
     `stage` labels what the call was FOR — classify / resolve / check / synthesize — so a
     question's bill can be read by what it was spent on rather than as one lump."""
+    runtime.check()
     kw = {"response_format": {"type": "json_object"}} if json_mode else {}
     if _openrouter():
         extra = {"usage": {"include": True}}              # ask OpenRouter for the actual charge
@@ -274,9 +290,11 @@ def embed(texts, batch=96):
         one call per string, which would burn a free-tier quota that's already exhausted);
       - a too-large batch (e.g. Gemini caps batch-embed at 100) is SPLIT and retried, not failed.
     Default batch 96 stays under Gemini's hard cap of 100."""
+    runtime.check()
     c, model = client(), embed_model()
 
     def _call(chunk, depth=0):
+        runtime.check()
         try:
             r = c.embeddings.create(model=model, input=chunk)
             u = getattr(r, "usage", None)

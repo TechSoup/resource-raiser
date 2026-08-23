@@ -12,7 +12,8 @@ embedding key. The /search shape mirrors ARD so this is swappable for a full reg
 Set ARD_RERANK=0 to skip the second-stage LLM re-rank (much faster on slow/local models; the
 embedding prefilter alone is usually enough).
 """
-import os, sys, glob, json, hashlib
+import os, sys, glob, json, hashlib, shutil
+from datetime import datetime, timezone
 import numpy as np
 import yaml
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..")))
@@ -20,8 +21,21 @@ import llm            # provider-agnostic embeddings (Azure OpenAI | OpenAI | Ge
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 SOURCES = os.path.join(ROOT, "sources")
-CACHE_VEC = os.path.join(os.path.dirname(__file__), "vectors.npy")
-CACHE_META = os.path.join(os.path.dirname(__file__), "meta.json")
+REGISTRY = os.path.dirname(__file__)
+BUILDS = os.path.join(REGISTRY, "builds")
+CURRENT = os.path.join(REGISTRY, "current")
+LEGACY_VEC = os.path.join(REGISTRY, "vectors.npy")
+LEGACY_META = os.path.join(REGISTRY, "meta.json")
+
+
+def _active_paths():
+    """One immutable index generation. Legacy files remain readable during migration."""
+    if os.path.isdir(CURRENT):
+        return os.path.join(CURRENT, "vectors.npy"), os.path.join(CURRENT, "meta.json")
+    return LEGACY_VEC, LEGACY_META
+
+
+CACHE_VEC, CACHE_META = _active_paths()
 
 
 def embed(texts, batch=96):
@@ -29,7 +43,8 @@ def embed(texts, batch=96):
 
 
 def frontmatter(path):
-    t = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as f:
+        t = f.read()
     if not t.startswith("---"):
         return None
     _, fm, _b = t.split("---", 2)
@@ -129,14 +144,27 @@ def build(batch=96, limit=None):
             srcs[_srcdir(d["identifier"])] = srcs.get(_srcdir(d["identifier"]), 0) + 1
         print(f"test build: {len(docs)} leaves across sources {srcs}")
 
+    corpus_hash = hashlib.sha256(json.dumps(
+        {"entries": [(d["identifier"], d["sig"]) for d in docs], "model": emodel},
+        separators=(",", ":"), sort_keys=True).encode()).hexdigest()[:20]
+    os.makedirs(BUILDS, exist_ok=True)
+    final_dir = os.path.join(BUILDS, corpus_hash)
+    stage_dir = os.path.join(BUILDS, f".{corpus_hash}.staging")
+    os.makedirs(stage_dir, exist_ok=True)
+    stage_vec, stage_meta = (os.path.join(stage_dir, "vectors.npy"),
+                             os.path.join(stage_dir, "meta.json"))
+
     # reuse any previously-embedded vector whose (identifier, sig) is unchanged; embed ONLY
     # new or modified leaves. Keyed by content hash, not position, so inserting or editing a few
     # leaves is cheap no matter where they sort — no full re-embed when a source lands mid-list.
     reuse = {}
-    if os.path.exists(CACHE_VEC) and os.path.exists(CACHE_META):
-        prev, prev_vecs = json.load(open(CACHE_META)), np.load(CACHE_VEC)
-        for d, v in zip(prev, prev_vecs):
-            reuse[(d["identifier"], d["sig"])] = v
+    for prev_vec, prev_meta in ((stage_vec, stage_meta), _active_paths()):
+        if os.path.exists(prev_vec) and os.path.exists(prev_meta):
+            with open(prev_meta) as f:
+                prev = json.load(f)
+            prev_vecs = np.load(prev_vec)
+            for d, v in zip(prev, prev_vecs):
+                reuse[(d["identifier"], d["sig"])] = v
     vecs, todo = [None] * len(docs), []
     for i, d in enumerate(docs):
         hit = reuse.get((d["identifier"], d["sig"]))
@@ -147,8 +175,13 @@ def build(batch=96, limit=None):
     print(f"reusing {len(docs) - len(todo)} cached, embedding {len(todo)} new/changed of {len(docs)}…")
     def _persist(subset):
         done = [(d, v) for d, v in zip(docs, vecs) if v is not None] if subset else list(zip(docs, vecs))
-        np.save(CACHE_VEC, np.asarray([v for _, v in done], dtype=np.float32))
-        json.dump([d for d, _ in done], open(CACHE_META, "w"))
+        vtmp, mtmp = stage_vec + ".tmp", stage_meta + ".tmp"
+        with open(vtmp, "wb") as f:
+            np.save(f, np.asarray([v for _, v in done], dtype=np.float32))
+        with open(mtmp, "w") as f:
+            json.dump([d for d, _ in done], f)
+        os.replace(vtmp, stage_vec)
+        os.replace(mtmp, stage_meta)
 
     for j in range(0, len(todo), batch):
         idx = todo[j:j + batch]
@@ -158,7 +191,85 @@ def build(batch=96, limit=None):
         print(f"  embedded {min(j + batch, len(todo))}/{len(todo)}")
         _persist(subset=True)                          # checkpoint each batch: an interrupt resumes here
     _persist(subset=False)
-    print(f"indexed {len(docs)} entries -> {CACHE_VEC}")
+    vecs_check = np.load(stage_vec)
+    with open(stage_meta) as f:
+        meta_check = json.load(f)
+    if len(vecs_check) != len(meta_check) or len(meta_check) != len(docs) or len(vecs_check.shape) != 2:
+        raise SystemExit("index validation failed: vector/metadata count or dimensions differ")
+    manifest = {
+        "corpus_hash": corpus_hash, "embedding_provider": llm.provider(),
+        "embedding_model": emodel, "vector_dimension": int(vecs_check.shape[1]),
+        "entry_count": len(meta_check), "generator_commit": _git_commit(),
+        "prompt_versions": _prompt_versions(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(os.path.join(stage_dir, "manifest.json.tmp"), "w") as f:
+        json.dump(manifest, f, indent=2)
+    os.replace(os.path.join(stage_dir, "manifest.json.tmp"), os.path.join(stage_dir, "manifest.json"))
+    if not os.path.exists(final_dir):
+        os.replace(stage_dir, final_dir)
+    else:
+        shutil.rmtree(stage_dir)
+    link_tmp = CURRENT + ".tmp"
+    try:
+        os.unlink(link_tmp)
+    except FileNotFoundError:
+        pass
+    os.symlink(os.path.relpath(final_dir, os.path.dirname(CURRENT)), link_tmp)
+    os.replace(link_tmp, CURRENT)
+    global CACHE_VEC, CACHE_META, _STORE
+    CACHE_VEC, CACHE_META = os.path.join(CURRENT, "vectors.npy"), os.path.join(CURRENT, "meta.json")
+    _STORE = None
+    # A successful publication supersedes checkpoints from failed/incompatible generations. Keep
+    # the current staging directory during a failed build so it can resume; clean all of them only
+    # after another generation has been fully validated and selected.
+    for stale in glob.glob(os.path.join(BUILDS, ".*.staging")):
+        if os.path.isdir(stale):
+            shutil.rmtree(stale)
+    print(f"indexed {len(docs)} entries -> generation {corpus_hash}")
+
+
+def _git_commit():
+    try:
+        import subprocess
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
+                              text=True, check=True).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _prompt_versions():
+    """Content hashes distinguish generation runs even when prompts changed before a commit."""
+    out = {}
+    for name in ("descriptions.py", "repr_queries.py"):
+        path = os.path.join(ROOT, "tools", name)
+        try:
+            with open(path, "rb") as f:
+                out[name] = hashlib.sha256(f.read()).hexdigest()[:16]
+        except OSError:
+            out[name] = "missing"
+    return out
+
+
+def verify():
+    """Validate the active generation as a single artifact set without calling a provider."""
+    vec, meta = _active_paths()
+    try:
+        v = np.load(vec)
+        with open(meta) as f:
+            m = json.load(f)
+        manifest_path = os.path.join(CURRENT, "manifest.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+        else:
+            manifest = {}
+        ok = len(v.shape) == 2 and len(v) == len(m) and len(m) > 0
+        if manifest:
+            ok = ok and manifest.get("entry_count") == len(m) and manifest.get("vector_dimension") == v.shape[1]
+        return ok, {"entries": len(m), "dimensions": int(v.shape[1]), **manifest}
+    except Exception as e:
+        return False, {"error": f"{type(e).__name__}: {e}"}
 
 
 def _card(i, c):
@@ -278,5 +389,9 @@ if __name__ == "__main__":
     elif len(sys.argv) >= 3 and sys.argv[1] == "search":
         for r in search(" ".join(sys.argv[2:])):
             print(f'{r["score"]:5.1f}  {r["identifier"]}  ({r["title"]})')
+    elif len(sys.argv) >= 2 and sys.argv[1] == "verify":
+        ok, detail = verify()
+        print(json.dumps(detail, indent=2))
+        raise SystemExit(0 if ok else 1)
     else:
         raise SystemExit("usage: index.py build | index.py search <query>")

@@ -8,40 +8,48 @@
 # straight to serving. Requires Azure OpenAI credentials — see set_keys.example.sh.
 set -e
 cd "$(dirname "$0")"
+PYTHON="${PYTHON:-$PWD/.venv/bin/python}"
+if [ ! -x "$PYTHON" ]; then PYTHON="python3"; fi
 
 # --- credentials --------------------------------------------------------------------
 # Put your keys in ./set_keys.sh (gitignored; copy set_keys.example.sh). If you export the
 # vars some other way, that's fine too — this just sources the file when it exists.
 if [ -f set_keys.sh ]; then set -a; source set_keys.sh; set +a; fi
-if [ -z "${AZURE_OPENAI_API_KEY:-}${OPENAI_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_API_KEY:-}" ]; then
-  echo "ERROR: No LLM credentials set. Configure Azure OpenAI, OpenAI, or Gemini in set_keys.sh" >&2
+if [ -z "${AZURE_OPENAI_API_KEY:-}${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}${GEMINI_API_KEY:-}${GOOGLE_API_KEY:-}" ]; then
+  echo "ERROR: No LLM credentials set. Configure OpenRouter, Azure OpenAI, OpenAI, or Gemini in set_keys.sh" >&2
   echo "       (copy set_keys.example.sh to set_keys.sh and fill in one provider)." >&2
   exit 1
 fi
 # GOOGLE_CLOUD_PROJECT is OPTIONAL — set it to activate the BigQuery-backed population sources.
 export GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-}"
 
-# --- one-time build: generate tables + embed the ARD index --------------------------
-if [ ! -f registry/vectors.npy ]; then
+# --- local artifact refresh ----------------------------------------------------------
+# Generators run at RELEASE time (tools/build_registry_release.py), not on production boot: FASB
+# and Census taxonomy availability must not become a service startup dependency. The incremental
+# builder always runs over the local descriptor corpus; unchanged signatures cost no embedding calls.
+if [ ! -f registry/current/vectors.npy ] && [ ! -f registry/vectors.npy ]; then
   echo "First run — building table descriptions and ARD index (~10 min)…"
-  python3 tools/gen_sec_okf.py        # SEC EDGAR us-gaap concepts (from the FASB taxonomy)
-  python3 tools/gen_census_okf.py     # Census ACS Data Profile variables
-  python3 tools/gen_treasury_okf.py   # Treasury FiscalData series
-  python3 tools/gen_cdc_okf.py        # CDC PLACES measures
-  python3 tools/gen_np_okf.py         # IRS 990 nonprofit fields
-  python3 registry/index.py build     # embed every leaf -> registry/vectors.npy + meta.json
+  "$PYTHON" tools/gen_sec_okf.py        # SEC EDGAR us-gaap concepts (from the FASB taxonomy)
+  "$PYTHON" tools/gen_census_okf.py     # Census ACS Data Profile variables
+  "$PYTHON" tools/gen_treasury_okf.py   # Treasury FiscalData series
+  "$PYTHON" tools/gen_cdc_okf.py        # CDC PLACES measures
+  "$PYTHON" tools/gen_np_okf.py         # IRS 990 nonprofit fields
+  "$PYTHON" registry/index.py build     # embed every leaf -> registry/vectors.npy + meta.json
   echo "Build complete."
+else
+  "$PYTHON" registry/index.py build
 fi
 
 # --- serve --------------------------------------------------------------------------
 pkill -f "agent_finder.py" 2>/dev/null || true
 pkill -f "harness.py --serve" 2>/dev/null || true
 sleep 1
-# BIND_HOST defaults to loopback (see agent_finder.py / harness.py). A server deployment sets
-# BIND_HOST=0.0.0.0 for the harness; the finder should stay on loopback unless something outside
-# the box needs to query the index directly.
-nohup python3 agent_finder.py    > /tmp/ard_agent_finder.log 2>&1 &
-nohup python3 harness.py --serve > /tmp/ard_harness.log      2>&1 &
+# The two services have separate bind controls. Exposing the harness must never implicitly expose
+# the unauthenticated, credit-spending finder.
+export AGENT_FINDER_BIND_HOST="${AGENT_FINDER_BIND_HOST:-127.0.0.1}"
+export HARNESS_BIND_HOST="${HARNESS_BIND_HOST:-127.0.0.1}"
+nohup "$PYTHON" agent_finder.py    > /tmp/ard_agent_finder.log 2>&1 &
+nohup "$PYTHON" harness.py --serve > /tmp/ard_harness.log      2>&1 &
 
 up=""
 for i in $(seq 1 30); do

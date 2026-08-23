@@ -123,6 +123,19 @@ class _Pg:
         return False                       # nothing to release — see close()
 
 
+class _Sqlite:
+    """Read-only sqlite context that actually closes its handle on exit."""
+    def __init__(self, path):
+        self._c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+    def __enter__(self):
+        return self._c
+
+    def __exit__(self, *exc):
+        self._c.close()
+        return False
+
+
 def _broken(c):
     """True if the server has gone away on this handle."""
     try:
@@ -135,7 +148,7 @@ def _broken(c):
 def _conn():
     if URL:
         return _Pg(URL)
-    return sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    return _Sqlite(DB)
 
 
 def available():

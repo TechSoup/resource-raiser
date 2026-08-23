@@ -137,15 +137,26 @@ def parse_request(params):
     streaming = one("streaming", True)
     if isinstance(streaming, str):
         streaming = streaming.strip().lower() not in ("false", "0", "no")
+    mode = str(one("mode") or "generate").strip().lower()
+    if mode not in ("generate", "list"):
+        mode = "generate"
+    assumptions = {}
+    for param, field in (("assumption_entity", "entity"), ("assumption_type", "type"),
+                         ("assumption_measure", "attribute"), ("assumption_period", "period"),
+                         ("assumption_operation", "shape")):
+        value = one(param)
+        if isinstance(value, str) and value.strip():
+            assumptions[field] = value.strip()
 
     return {
         "query": (one("query") or "").strip(),
         "sites": sites,
-        "mode": (one("mode") or "generate").strip().lower(),
-        "max_results": as_int("max_results", 10),
-        "min_score": as_int("min_score", 0),
+        "mode": mode,
+        "max_results": max(1, min(as_int("max_results", 10), 100)),
+        "min_score": max(0, min(as_int("min_score", 0), 100)),
         "streaming": bool(streaming),
         "named_events": str(one("sse_format") or "").strip().lower() == "named",
         "conversation_id": one("conversation_id"),
         "debug": str(one("debug") or "").strip().lower() in ("1", "true", "yes"),
+        "assumptions": assumptions,
     }

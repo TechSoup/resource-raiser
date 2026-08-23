@@ -1,0 +1,28 @@
+{
+  "refusals": [
+    {
+      "name": "keyed nonprofit source cannot rank a population",
+      "shape": "ranking",
+      "identifier": "sources/nonprofit-bmf/eligibility.md",
+      "expected": "infeasible"
+    }
+  ],
+  "evidence": [
+    {
+      "name": "grant overview renders from evidence type",
+      "intent": {"question": "Give me an overview of the grant graph", "operation": "ranking"},
+      "identifier": "sources/irs-grants/grant-overview.md",
+      "data": {
+        "direction": "overview",
+        "grant_count": 10,
+        "total_display": "$1,000",
+        "avg_grant_display": "$100",
+        "funder_count": 2,
+        "recipient_count": 8,
+        "source": "IRS test fixture"
+      },
+      "expected_kind": "overview",
+      "expected_renderer": "grant-overview"
+    }
+  ]
+}

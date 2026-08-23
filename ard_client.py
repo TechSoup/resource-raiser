@@ -140,6 +140,11 @@ def manifest():
     return _get("/.well-known/ard.json") or {}
 
 
+def health():
+    """Cost-free finder readiness. This endpoint must never perform semantic search or embedding."""
+    return _get("/healthz") or {"ok": False}
+
+
 def search(text, k=10, sources=None, rerank=True):
     body = json.dumps({"query": {"text": text}, "pageSize": k, "sources": sources, "rerank": rerank}).encode()
     req = urllib.request.Request(BASE + "/search", data=body,
