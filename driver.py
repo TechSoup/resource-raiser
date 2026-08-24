@@ -10,7 +10,7 @@
 
 Run:  source the Azure keys, then  python3 driver.py "how much did Apple spend on R&D in 2023?"
 """
-import os, re, sys, json, time, subprocess, urllib.request, urllib.error
+import os, re, sys, json, time, threading, subprocess, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 import yaml
 import llm            # provider-agnostic chat/embeddings (Azure OpenAI | OpenAI | Gemini)
@@ -26,6 +26,10 @@ class CredentialError(Exception):
     of backtracking over other hits/entities/periods can satisfy it, so the search must STOP and tell
     the user to set the key — not spend ~2 minutes exhausting every other option first."""
 
+
+class SourceRateLimitError(RuntimeError):
+    """A publisher is temporarily throttling requests; callers should report and retry later."""
+
 # In-process cache of SEC companyconcept responses, keyed by (cik, concept). fetch_metric probes
 # ~25 candidate concepts per query and the harness may re-enter it while backtracking; caching makes
 # repeats free. None = the company doesn't report that concept (a 404), also worth remembering.
@@ -33,6 +37,18 @@ _SEC_CONCEPT_CACHE = {}
 _SEC_SEARCH_CACHE = {}      # the concept-candidate search per metric_query — identical across backtracks
 _METRIC_CACHE = {}          # whole fetch_metric result (or failure) per (metric, cik, period)
 _SEC_CONCEPT_META = None
+_SEC_REQUEST_LOCK = threading.Lock()
+_SEC_NEXT_REQUEST = 0.0
+
+
+def _pace_sec_request():
+    """Keep all concurrent concept probes in this process below eight SEC requests/second."""
+    global _SEC_NEXT_REQUEST
+    with _SEC_REQUEST_LOCK:
+        now = time.monotonic()
+        if now < _SEC_NEXT_REQUEST:
+            time.sleep(_SEC_NEXT_REQUEST - now)
+        _SEC_NEXT_REQUEST = time.monotonic() + 0.125
 
 
 def _sec_concept(cik, concept):
@@ -43,23 +59,41 @@ def _sec_concept(cik, concept):
     if key in _SEC_CONCEPT_CACHE:
         return _SEC_CONCEPT_CACHE[key]
     url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{int(cik):0>10}/us-gaap/{concept}.json"
-    data = None
-    for attempt in range(3):
+    data, absent, last_error = None, False, None
+    for attempt in range(5):
         try:
+            _pace_sec_request()
             with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
                                         timeout=20) as r:
                 data = json.load(r)
             break
         except urllib.error.HTTPError as e:
             if e.code == 404:
+                absent = True
                 break                                         # not reported -> None
-            if e.code in (429, 500, 502, 503) and attempt < 2:
-                time.sleep(0.4 * (attempt + 1)); continue
-            break
-        except Exception:
-            if attempt < 2:
-                time.sleep(0.3); continue
-            break
+            last_error = e
+            if e.code in (429, 500, 502, 503) and attempt < 4:
+                retry_after = e.headers.get("Retry-After") if e.headers else None
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = min(8.0, 0.75 * (2 ** attempt))
+                time.sleep(delay)
+                continue
+            if e.code == 429:
+                raise SourceRateLimitError(
+                    "SEC is temporarily rate limiting requests; please try again shortly") from e
+            raise
+        except Exception as e:
+            last_error = e
+            if attempt < 4:
+                time.sleep(min(4.0, 0.5 * (2 ** attempt)))
+                continue
+            raise
+    if data is None and not absent:
+        raise RuntimeError(f"SEC concept request failed for {concept}: {last_error}")
+    # Cache a successful payload or a definitive 404. A 429/5xx/network failure must never become
+    # a durable lie that the company does not report the concept.
     _SEC_CONCEPT_CACHE[key] = data
     return data
 
@@ -234,6 +268,14 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
     hits = _SEC_SEARCH_CACHE.get(skey)
     if hits is None:                                         # cache the finder call: identical on every backtrack
         hits = ard_client.search(metric_query, k=pool, sources=["sec-edgar"], rerank=False)
+        # Broad headline concepts must not depend on whether an embedding search over thousands of
+        # near-synonymous XBRL leaves happens to put them in its top 50. Add their indexed leaves to
+        # the probe pool; the normal reported-data chooser below still verifies that the company
+        # actually files them.
+        for canonical in _canonical_sec_concepts(metric_query):
+            meta = _concept_meta(canonical)
+            if meta and not any(h.get("identifier") == meta.get("identifier") for h in hits):
+                hits.insert(0, meta)
         _SEC_SEARCH_CACHE[skey] = hits
     # Probe the candidate concepts CONCURRENTLY (each is one cached SEC call). Sequentially this was
     # ~25 subprocess+HTTP round-trips (~14s) and dominated latency; in parallel it's a couple seconds.
@@ -254,14 +296,7 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
     return out
 
 
-def _canonical_sec_index(metric_query, candidates):
-    """Return the canonical headline concept for a deliberately small set of broad SEC measures.
-
-    This is not a cross-source ontology. It is a source-specific safety rule for XBRL families where
-    a broad user term otherwise collides with specialized siblings that contain the same word. Add a
-    family only after observing a concrete collision and only when the taxonomy has a clear headline
-    concept.
-    """
+def _canonical_sec_concepts(metric_query):
     normalized = " ".join(re.findall(r"[a-z0-9]+", str(metric_query).lower()))
     families = {
         "revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
@@ -270,8 +305,22 @@ def _canonical_sec_index(metric_query, candidates):
                      "SalesRevenueNet"),
         "total revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
                           "SalesRevenueNet"),
+        "assets": ("Assets",),
+        "total assets": ("Assets",),
+        "net income": ("NetIncomeLoss",),
     }
-    preferred = families.get(normalized)
+    return families.get(normalized, ())
+
+
+def _canonical_sec_index(metric_query, candidates):
+    """Return the canonical headline concept for a deliberately small set of broad SEC measures.
+
+    This is not a cross-source ontology. It is a source-specific safety rule for XBRL families where
+    a broad user term otherwise collides with specialized siblings that contain the same word. Add a
+    family only after observing a concrete collision and only when the taxonomy has a clear headline
+    concept.
+    """
+    preferred = _canonical_sec_concepts(metric_query)
     if not preferred:
         return None
     by_concept = {str(row.get("concept") or "").removeprefix("us-gaap:"): i

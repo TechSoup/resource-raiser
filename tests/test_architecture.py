@@ -30,6 +30,13 @@ class DomainTests(unittest.TestCase):
                                        lambda: {"value": -888888888})
         self.assertEqual(attempt.outcome, "rejected")
 
+    def test_string_entity_is_validated_as_a_name_not_a_key_map(self):
+        intent = QueryIntent("How big is Microsoft?", entity="Microsoft", measure="assets")
+        verdict = validation.structural(intent, {
+            "value": 758376000000, "entity": "Microsoft", "metric": "assets"})
+        self.assertTrue(verdict.accepted)
+        self.assertIn("entity-name", [check.name for check in verdict.checks])
+
     def test_renderer_uses_evidence_kind_not_classifier_shape(self):
         case = FIXTURES["evidence"][0]
         intent = QueryIntent(**case["intent"])
@@ -338,6 +345,15 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(second["message_type"], "intermediate_message")
             self.assertLess(elapsed, 0.08)
 
+    def test_source_rate_limit_is_reported_as_a_clear_ui_error(self):
+        with mock.patch.object(harness, "run", side_effect=driver.SourceRateLimitError(
+                "SEC is temporarily rate limiting requests; please try again shortly")):
+            messages = list(harness.run_nlweb({
+                "query": "How big is Microsoft?", "sites": (), "conversation_id": None,
+                "min_score": 0, "max_results": 10, "mode": "generate", "debug": False}))
+        error = next(m for m in messages if m["message_type"] == nlweb.ERROR)
+        self.assertIn("temporarily rate limiting", error["content"])
+
 
 class AmbiguityTests(unittest.TestCase):
     HIT = {"identifier": "sources/sec-edgar/net-income-loss.md", "title": "Net income",
@@ -521,6 +537,51 @@ class EndToEndRenderingTests(unittest.TestCase):
         self.assertEqual(res["data"]["unit"], "USD")
 
 
+class SecCanonicalConceptTests(unittest.TestCase):
+    def test_broad_microsoft_size_measures_have_headline_concepts(self):
+        self.assertEqual(driver._canonical_sec_concepts("total assets"), ("Assets",))
+        self.assertEqual(driver._canonical_sec_concepts("net income"), ("NetIncomeLoss",))
+        self.assertIn("RevenueFromContractWithCustomerExcludingAssessedTax",
+                      driver._canonical_sec_concepts("total revenue"))
+
+    def test_headline_assets_beat_a_specialized_sibling(self):
+        candidates = [
+            (0, {"concept": "us-gaap:AssetsCurrent"}),
+            (1, {"concept": "us-gaap:Assets"}),
+        ]
+        self.assertEqual(driver._canonical_sec_index("total assets", candidates), 1)
+
+    def test_sec_429_is_retried_and_never_cached_as_missing(self):
+        import io
+        from urllib.error import HTTPError
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+
+        key = ("789019", "AssetsFixture")
+        driver._SEC_CONCEPT_CACHE.pop(key, None)
+        throttled = HTTPError("fixture", 429, "rate limited", {"Retry-After": "0"}, None)
+        payload = Response(b'{"entityName":"MICROSOFT CORPORATION","units":{}}')
+        with mock.patch("driver._pace_sec_request"), \
+             mock.patch("driver.urllib.request.urlopen", side_effect=[throttled, payload]) as get:
+            result = driver._sec_concept("789019", "AssetsFixture")
+        self.assertEqual(result["entityName"], "MICROSOFT CORPORATION")
+        self.assertEqual(get.call_count, 2)
+        self.assertIs(driver._SEC_CONCEPT_CACHE[key], result)
+
+    def test_only_a_404_is_cached_as_an_absent_concept(self):
+        from urllib.error import HTTPError
+        key = ("789019", "MissingFixture")
+        driver._SEC_CONCEPT_CACHE.pop(key, None)
+        missing = HTTPError("fixture", 404, "not found", {}, None)
+        with mock.patch("driver._pace_sec_request"), \
+             mock.patch("driver.urllib.request.urlopen", side_effect=missing):
+            self.assertIsNone(driver._sec_concept("789019", "MissingFixture"))
+        self.assertIn(key, driver._SEC_CONCEPT_CACHE)
+        self.assertIsNone(driver._SEC_CONCEPT_CACHE[key])
+
+
 class IndexArtifactTests(unittest.TestCase):
     def test_reranker_is_low_reasoning_and_output_bounded(self):
         with mock.patch.dict(os.environ, {"ARD_RERANK_MAX_TOKENS": "321",
@@ -529,6 +590,34 @@ class IndexArtifactTests(unittest.TestCase):
             index._rerank("revenue", [{"title": "Revenue"}], 1)
         self.assertEqual(ask.call_args.kwargs["max_tokens"], 321)
         self.assertEqual(ask.call_args.kwargs["reasoning_effort"], "low")
+
+    def test_reranker_score_is_the_only_eligibility_gate(self):
+        candidates = [{"identifier": "sources/census/poverty.md", "title": "Poverty"},
+                      {"identifier": "sources/census/broadband.md", "title": "Broadband"}]
+        verdict = '{"ranked":[{"i":1,"score":96},{"i":0,"score":12}]}'
+        with mock.patch.object(driver, "ask_llm", return_value=verdict):
+            results = index._rerank("broadband in Detroit", candidates, 2)
+        self.assertEqual([r["identifier"] for r in results],
+                         ["sources/census/broadband.md"])
+
+    def test_rerank_failure_never_releases_embedding_neighbors(self):
+        import numpy as np
+        vectors = np.asarray([[1.0, 0.0]], dtype=np.float32)
+        metadata = [{"identifier": "sources/census/poverty.md", "title": "Poverty"}]
+        with mock.patch.object(index, "_store", return_value=(vectors, metadata)), \
+             mock.patch.object(index, "embed", return_value=vectors), \
+             mock.patch.object(index, "_rerank", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "relevance scoring failed"):
+                index.search("broadband in Detroit", sources=["census"])
+
+    def test_valid_empty_rerank_stays_empty(self):
+        import numpy as np
+        vectors = np.asarray([[1.0, 0.0]], dtype=np.float32)
+        metadata = [{"identifier": "sources/census/poverty.md", "title": "Poverty"}]
+        with mock.patch.object(index, "_store", return_value=(vectors, metadata)), \
+             mock.patch.object(index, "embed", return_value=vectors), \
+             mock.patch.object(index, "_rerank", return_value=[]):
+            self.assertEqual(index.search("broadband in Detroit", sources=["census"]), [])
 
     def test_multi_query_search_embeds_once_and_unions_by_best_similarity(self):
         import numpy as np
@@ -672,38 +761,6 @@ class EntityTypeGateTests(unittest.TestCase):
 
     def test_no_type_hint_never_rejects(self):
         self.assertTrue(harness._type_compatible({"ein": "1"}, None, ["university"]))
-
-
-class EligibilityGateTests(unittest.TestCase):
-    """Candidates whose declared subject cannot answer the question cost no fetch."""
-
-    HITS = [{"identifier": "sources/census/poverty.md", "title": "Poverty rate"},
-            {"identifier": "sources/census/broadband.md", "title": "Broadband subscriptions"}]
-
-    def test_ineligible_candidates_are_dropped(self):
-        with mock.patch.object(harness.TK, "llm", return_value=json.dumps({"eligible": [1]})):
-            kept, dropped = harness._eligible("broadband in Detroit", self.HITS)
-        self.assertEqual([h["identifier"] for h in kept], ["sources/census/broadband.md"])
-        self.assertEqual(dropped, 1)
-
-    def test_a_broken_judge_fails_open(self):
-        """A judge that cannot answer must not make the engine refuse answerable questions."""
-        with mock.patch.object(harness.TK, "llm", side_effect=RuntimeError("provider down")):
-            kept, dropped = harness._eligible("broadband in Detroit", self.HITS)
-        self.assertEqual(kept, self.HITS)
-        self.assertIsNone(dropped)
-
-    def test_a_malformed_verdict_fails_open(self):
-        with mock.patch.object(harness.TK, "llm", return_value=json.dumps({"eligible": "all"})):
-            kept, _ = harness._eligible("broadband in Detroit", self.HITS)
-        self.assertEqual(kept, self.HITS)
-
-    def test_judging_everything_ineligible_is_allowed(self):
-        """An empty result is the honest outcome when nothing measures what was asked."""
-        with mock.patch.object(harness.TK, "llm", return_value=json.dumps({"eligible": []})):
-            kept, dropped = harness._eligible("broadband in Detroit", self.HITS)
-        self.assertEqual(kept, [])
-        self.assertEqual(dropped, 2)
 
 
 if __name__ == "__main__":

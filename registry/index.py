@@ -291,6 +291,9 @@ def _card(i, c):
     return s
 
 
+MIN_RERANK_SCORE = float(os.getenv("ARD_MIN_RERANK_SCORE", "50"))
+
+
 def _rerank(query, candidates, k):
     """Stage 2: a small LM scores the embedding candidates by actual relevance, seeing the
     full card for each (title, description, and the questions people ask for it)."""
@@ -317,12 +320,14 @@ def _rerank(query, candidates, k):
             max_tokens=int(os.getenv("ARD_RERANK_MAX_TOKENS", "400")),
             reasoning_effort=os.getenv("ARD_RERANK_REASONING_EFFORT", "low"))).get("ranked", [])
     except Exception:
-        return []
+        return None
     out = []
     for r in ranked[:k]:
         i = r.get("i")
-        if isinstance(i, int) and 0 <= i < len(candidates):
-            out.append({**candidates[i], "score": r.get("score")})
+        score = r.get("score")
+        if (isinstance(i, int) and 0 <= i < len(candidates)
+                and isinstance(score, (int, float)) and score >= MIN_RERANK_SCORE):
+            out.append({**candidates[i], "score": score})
     return out
 
 
@@ -390,9 +395,9 @@ def search_many(queries, k=5, prefilter=None, sources=None, rerank=True, rerank_
     if not rerank:                                            # embedding-only: the caller ranks by data
         return [{**c, "score": c["embed_score"]} for c in cand[:k]]
     reranked = _rerank(rerank_query or queries[0], cand, k)
-    if reranked:
-        return reranked
-    return [{**c, "score": c["embed_score"]} for c in cand[:k]]
+    if reranked is None:
+        raise RuntimeError("LLM table relevance scoring failed")
+    return reranked
 
 
 def search(query, k=5, prefilter=None, sources=None, rerank=True):

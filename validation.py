@@ -130,9 +130,13 @@ def structural(intent: QueryIntent, data: dict[str, Any], source_rule: Callable 
         checks.append(Check("period", "pass", "latest or unstated period imposes no exact match"))
 
     # A stable key is decisive when both sides expose one. Names are not treated as keys.
-    expected_keys = {str(v) for k, v in (data.get("requested_entity") or {}).items()
+    requested_entity = data.get("requested_entity")
+    returned_entity = data.get("entity")
+    requested_entity = requested_entity if isinstance(requested_entity, dict) else {}
+    returned_entity = returned_entity if isinstance(returned_entity, dict) else {}
+    expected_keys = {str(v) for k, v in requested_entity.items()
                      if k in ("ein", "cik", "fips", "id") and v}
-    actual_keys = {str(v) for k, v in (data.get("entity") or {}).items()
+    actual_keys = {str(v) for k, v in returned_entity.items()
                    if k in ("ein", "cik", "fips", "id") and v}
     if expected_keys and actual_keys:
         ok = bool(expected_keys & actual_keys)
@@ -142,7 +146,8 @@ def structural(intent: QueryIntent, data: dict[str, Any], source_rule: Callable 
             return Validation(False, checks, checks[-1].reason)
     elif intent.entity:
         actual_name = str(data.get("company") or data.get("organization") or
-                          data.get("place") or data.get("entity_name") or "").lower()
+                          data.get("place") or data.get("entity_name") or
+                          (data.get("entity") if isinstance(data.get("entity"), str) else "") or "").lower()
         wanted = set(re.findall(r"[a-z0-9]+", intent.entity.lower()))
         got = set(re.findall(r"[a-z0-9]+", actual_name))
         if wanted and wanted <= got:

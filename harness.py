@@ -414,20 +414,10 @@ def discover(question, sites=None, assumptions=None):
             hits.append(h)
     _say("candidates", items=[{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")}
                               for h in hits[:6]])
-    # Embedding neighbours are candidates, not answers. Judge the declared subject of each
-    # against the question here, so a table that measures something else never costs a fetch.
-    eligible, dropped = _eligible(question, hits)
-    if dropped:
-        _say("status", icon="🧹",
-             msg=f"{dropped} of {len(hits)} candidate tables measure something else — dropped before fetching")
-    # Only an emptied-by-judgement pool refuses here. A pool that was empty to begin with is
-    # a different condition ("agent finder returned no sources") and is the caller's to report.
-    if hits and not eligible:
-        raise SystemExit(
-            "no available source measures this. The catalog was searched and every candidate "
-            "table measures something else, so there is nothing to fetch "
-            "(this data may not be published in the sources this system indexes).")
-    return ctx, eligible
+    # The finder has already had the LLM score each table's declared subject and scope. Its
+    # score floor is the eligibility decision; asking a second LLM here made valid queries
+    # intermittently disappear (notably the four interpretations of "How big is Microsoft?").
+    return ctx, hits
 
 
 # The philanthropic grant graph (IRS 990: who funds whom) and the FEDERAL grant sources
@@ -624,44 +614,6 @@ def _cards(identifiers):
         except Exception:
             _META = {}
     return {i: _META.get(i) for i in identifiers}
-
-
-def _eligible(question, hits):
-    """Drop candidates whose declared subject cannot answer the question.
-
-    Fails OPEN: if the judgement cannot be made, every candidate stays eligible and the
-    old fetch-and-check behaviour applies. A broken judge must not make the engine refuse
-    questions it can actually answer.
-    """
-    if not hits:
-        return hits, None
-    cards = _cards([h["identifier"] for h in hits])
-    listing = []
-    for i, h in enumerate(hits):
-        c = cards.get(h["identifier"]) or {}
-        listing.append(
-            f"{i}. title: {c.get('title') or h.get('title') or ''}\n"
-            f"   measures: {str(c.get('description') or '')[:300]}\n"
-            f"   covers: {str(c.get('scope') or '')[:200]}"
-        )
-    try:
-        out = json.loads(TK.llm(
-            "You are filtering data tables for a question. For each numbered table you are given "
-            "what it MEASURES and what it COVERS. Return the indices of tables that could plausibly "
-            "answer the question - the measured quantity must be the one asked about. A table about "
-            "a different quantity is NOT eligible even if it covers the right place, entity or "
-            "period. Do not guess: judge only from the stated subject. "
-            'Return JSON {"eligible":[<indices>]}.\n\nQUESTION: ' + question + "\n\nTABLES:\n"
-            + "\n".join(listing),
-            question, json_mode=True, stage="eligibility"))
-        keep = out.get("eligible")
-        if not isinstance(keep, list):
-            return hits, None
-        keep = {i for i in keep if isinstance(i, int) and 0 <= i < len(hits)}
-    except Exception:
-        return hits, None                                  # fail open; judge unavailable
-    dropped = len(hits) - len(keep)
-    return [h for i, h in enumerate(hits) if i in keep], dropped
 
 
 # What an entity IS, from Wikidata. Identifier families are strong evidence when present,
@@ -1557,6 +1509,8 @@ def _run_ambiguous(question, ctx):
                     "unit": d.get("unit"), "period": d.get("period"), "source": r.get("source"),
                     "concept": d.get("concept"), "source_identifier": r.get("source_identifier"),
                     "attempts": r.get("attempts") or []}
+        except driver.SourceRateLimitError as e:
+            return {"interpretation": interp, "value": None, "temporary_error": str(e)}
         except (SystemExit, Backtrack) as e:
             return {"interpretation": interp, "value": None, "error": str(e)}
         except Exception as e:
@@ -1583,6 +1537,9 @@ def _run_ambiguous(question, ctx):
             answers.append({"interpretation": i, "value": None, "error": "timed out (measure likely unavailable)"})
     ex.shutdown(wait=False)                                   # abandon stragglers; don't block the response
     answers.sort(key=lambda a: interps.index(a["interpretation"]))
+    temporary = next((a["temporary_error"] for a in answers if a.get("temporary_error")), None)
+    if temporary:
+        raise driver.SourceRateLimitError(temporary)
     got = [a for a in answers if isinstance(a.get("value"), (int, float))]
     if not got:
         raise SystemExit(f"'{ctx.get('attribute')}' is ambiguous and none of its interpretations "
@@ -2850,6 +2807,8 @@ def run_nlweb(req):
                                     assumptions=req.get("assumptions") or None,
                                     on_ambiguity=req.get("on_ambiguity") or "answer")))
         except SystemExit as e:                        # an honest refusal, not a crash
+            events.put(("error", str(e)))
+        except driver.SourceRateLimitError as e:       # temporary publisher condition, shown verbatim
             events.put(("error", str(e)))
         except Exception as e:
             # A refusal above is expected and needs no stack. Reaching HERE is a bug, and the
