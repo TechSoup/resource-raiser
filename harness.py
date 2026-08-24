@@ -11,7 +11,7 @@ Run as a CLI or as a server the connectors skill calls:
   python3 harness.py "How much did Apple spend on R&D in 2023?"     # one-shot (prints JSON)
   python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
 """
-import os, sys, json, time, math, re, signal, urllib.parse, queue
+import os, sys, json, time, math, re, signal, traceback, urllib.parse, queue
 import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime, docpage
 from domain import Attempt, Clarification, ClarificationOption, Evidence, QueryIntent
 from core import Toolkit
@@ -2817,6 +2817,13 @@ def run_nlweb(req):
         except SystemExit as e:                        # an honest refusal, not a crash
             events.put(("error", str(e)))
         except Exception as e:
+            # A refusal above is expected and needs no stack. Reaching HERE is a bug, and the
+            # client only ever sees "AttributeError: 'str' object has no attribute 'items'",
+            # which names neither the file nor the line. Two such crashes have now been
+            # reported from the deployment and could not be located from the outside because
+            # the traceback was discarded here. Log it; keep sending the client the summary.
+            print(f"[query failed] {req.get('query', '')[:200]!r}", file=sys.stderr)
+            traceback.print_exc()
             events.put(("error", f"{type(e).__name__}: {e}"))
         finally:
             _EMIT.cb = None
