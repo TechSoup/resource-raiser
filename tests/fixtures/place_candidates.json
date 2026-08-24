@@ -1,0 +1,169 @@
+{
+ "Q1261": {
+  "mention": "Colorado",
+  "label": "Colorado",
+  "keys": {
+   "fips_state": "08",
+   "gnis": "1779779"
+  },
+  "classes": [
+   "U.S. state"
+  ]
+ },
+ "Q736674": {
+  "mention": "Colorado",
+  "label": "University of Colorado Boulder",
+  "keys": {},
+  "classes": [
+   "public university",
+   "research university",
+   "public educational institution of the United States"
+  ]
+ },
+ "Q37500087": {
+  "mention": "Colorado",
+  "label": "Colorado",
+  "keys": {},
+  "classes": [
+   "family name"
+  ]
+ },
+ "Q1111640": {
+  "mention": "Colorado",
+  "label": "Colorado State University",
+  "keys": {},
+  "classes": [
+   "public research university",
+   "land-grant university",
+   "public educational institution of the United States"
+  ]
+ },
+ "Q11773614": {
+  "mention": "Colorado",
+  "label": "Colorado",
+  "keys": {},
+  "classes": [
+   "album"
+  ]
+ },
+ "Q206297": {
+  "mention": "Colorado",
+  "label": "Colorado Avalanche",
+  "keys": {},
+  "classes": [
+   "ice hockey team"
+  ]
+ },
+ "Q1439": {
+  "mention": "Texas",
+  "label": "Texas",
+  "keys": {
+   "lei": "549300X9CH74QB747L76",
+   "fips_state": "48",
+   "gnis": "1779801"
+  },
+  "classes": [
+   "U.S. state"
+  ]
+ },
+ "Q916484": {
+  "mention": "Texas",
+  "label": "Texas",
+  "keys": {},
+  "classes": [
+   "musical group"
+  ]
+ },
+ "Q49213": {
+  "mention": "Texas",
+  "label": "University of Texas at Austin",
+  "keys": {
+   "gnis": "1349113"
+  },
+  "classes": [
+   "public research university",
+   "public educational institution of the United States"
+  ]
+ },
+ "Q37445068": {
+  "mention": "Texas",
+  "label": "Texas",
+  "keys": {},
+  "classes": [
+   "family name"
+  ]
+ },
+ "Q66446785": {
+  "mention": "Texas",
+  "label": "Texas",
+  "keys": {},
+  "classes": [
+   "male given name",
+   "female given name"
+  ]
+ },
+ "Q60381099": {
+  "mention": "Texas",
+  "label": "Texas",
+  "keys": {},
+  "classes": [
+   "version, edition or translation"
+  ]
+ },
+ "Q173": {
+  "mention": "Alabama",
+  "label": "Alabama",
+  "keys": {
+   "lei": "549300TKZX0YNENZC895",
+   "fips_state": "01",
+   "gnis": "1779775"
+  },
+  "classes": [
+   "U.S. state"
+  ]
+ },
+ "Q2140332": {
+  "mention": "Alabama",
+  "label": "Alabama",
+  "keys": {},
+  "classes": [
+   "musical group",
+   "country music group"
+  ]
+ },
+ "Q492318": {
+  "mention": "Alabama",
+  "label": "University of Alabama",
+  "keys": {},
+  "classes": [
+   "public university",
+   "public educational institution of the United States"
+  ]
+ },
+ "Q4705177": {
+  "mention": "Alabama",
+  "label": "Alabama",
+  "keys": {},
+  "classes": [
+   "monotypic taxon"
+  ]
+ },
+ "Q971195": {
+  "mention": "Alabama",
+  "label": "Alabama Crimson Tide",
+  "keys": {},
+  "classes": [
+   "university and college sports club"
+  ]
+ },
+ "Q540672": {
+  "mention": "Alabama",
+  "label": "Auburn University",
+  "keys": {},
+  "classes": [
+   "university",
+   "land-grant university",
+   "public educational institution of the United States"
+  ]
+ }
+}

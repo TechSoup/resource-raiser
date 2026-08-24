@@ -597,30 +597,46 @@ _ENTITY_CACHE = {}
 # actually discriminates, and it is matched on the CLASS LABEL rather than a curated QID set,
 # because the set of classes meaning "a place" is large, open, and changes without notice.
 _TYPE_KEYS = {
-    "place": ("fips_place", "fips_county", "fips_state", "gnis"),
+    # No gnis here: the Geographic Names system also names universities, hospitals and
+    # stadiums, so a GNIS code does not distinguish a place from a building in one.
+    "place": ("fips_place", "fips_county", "fips_state"),
     "company": ("cik", "ticker", "lei"),
     "nonprofit": ("ein",),
 }
 
+# Word sets for reading a Wikidata class label. Matched with word boundaries and checked in
+# order, because a substring test on the joined labels is wrong in both directions: "country
+# music group" contains "country", and "state" appears in far more than states. NOT_A_TYPE is
+# checked first so a creative work, a person's name, a taxon or a sports club is excluded
+# before any word inside it can be mistaken for a place.
+_NOT_A_TYPE = ("album", "song", "single", "film", "movie", "video game", "game", "episode",
+               "series", "version", "edition", "translation", "taxon", "species", "genus",
+               "given name", "family name", "surname", "band", "group", "duo", "team", "club",
+               "franchise", "brand name", "unisex name")
+
 _CLASS_WORDS = {
-    "place": ("city", "town", "village", "municipality", "county", "state", "borough",
-              "settlement", "census", "township", "district", "region", "territory",
-              "capital", "metropolis", "commune", "prefecture", "province", "country"),
-    "company": ("business", "company", "corporation", "enterprise", "manufacturer", "brand"),
     "nonprofit": ("nonprofit", "non-profit", "charity", "foundation", "university", "college",
                   "school", "museum", "hospital", "institute", "association", "society",
-                  "organization", "organisation", "church"),
+                  "organization", "organisation", "church", "educational"),
+    "company": ("business", "company", "corporation", "enterprise", "manufacturer"),
+    "place": ("city", "town", "village", "municipality", "county", "state", "borough",
+              "settlement", "census-designated", "township", "district", "region",
+              "territory", "capital", "metropolis", "commune", "prefecture", "province",
+              "country", "nation", "seat"),
 }
 
 
 def _kind_from_classes(labels):
     """Which of our types the Wikidata classes describe, or None when they describe none."""
-    text = " ".join(str(l).lower() for l in labels)
-    if not text.strip():
+    text = " ".join(str(l).lower() for l in labels).strip()
+    if not text:
         return None
-    # Place first: "capital city" is a place even though "city" appears in company names.
-    for kind in ("place", "nonprofit", "company"):
-        if any(w in text for w in _CLASS_WORDS[kind]):
+    def says(words):
+        return any(re.search(r"\b" + re.escape(w) + r"\b", text) for w in words)
+    if says(_NOT_A_TYPE):
+        return "other"
+    for kind in ("nonprofit", "company", "place"):
+        if says(_CLASS_WORDS[kind]):
             return kind
     return "other"
 

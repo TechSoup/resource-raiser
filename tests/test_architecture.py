@@ -856,6 +856,30 @@ class EntityTypeGateTests(unittest.TestCase):
             d = self.DETROIT[qid]
             self.assertFalse(harness._type_compatible(d["keys"], "place", d["classes"]))
 
+    with open(os.path.join(ROOT, "tests", "fixtures", "place_candidates.json")) as f:
+        PLACES = json.load(f)
+
+    def test_a_music_group_is_not_a_place(self):
+        """"country music group" contains "country"; a substring test called Alabama a place."""
+        band = next(c for c in self.PLACES.values()
+                    if "country music group" in " ".join(c["classes"]))
+        self.assertFalse(harness._type_compatible(band["keys"], "place", band["classes"]))
+
+    def test_a_university_with_a_gnis_code_is_not_a_place(self):
+        """GNIS names universities and stadiums too, so it is not evidence of a place."""
+        uni = next(c for c in self.PLACES.values()
+                   if c["label"] == "University of Texas at Austin")
+        self.assertIn("gnis", uni["keys"])
+        self.assertFalse(harness._type_compatible(uni["keys"], "place", uni["classes"]))
+
+    def test_only_real_places_survive_across_every_mention(self):
+        """Colorado, Texas, Alabama, Detroit: 4 of 25 real candidates are places."""
+        both = dict(self.PLACES)
+        both.update(self.DETROIT)
+        kept = sorted(c["label"] for c in both.values()
+                      if harness._type_compatible(c["keys"], "place", c["classes"]))
+        self.assertEqual(kept, ["Alabama", "Colorado", "Detroit", "Texas"])
+
     def test_no_evidence_at_all_still_passes(self):
         """Absence of both identifiers and classes is not disqualifying."""
         self.assertTrue(harness._type_compatible({}, "place", []))
