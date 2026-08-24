@@ -57,12 +57,13 @@ export DATA_GOV_API_KEY=""
 export CENSUS_API_KEY=""
 
 # --- ranking (the ARD Agent Finder's second-stage re-rank) -------------------------------------
-# Ranking is the token-heavy stage: a page of candidate tables, several times per question. It
-# wants a cheap, fast model — unlike classification and synthesis, which are single calls where
-# quality shows. Measured on the 193-case routing corpus (tests/route_eval.py), the small OpenAI
-# open-weights model ranks slightly BETTER than gpt-4o-mini here (91.7% vs 90.7% top-1) at a
-# fraction of the price, and it is served by many providers so a fan-out does not stall on one.
+# Ranking is the token-heavy discovery stage. The finder batches complementary query phrasings
+# into one embedding request and one rerank, and the response contains only table indices/scores —
+# no prose — so reasoning and output are deliberately bounded. On the 193-case routing corpus the
+# defaults cut measured discovery cost from about $0.00051 to $0.00013 per question.
 # export RERANK_MODEL="openai/gpt-oss-20b"     # default: falls back to CHAT_MODEL
+# export ARD_RERANK_REASONING_EFFORT="low"     # default: low; finder needs only compact indices
+# export ARD_RERANK_MAX_TOKENS=400              # hard cap for the finder JSON, not answer prose
 #
 # OpenRouter provider routing. "throughput" (the default) picks the fastest provider, which for a
 # multi-provider model can cost ~2.4x more per token than the cheapest one; "price" picks the

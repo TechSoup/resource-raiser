@@ -31,13 +31,15 @@ def evaluate(case):
     q = case["q"]
     tally = ard_client.start_usage()          # what discovery cost for THIS case
     try:
-        _ctx, hits = harness.discover(q)
+        ctx, hits = harness.discover(q)
     except Exception as e:
         return {"q": q, "error": str(e)[:120], "top": None, "hit1": False, "hit3": False,
                 "discovery": tally.snapshot()}
     pubs = [h.get("publisher") for h in hits]
     want = set(case["dirs"])
-    return {"q": q, "want": sorted(want), "top": pubs[0] if pubs else None,
+    return {"q": q, "want": sorted(want),
+            "intent": {key: ctx.get(key) for key in ("type", "attribute", "shape", "sources")},
+            "top": pubs[0] if pubs else None,
             "top3": pubs[:3], "hit1": bool(pubs and pubs[0] in want),
             "hit3": any(p in want for p in pubs[:3]), "error": None,
             "discovery": tally.snapshot()}

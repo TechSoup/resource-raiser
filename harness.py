@@ -12,8 +12,8 @@ Run as a CLI or as a server the connectors skill calls:
   python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
 """
 import os, sys, json, time, math, re, signal, urllib.parse, queue
-import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime
-from domain import Attempt, QueryIntent
+import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime, docpage
+from domain import Attempt, Clarification, ClarificationOption, Evidence, QueryIntent
 from core import Toolkit
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -363,8 +363,13 @@ def discover(question, sites=None, assumptions=None):
         "SOURCES:\n" + src_list, question, json_mode=True, stage="classify"))
     ctx = _normalize_shape(ctx)
     if assumptions:
-        allowed = {"entity", "type", "attribute", "period", "shape"}
-        ctx.update({k: v for k, v in assumptions.items() if k in allowed and v not in (None, "")})
+        allowed = {"entity", "type", "attribute", "period", "shape", "concept"}
+        applied = {k: v for k, v in assumptions.items() if k in allowed and v not in (None, "")}
+        ctx.update(applied)
+        # A measure supplied on a follow-up is the user's answer to our clarification. Retaining
+        # the classifier's original interpretations would immediately ask the same question again.
+        if "attribute" in applied:
+            ctx["interpretations"] = []
         ctx = _normalize_shape(ctx)
     # Robustness: the classifier sometimes drops the place from a "<measure> in <Place>" question
     # (leaving an empty entity). Recover it from the question so a place lookup doesn't fail with no geo.
@@ -399,7 +404,11 @@ def discover(question, sites=None, assumptions=None):
     secondary = question if resolvable else (ctx.get("attribute") or question)
     _say("status", icon="📚", msg="Asking the ARD Agent Finder which data tables can answer this…")
     seen, hits = set(), []
-    for h in ard_client.search(primary, k=8, sources=sources) + ard_client.search(secondary, k=4, sources=sources):
+    # Attribute-only and full-question retrieval are complementary views, not two separately billed
+    # ranking tasks. The finder embeds both in one provider call, unions by max similarity, and runs
+    # one rerank over the shared candidate pool.
+    for h in ard_client.search_many([primary, secondary], k=12, sources=sources,
+                                    rerank_query=primary):
         if h["identifier"] not in seen:
             seen.add(h["identifier"])
             hits.append(h)
@@ -682,14 +691,16 @@ _F = namedtuple("_F", "fm ident key period attribute mention state ctx")
 def _s_concept(f):
     """SEC EDGAR — an XBRL us-gaap concept per company. Resolves ticker->CIK once per mention."""
     if f.key:
-        return driver.fetch_metric(f.attribute, cik=f.key, period=f.period, log=False)
+        return driver.fetch_metric(f.attribute, cik=f.key, period=f.period, log=False,
+                                   concept=f.ctx.get("concept"))
     if f.mention not in _TICKER_CACHE:                   # same mention on every backtrack — resolve once
         _TICKER_CACHE[f.mention] = json.loads(TK.llm(
             'JSON {"ticker":"<US stock ticker or empty>"}.', f.mention, json_mode=True, stage="resolve-entity")).get("ticker")
     ticker = _TICKER_CACHE[f.mention]
     if not ticker:
         raise Backtrack("no ticker")
-    return driver.fetch_metric(f.attribute, ticker, f.period, log=False)
+    return driver.fetch_metric(f.attribute, ticker, f.period, log=False,
+                               concept=f.ctx.get("concept"))
 
 
 # Nonprofit sources resolve names authoritatively via ProPublica (EIN spine), so fall back to the NAME
@@ -1374,7 +1385,10 @@ def _run_ambiguous(question, ctx):
             r = retrieve_for(sub)
             d = r.get("data") or {}
             return {"interpretation": interp, "value": r.get("value"),
-                    "unit": d.get("unit"), "period": d.get("period"), "source": r.get("source")}
+                    "label": d.get("metric") or d.get("measure") or interp,
+                    "unit": d.get("unit"), "period": d.get("period"), "source": r.get("source"),
+                    "concept": d.get("concept"), "source_identifier": r.get("source_identifier"),
+                    "attempts": r.get("attempts") or []}
         except (SystemExit, Backtrack) as e:
             return {"interpretation": interp, "value": None, "error": str(e)}
         except Exception as e:
@@ -1408,6 +1422,110 @@ def _run_ambiguous(question, ctx):
     return {"question": question, "ambiguous": True, "attribute": ctx.get("attribute"),
             "entity": ent, "interpretations": answers,
             "source": " · ".join(dict.fromkeys(a.get("source") or "?" for a in got))}
+
+
+def _clarification(attribute, entity, raw_options):
+    """Turn fetched alternatives into a resolvable, human-readable clarification.
+
+    An embedding score collision is not enough: every option here has a returned value. Options
+    that are effectively aliases for the same value and unit are collapsed before we interrupt a
+    caller, because there is no useful decision for a human to make in that case.
+    """
+    options, seen = [], set()
+    for i, raw in enumerate(raw_options or []):
+        value = raw.get("value")
+        if value is None:
+            continue
+        concept = raw.get("concept")
+        assumption = raw.get("interpretation") or raw.get("metric") or raw.get("label") or attribute
+        label = raw.get("label") or raw.get("metric") or assumption
+        signature = (str(value), str(raw.get("unit") or "").lower(), str(raw.get("period") or ""))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        option_id = concept or "measure:" + re.sub(r"[^a-z0-9]+", "-", str(assumption).lower()).strip("-")
+        assumptions = {"measure": assumption}
+        if concept:
+            assumptions["concept"] = concept
+        options.append(ClarificationOption(
+            id=option_id or f"option-{i + 1}", label=str(label), value=value,
+            unit=raw.get("unit"), period=raw.get("period"), source=raw.get("source"),
+            concept=concept, assumptions=assumptions))
+    if len(options) < 2:
+        return None
+
+    def materially_different(a, b):
+        if str(a.unit or "").lower() != str(b.unit or "").lower():
+            return True
+        try:
+            scale = max(abs(float(a.value)), abs(float(b.value)), 1.0)
+            return abs(float(a.value) - float(b.value)) / scale >= 0.05
+        except (TypeError, ValueError):
+            return a.value != b.value
+
+    if not any(materially_different(options[0], option) for option in options[1:]):
+        return None
+    subject = f" for {entity}" if entity else ""
+    return Clarification(
+        question=f"“{attribute}” has multiple materially different published meanings{subject}. Which one do you mean?",
+        options=options[:4], attribute=attribute or "")
+
+
+def _ambiguity_evidence(intent, hit, clarification, payload):
+    sources = list(dict.fromkeys(o.source for o in clarification.options if o.source))
+    return Evidence(kind="alternatives", source=" · ".join(sources) or hit.get("title") or "",
+                    identifier=hit.get("identifier") or "", payload=payload,
+                    entity={"label": intent.entity} if intent.entity else None,
+                    measure=intent.measure,
+                    provenance={"source_document": hit.get("identifier")},
+                    warnings=["the requested measure has multiple materially different interpretations"])
+
+
+def _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
+                      ledger, discovery, attempts=None):
+    """Return Answer or Clarification from the same fetched alternatives."""
+    hit = hits[0] if hits else {"identifier": "", "title": "", "publisher": ""}
+    public_options = clarification.to_dict()["options"]
+    payload = {"ambiguous": True, "attribute": clarification.attribute,
+               "entity": ctx.get("entity") or "", "interpretations": public_options}
+    evidence = _ambiguity_evidence(intent, hit, clarification, payload)
+    source = {"identifier": hit.get("identifier"), "title": hit.get("title"),
+              "publisher": hit.get("publisher")}
+    base = {
+        "question": question, "shape": intent.operation, "usage": ledger.snapshot(),
+        "discovery_usage": discovery.snapshot(), "intent": intent.to_dict(),
+        "attempts": attempts or [], "evidence": evidence.to_dict(),
+        "source": source,
+        "candidates": [{"identifier": h.get("identifier"), "title": h.get("title"),
+                        "score": h.get("score"), "publisher": h.get("publisher")} for h in hits],
+        "data": payload,
+    }
+    if on_ambiguity == "ask":
+        return {**base, "status": "needs_clarification", "answer": None,
+                "answer_renderer": None, "clarification": clarification.to_dict(),
+                "plan": f"material ambiguity → ask the caller to choose among {len(public_options)} fetched values"}
+    if on_ambiguity == "all":
+        return {**base, "status": "answered", "answer_renderer": "alternatives",
+                "answer": (f"“{clarification.attribute}” has {len(public_options)} materially different "
+                           "interpretations; each fetched answer is shown below."),
+                "plan": f"material ambiguity → {len(public_options)} interpretations answered separately"}
+
+    # Non-interactive clients receive a usable answer plus every alternative in structured data.
+    selected = clarification.options[0]
+    point = Evidence(kind="point", source=selected.source or evidence.source,
+                     identifier=hit.get("identifier") or "", payload={"value": selected.value},
+                     entity={"label": intent.entity} if intent.entity else None,
+                     measure=selected.assumptions.get("measure") or selected.label,
+                     value=selected.value, unit=selected.unit,
+                     currency="USD" if str(selected.unit or "").upper() == "USD" else None,
+                     period=selected.period, warnings=evidence.warnings)
+    rendered = renderers.render(point)
+    answer = rendered.text if rendered else f"{selected.label}: {selected.value} {selected.unit or ''}".strip()
+    payload["selected"] = selected.id
+    return {**base, "status": "answered", "answer": answer,
+            "answer_renderer": rendered.renderer if rendered else "dominant-interpretation",
+            "evidence": point.to_dict(),
+            "plan": f"material ambiguity → answer the preferred interpretation and expose {len(public_options) - 1} alternatives"}
 
 
 def _run_derive(question, ctx, p):
@@ -1678,7 +1796,7 @@ def _search(question, ctx=None, hits=None):
 def retrieve_for(question):
     """Discover + retrieve for one sub-question, ANY domain (no synthesis). Universal join
     primitive; returns a NORMALIZED numeric `value`. Backtracks across every choice point."""
-    _ctx, _hits, hit, _tried, data, _state = _search(question)
+    _ctx, _hits, hit, _tried, data, state = _search(question)
     # list-returning sources (NSF/NIH/USAspending awards) carry their number as the engine-computed
     # total, not a scalar `value` — without this a comparison over those sources finds nothing to compare
     val = data.get("value", data.get("value_usd", data.get("total_usd")))
@@ -1686,7 +1804,9 @@ def retrieve_for(question):
         val = float(val)
     except (TypeError, ValueError):
         pass
-    return {"source": hit["title"], "value": val, "data": data}
+    return {"source": hit["title"], "source_identifier": hit.get("identifier"),
+            "value": val, "data": data,
+            "attempts": [a.to_dict() for a in (state.get("_attempts") or [])]}
 
 
 _CONCEPT_LEAF = None
@@ -1756,13 +1876,15 @@ def _present(question, evidence):
     return TK.synthesize(question, evidence.payload), "llm-fallback"
 
 
-def run(question, sites=None, assumptions=None):
+def run(question, sites=None, assumptions=None, on_ambiguity="answer"):
     # Account for the LLM calls this question makes IN THIS PROCESS. The ARD Agent Finder runs as
     # a separate service and bills its own discovery work — reported alongside as `discovery_usage`,
     # deliberately a SIBLING of `usage` rather than nested in it, so nothing reads as part of the
     # question's own total.
     _ledger = llm.start_ledger()
     _disc = ard_client.start_usage()
+    if on_ambiguity not in ("answer", "ask", "all"):
+        on_ambiguity = "answer"
     # PLAN BEFORE FETCH. The shape of the question and the DECLARED capability of the candidate
     # sources decide whether this is one call, several, or impossible — and an impossible question
     # is refused here, without issuing a single request.
@@ -1775,6 +1897,15 @@ def run(question, sites=None, assumptions=None):
     # (earnings -> net income, EBITDA, EPS…) instead of a silently-chosen one.
     if len(ctx.get("interpretations") or []) >= 2 and shape in ("point", "status", "entity-list"):
         data = _run_ambiguous(question, ctx)
+        clarification = _clarification(ctx.get("attribute") or "the requested measure",
+                                       ctx.get("entity") or "", data.get("interpretations") or [])
+        if clarification:
+            trace = [attempt for option in (data.get("interpretations") or [])
+                     for attempt in (option.get("attempts") or [])]
+            return _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
+                                     _ledger, _disc, trace)
+        # Distinct taxonomy labels that returned the same value are aliases, not a useful question
+        # for a human. Preserve the old combined answer rather than interrupting the caller.
         evidence, attempts = _admit(intent, hits[0], data)
         _answer, renderer = _present(question, evidence)
         return {"question": question, "answer": _answer, "shape": shape, "usage": _ledger.snapshot(),
@@ -1853,11 +1984,31 @@ def run(question, sites=None, assumptions=None):
     else:
         _ctx, hits, hit, _tried, data, _state = _search(question, ctx=ctx, hits=hits)
         state = _state
+
+    # SEC concept resolution already fetches a pool of reported sibling measures. If more than one
+    # remains plausible and their returned values materially differ, expose that empirical ambiguity
+    # here. `ask` and `all` become terminal outcomes; `answer` continues with the selected value but
+    # carries every alternative in the response.
+    resolution = data.pop("_ambiguity", None) if isinstance(data, dict) else None
+    if resolution:
+        clarification = _clarification(resolution.get("attribute") or intent.measure,
+                                       intent.entity or "", resolution.get("options") or [])
+        if clarification and on_ambiguity in ("ask", "all"):
+            ordered_hits = [hit] + [h for h in hits if h.get("identifier") != hit.get("identifier")]
+            trace = [a.to_dict() for a in ((state or {}).get("_attempts") or [])]
+            return _ambiguity_result(question, ctx, ordered_hits, intent, clarification, on_ambiguity,
+                                     _ledger, _disc, trace)
+        if clarification:
+            data["ambiguity"] = {"attribute": clarification.attribute,
+                                 "reason": resolution.get("reason"),
+                                 "options": clarification.to_dict()["options"]}
     hit = _cite_concept_actually_used(hit, data)
     if state and state.get("_evidence"):
         evidence, attempts = state["_evidence"], state.get("_attempts") or []
         evidence.identifier = hit["identifier"]
         evidence.provenance["source_document"] = hit["identifier"]
+        if data.get("ambiguity"):
+            evidence.warnings.append("other materially different interpretations are included in data.ambiguity")
     else:
         evidence, attempts = _admit(intent, hit, data)
     answer, renderer = _present(question, evidence)
@@ -1930,6 +2081,9 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .rank .n{color:#999;width:2em} .rank .v{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
  .scope{margin-top:14px;padding:11px 14px;background:#fff8e6;border-left:4px solid #e0a800;border-radius:6px;font-size:.9rem;color:#5a4a1a}
  .scope b{color:#3d3210} .scope ul{margin:7px 0 0;padding-left:18px} .scope li{font-size:.86rem;color:#5a4a1a}
+ .clarify{padding:16px 18px;background:#fff8e6;border-left:4px solid #e0a800;border-radius:6px}
+ .clarify p{margin:0 0 10px}.clarify-choice{display:block;width:100%;margin:7px 0;padding:10px 12px;text-align:left;background:#fff;color:#27364a;border:1px solid #d7c47a}
+ .clarify-choice:hover{background:#fffdf5}.choice-value{float:right;color:#137333;font-weight:600}
  .recs{margin-top:14px} .recs-h{font-size:.85rem;color:#888;margin:0 0 6px}
  .rec{padding:11px 14px;margin:8px 0;border:1px solid #e6e6e6;border-radius:10px;background:#fafbfc}
  .rec-t{font-weight:600;color:#1a3050;margin-bottom:5px}
@@ -1937,7 +2091,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .amt{color:#137333;font-weight:700}
 </style></head><body>
 <h1>Agentic Data Query</h1>
-<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
+<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="life-of-a-query" style="color:#1a73e8">Life of a query ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
 <form id="f"><input id="q" placeholder="e.g. Is the American Red Cross a 501(c)(3)?" autofocus><button id="b">Ask</button></form>
 <div id="out"></div>
 <h2 class="sh">Example questions</h2>
@@ -1995,7 +2149,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
    function beat(){if(wd)clearTimeout(wd);wd=setTimeout(function(){stalled=true;
      status('⚠️','The server stopped sending updates. It may still be working — check the terminal, or ask again.','back');fin();},120000);}
    beat();
-   var askUrl='ask?sse_format=named&max_results=8&query='+encodeURIComponent(question);
+   var askUrl='ask?sse_format=named&max_results=8&on_ambiguity=ask&query='+encodeURIComponent(question);
    if(ASSUMPTIONS){Object.keys(ASSUMPTIONS).forEach(function(k){
      askUrl+='&assumption_'+k+'='+encodeURIComponent(ASSUMPTIONS[k]||'');});ASSUMPTIONS=null;}
    fetch(askUrl)
@@ -2044,6 +2198,19 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
      log.scrollTop=log.scrollHeight;
    }
    function renderAnswer(d){
+     if(d['@type']==='ClarificationRequest'){
+       var opts=d.options||[], h='<div class="clarify"><p><b>'+esc(d.question||'Which interpretation do you mean?')+'</b></p>';
+       opts.forEach(function(o){
+         var val=(String(o.unit||'').toUpperCase()==='USD'?money(o.value):String(o.value)+(o.unit?' '+o.unit:''));
+         h+='<button type="button" class="clarify-choice" data-assumptions="'
+           +encodeURIComponent(JSON.stringify(o.assumptions||{}))+'">'+esc(o.label||o.id)
+           +'<span class="choice-value">'+esc(val||o.value)+'</span></button>';});
+       h+='</div>';if(d.usage)h+=renderUsage(d.usage,d.discovery_usage);
+       var box=document.createElement('div');box.style.marginTop='16px';box.innerHTML=h;log.parentNode.appendChild(box);
+       [].forEach.call(box.querySelectorAll('.clarify-choice'),function(choice){choice.onclick=function(){
+         ASSUMPTIONS=JSON.parse(decodeURIComponent(choice.getAttribute('data-assumptions')));f.requestSubmit();};});
+       return;
+     }
      if(!d.answer){status('⚠️','No answer.','back');return;}
      var h='<div class="answer">'+esc(d.answer)+'</div>';
      if(d.data&&d.data.ambiguous&&Array.isArray(d.data.interpretations))h+=renderInterp(d.data.interpretations);
@@ -2138,7 +2305,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
      var rs=items.map(function(a){
        var v=a.value==null?'<span style="color:#999">unavailable</span>'
              :(Math.abs(a.value)>=1000?money(a.value):String(a.value))+(a.unit?' '+esc(a.unit):'');
-       return '<tr><td>'+esc(a.interpretation)+'</td><td class="v">'+v+'</td></tr>';}).join('');
+       return '<tr><td>'+esc(a.interpretation||a.label||a.id)+'</td><td class="v">'+v+'</td></tr>';}).join('');
      return '<div class="rank"><p class="recs-h">the measure is ambiguous — one answer per interpretation</p>'
             +'<table>'+rs+'</table></div>';
    }
@@ -2197,12 +2364,12 @@ TECHSOUP_PAGE = (PAGE
     .replace('<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which '
              'dataset answers it; the data is fetched live, the answer is checked, and the search '
              'backtracks until it actually answers your question. '
-             '<a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>',
+             '<a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="life-of-a-query" style="color:#1a73e8">Life of a query ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>',
              '<p class="sub">A curated view for TechSoup and the nonprofits, libraries, and '
              'foundations it serves — validate an organization, measure the digital divide, read a '
              "nonprofit's finances, understand the communities it serves, and find funding. Ask in "
              'plain English; the answer is fetched live and cited. '
-             '<a href="how-it-works" style="color:#1a73e8">How it works ›</a> · '
+             '<a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="life-of-a-query" style="color:#1a73e8">Life of a query ›</a> · '
              '<a href="./" style="color:#1a73e8">‹ full data explorer</a></p>')
     .replace("fetch('sources')", "fetch('techsoup-sources')")
     .replace('placeholder="e.g. Is the American Red Cross a 501(c)(3)?"',
@@ -2493,7 +2660,8 @@ def run_nlweb(req):
         _EMIT.cb = lambda ev: events.put(("event", ev))
         try:
             events.put(("done", run(req["query"], sites=req.get("sites") or None,
-                                    assumptions=req.get("assumptions") or None)))
+                                    assumptions=req.get("assumptions") or None,
+                                    on_ambiguity=req.get("on_ambiguity") or "answer")))
         except SystemExit as e:                        # an honest refusal, not a crash
             events.put(("error", str(e)))
         except Exception as e:
@@ -2548,10 +2716,11 @@ def run_nlweb(req):
         # `answer` and `items` are the GeneratedAnswer contract; the rest are additive fields a
         # strict NLWeb client ignores and this engine's own UI uses to render rankings, record
         # lists and the cost report. One protocol, no second endpoint.
-        yield st.message(nlweb.NLWS, {
-            "@type": "GeneratedAnswer",
-            "answer": result.get("answer") or "",
+        clarification = result.get("clarification") if result.get("status") == "needs_clarification" else None
+        content = {
+            "@type": "ClarificationRequest" if clarification else "GeneratedAnswer",
             "items": items,
+            "status": result.get("status") or "answered",
             "shape": result.get("shape"),
             "plan": result.get("plan"),
             "data": result.get("data"),
@@ -2561,7 +2730,14 @@ def run_nlweb(req):
             "attempts": result.get("attempts") or [],
             "evidence": result.get("evidence"),
             "answer_renderer": result.get("answer_renderer"),
-        })
+        }
+        if clarification:
+            content.update({"question": clarification.get("question"),
+                            "original_query": result.get("question"),
+                            "options": clarification.get("options") or []})
+        else:
+            content["answer"] = result.get("answer") or ""
+        yield st.message(nlweb.NLWS, content)
     if req.get("debug"):
         yield st.message(nlweb.INTERMEDIATE,
                          json.dumps({"shape": result.get("shape"), "plan": result.get("plan"),
@@ -2652,6 +2828,9 @@ offered a way to ask.</p>
 documents; discovery speaks <a href="https://agenticresourcediscovery.org/">ARD</a>; the query
 interface is <a href="https://github.com/nlweb-ai/NLWeb">NLWeb</a>.
 <a href="ard">Browse the descriptors ›</a></p>
+<p class="note">This page is the overview. <a href="life-of-a-query">The life of a query ›</a>
+follows one question all the way through — every branch, every backtrack, and where the boundary
+of what can be asked actually falls.</p>
 </body></html>"""
 
 
@@ -2733,6 +2912,16 @@ def serve(port, ready=None):
                 return self._json(200, {"status": "ok"})
             if p in ("/how-it-works", "/how"):
                 return self._html(HOW_PAGE)
+            if p in ("/life-of-a-query", "/loq"):
+                # Rendered from the repository Markdown on each request, so the page cannot drift
+                # from the document in the tree. Absent in a deployment that did not ship it.
+                doc = docpage.markdown_page(
+                    "LIFE_OF_A_QUERY.md", "The life of a query",
+                    "How one question becomes an answer, a clarification, or a refusal \u2014 and "
+                    "where the boundary of what can be asked actually falls.")
+                if doc is None:
+                    return self._json(404, {"error": "LIFE_OF_A_QUERY.md is not deployed"})
+                return self._html(doc)
             if p in ("/ard", "/ard/"):
                 return self._html(ARD_PAGE)
             if p == "/ard/publishers":
@@ -2770,6 +2959,10 @@ def serve(port, ready=None):
             request_started = time.monotonic()
             if not req["query"]:
                 return self._json(400, {"error": "missing 'query'"})
+            # An unreadable binding must not be ignored. Answering anyway would resolve a
+            # clarification to the wrong interpretation and state it with full confidence.
+            if req.get("assumptions_error"):
+                return self._json(400, {"error": req["assumptions_error"]})
             ip = _client_ip(self)
             allowed, used, reset_in = _quota_check(ip)
             if not allowed:
@@ -2795,7 +2988,9 @@ def serve(port, ready=None):
                     content = next((m.get("content") for m in reversed(msgs)
                                     if m.get("message_type") == nlweb.NLWS), {})
                     _record_telemetry(ip, req, content,
-                                      (time.monotonic() - request_started) * 1000)
+                                      (time.monotonic() - request_started) * 1000,
+                                      ("needs_clarification" if content.get("status") == "needs_clarification"
+                                       else "complete"))
                     return self._json(200, {"messages": msgs})
                 finally:
                     _QUERY_SLOTS.release()
@@ -2821,7 +3016,9 @@ def serve(port, ready=None):
                 _accumulate(usage, discovery)
                 _record_telemetry(ip, req, answer_content,
                                   (time.monotonic() - request_started) * 1000,
-                                  "complete" if answer_content else "disconnected-or-error")
+                                  (("needs_clarification" if answer_content.get("status") ==
+                                    "needs_clarification" else "complete") if answer_content else
+                                   "disconnected-or-error"))
                 _QUERY_SLOTS.release()
 
         def do_POST(self):

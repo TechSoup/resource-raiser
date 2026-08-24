@@ -32,6 +32,7 @@ class CredentialError(Exception):
 _SEC_CONCEPT_CACHE = {}
 _SEC_SEARCH_CACHE = {}      # the concept-candidate search per metric_query — identical across backtracks
 _METRIC_CACHE = {}          # whole fetch_metric result (or failure) per (metric, cik, period)
+_SEC_CONCEPT_META = None
 
 
 def _sec_concept(cik, concept):
@@ -63,11 +64,13 @@ def _sec_concept(cik, concept):
     return data
 
 
-def ask_llm(system, user, json_mode=False, model=None, stage="other"):
+def ask_llm(system, user, json_mode=False, model=None, stage="other", max_tokens=None,
+            reasoning_effort=None):
     """One chat turn via the configured provider. Built lazily inside llm.client(), so the
     deterministic tools (fetch/resolve/accessor) import driver without needing any LLM keys.
     `model` selects a non-default model for this call (e.g. the ranking model)."""
-    return llm.chat(system, user, json_mode, model=model, stage=stage)
+    return llm.chat(system, user, json_mode, model=model, stage=stage, max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort)
 
 
 def frontmatter(rel):
@@ -143,7 +146,25 @@ def pick_value(units, period, ptype, strict=False):
     return max(rows, key=lambda u: u["end"])                  # latest annual
 
 
-def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik=None):
+def _concept_meta(concept):
+    """Resolve a chosen us-gaap concept to its indexed descriptor without trusting a file path
+    supplied by a caller."""
+    global _SEC_CONCEPT_META
+    if _SEC_CONCEPT_META is None:
+        _SEC_CONCEPT_META = {}
+        try:
+            from registry import index
+            with open(index.CACHE_META) as f:
+                for item in json.load(f):
+                    if item.get("concept") and item.get("identifier", "").startswith("sources/sec-edgar/"):
+                        _SEC_CONCEPT_META.setdefault(item["concept"], item)
+        except Exception:
+            pass
+    return _SEC_CONCEPT_META.get(str(concept or "").removeprefix("us-gaap:"))
+
+
+def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik=None,
+                 concept=None):
     """Discover the right SEC concept for `metric_query`, then return the value the
     company actually reports. Tries the top-k discovered concepts and picks the
     first one with data (fixes obscure-variant mis-ranking + non-reported concepts)."""
@@ -154,7 +175,9 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
         if not cik:
             raise SystemExit(f"no CIK for ticker {ticker}")
 
-    mk = (metric_query, str(int(cik)), period or "latest")   # memoize: the harness re-enters this with
+    forced_concept = str(concept or "").removeprefix("us-gaap:") or None
+    mk = (metric_query, str(int(cik)), period or "latest", forced_concept)
+                                                               # memoize: the harness re-enters this with
     if mk in _METRIC_CACHE:                                   # identical args on every backtrack attempt
         v = _METRIC_CACHE[mk]
         if isinstance(v, str):
@@ -184,6 +207,21 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
         if unit != "shares" and "/" not in unit and unit != "pure":
             out["value_usd"] = row["val"]                     # back-compat for currency amounts
         return out
+
+    # A clarification choice is an explicit user constraint. Fetch that exact indexed concept;
+    # do not run semantic selection again and risk asking the same question in a loop.
+    if forced_concept:
+        chosen_hit = _concept_meta(forced_concept)
+        if not chosen_hit:
+            _METRIC_CACHE[mk] = msg = f"unknown SEC concept choice {forced_concept!r}"
+            raise SystemExit(msg)
+        chosen = try_hit(chosen_hit)
+        if not chosen:
+            _METRIC_CACHE[mk] = msg = (f"{title} does not report {forced_concept} for "
+                                        f"{period or 'latest'}")
+            raise SystemExit(msg)
+        _METRIC_CACHE[mk] = chosen
+        return chosen
 
     # Attribute is already entity-expunged + scoped to SEC. The LLM reranker is unreliable here:
     # among ~8,500 near-synonym concepts it favours a literal name match ("Revenues") and DROPS the
@@ -216,6 +254,31 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
     return out
 
 
+def _canonical_sec_index(metric_query, candidates):
+    """Return the canonical headline concept for a deliberately small set of broad SEC measures.
+
+    This is not a cross-source ontology. It is a source-specific safety rule for XBRL families where
+    a broad user term otherwise collides with specialized siblings that contain the same word. Add a
+    family only after observing a concrete collision and only when the taxonomy has a clear headline
+    concept.
+    """
+    normalized = " ".join(re.findall(r"[a-z0-9]+", str(metric_query).lower()))
+    families = {
+        "revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
+                    "SalesRevenueNet"),
+        "revenues": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
+                     "SalesRevenueNet"),
+        "total revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
+                          "SalesRevenueNet"),
+    }
+    preferred = families.get(normalized)
+    if not preferred:
+        return None
+    by_concept = {str(row.get("concept") or "").removeprefix("us-gaap:"): i
+                  for i, (_rank, row) in enumerate(candidates)}
+    return next((by_concept[concept] for concept in preferred if concept in by_concept), None)
+
+
 def _pick_by_data(metric_query, reported, log=True):
     """Choose the concept that truly answers `metric_query`, judging by the DATA each candidate
     reports (its latest year and value), not by name similarity. A concept the company has stopped
@@ -234,21 +297,64 @@ def _pick_by_data(metric_query, reported, log=True):
     listing = "\n".join(
         f'{i}. {r["concept"]}  (latest {r["period"]}, value {r["value"]:,} {r["unit"]})'
         for i, (_rank, r) in enumerate(cands))
+    resolution = {}
     try:
-        pick = json.loads(ask_llm(
+        parsed = json.loads(ask_llm(
             "Pick the ONE us-gaap concept that best answers the MEASURE, judging by the reported data. "
             "Rules: (1) A concept last filed years before the newest candidate is a DISCONTINUED alias — "
             "do not pick it when a current concept reports the same measure. (2) Match the SPECIFIC "
             "measure: for a 'total'/overall figure prefer the largest current concept in that family; "
             "for a named variant (e.g. diluted vs basic EPS) pick that exact one, not the largest. "
-            'Return JSON {"i": <index>}.\nMEASURE: ' + metric_query + "\nCANDIDATES:\n" + listing,
-            metric_query, json_mode=True, stage="resolve-concept")).get("i")
+            "Also identify material ambiguity among CURRENT concepts: alternatives are genuinely "
+            "different readings a user could reasonably mean, not merely nearby taxonomy terms. "
+            "Set dominant=true only when the wording clearly selects one reading. If it does not, "
+            "include the selected index and 1-3 other plausible indices in alternatives. "
+            "Same-value aliases are not ambiguity. "
+            'Return JSON {"i": <index>, "dominant": true|false, "alternatives": [<indices>], '
+            '"why": "<short reason>"}.\nMEASURE: ' + metric_query + "\nCANDIDATES:\n" + listing,
+            metric_query, json_mode=True, stage="resolve-concept"))
+        resolution = parsed if isinstance(parsed, dict) else {}
+        pick = resolution.get("i")
     except Exception:
         pick = None
+    canonical = _canonical_sec_index(metric_query, cands)
+    if canonical is not None and isinstance(pick, int) and 0 <= pick < len(cands) and pick != canonical:
+        # The semantic resolver selected a specialized sibling for a broad measure. Make the
+        # disagreement observable: prefer the headline concept for non-interactive clients, and
+        # retain the model's selected, fetched value as a clarification option for interactive ones.
+        resolution = {**resolution, "i": canonical, "dominant": False,
+                      "alternatives": [canonical, pick] + list(resolution.get("alternatives") or []),
+                      "why": ("a broad SEC measure matched both the headline concept and a "
+                              "specialized sibling")}
+        pick = canonical
+    elif canonical is not None and not isinstance(pick, int):
+        pick = canonical
     if not isinstance(pick, int) or not (0 <= pick < len(cands)):
         # fail safe: freshest, then best rank — never the stale literal-name match
         pick = max(range(len(cands)), key=lambda i: (cands[i][1]["period_end"], -cands[i][0]))
-    best = cands[pick][1]
+    best = dict(cands[pick][1])
+    if resolution.get("dominant") is False:
+        raw_indices = [pick] + list(resolution.get("alternatives") or [])
+        indices = list(dict.fromkeys(i for i in raw_indices
+                                     if isinstance(i, int) and 0 <= i < len(cands)))[:4]
+        selected_value = best.get("value")
+
+        def materially_different(candidate):
+            value = candidate.get("value")
+            try:
+                scale = max(abs(float(value)), abs(float(selected_value)), 1.0)
+                return abs(float(value) - float(selected_value)) / scale >= 0.05
+            except (TypeError, ValueError):
+                return value != selected_value
+
+        alternatives = [dict(cands[i][1]) for i in indices]
+        # Asking about aliases that report the same number creates noise rather than clarity.
+        if any(materially_different(candidate) for candidate in alternatives[1:]):
+            best["_ambiguity"] = {
+                "attribute": metric_query,
+                "reason": str(resolution.get("why") or "multiple reported concepts remain plausible"),
+                "options": alternatives,
+            }
     if log:
         print(f"  → picked {best['concept']} {best['period']} = {best['value']:,} {best['unit']} "
               f"(chosen from {len(cands)} reported concepts by data)")

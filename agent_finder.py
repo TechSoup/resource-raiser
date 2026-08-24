@@ -4,6 +4,8 @@
 Implements the ARD discovery contract over HTTP:
   POST /search   {"query": {"text": "..."}, "pageSize": N}
                  -> {"results": [{identifier, displayName, type, source, score}], ...}
+  POST /search   {"query": {"text": "rerank wording", "texts": ["phrase 1", "phrase 2"]}, ...}
+                 -> embeds the phrasings together, unions retrieval, and reranks once
   GET  /         service card
 
 The store is the embedded index built by registry/index.py (SEC + Treasury
@@ -453,6 +455,11 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(query, dict) or not isinstance(query.get("text"), str) or not query["text"].strip():
             return self._json(400, {"error": "query.text must be a non-empty string"})
         text = query["text"].strip()
+        texts = query.get("texts") or [text]
+        if (not isinstance(texts, list) or len(texts) > 4 or
+                not all(isinstance(item, str) and item.strip() for item in texts)):
+            return self._json(400, {"error": "query.texts must be a list of 1-4 non-empty strings"})
+        texts = [item.strip() for item in texts]
         try:
             k = int(req.get("pageSize", 10))
         except (TypeError, ValueError):
@@ -465,7 +472,8 @@ class Handler(BaseHTTPRequestHandler):
         # results are ardEntryProjections: only `identifier` is required, and `score`/`source`
         # ride alongside as the transport's own annotations.
         results = []
-        for h in index.search(text, k, sources=req.get("sources"), rerank=req.get("rerank", True)):
+        for h in index.search_many(texts, k, sources=req.get("sources"),
+                                   rerank=req.get("rerank", True), rerank_query=text):
             e = _entry_from_meta({"identifier": h["identifier"], "title": h["title"],
                                   "description": h.get("description", ""),
                                   "queries": h.get("queries") or []})

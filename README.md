@@ -118,10 +118,10 @@ backtracking around the whole thing.
    queries. Adding a source is adding a folder; there is no code to write.
 
 2. **Discover (ARD).** `registry/index.py` embeds every table's representative queries into a
-   vector index. The Agent Finder (`agent_finder.py`) takes a question, retrieves the closest
-   tables by embedding, and reranks them with the chat model. This is the ARD layer: the question
-   only ever sees the one table that matches, which is why thousands of small descriptors beat one
-   giant schema.
+   vector index. The Agent Finder (`agent_finder.py`) embeds the full question and its
+   entity-expunged measure in one provider request, unions the closest tables, and performs one
+   low-reasoning, output-bounded rerank. This is the ARD layer: the question only ever sees the one
+   table that matches, which is why thousands of small descriptors beat one giant schema.
 
 3. **Plan before fetch (`planner.py`).** The engine classifies the question's *shape* — point,
    status, entity-list, comparison, timeseries, ranking, aggregate, filtered-subset, ratio,
@@ -221,10 +221,48 @@ curl -s localhost:8099/ask -H 'content-type: application/json' \
 Returns the answer, the shape the planner chose, the source it used, the candidate tables it
 considered, and the raw data.
 
+Interactive callers can ask the API to stop on a material ambiguity:
+
+```bash
+curl -s localhost:8099/ask -H 'content-type: application/json' \
+  -d '{"query":"What was Apple’s profit in 2023?","streaming":false,"on_ambiguity":"ask"}'
+```
+
+`on_ambiguity` has three modes:
+
+| Value | Behavior |
+|---|---|
+| `answer` (default) | Return the preferred answer and include fetched alternatives in structured data. |
+| `ask` | Withhold the answer and return `@type: "ClarificationRequest"` with human-readable options and their fetched values. |
+| `all` | Answer every materially different interpretation. |
+
+To resolve a `ClarificationRequest`, repeat the original query and copy the chosen option's
+`assumptions` object into the request. For an SEC measure this includes the exact concept, so the
+follow-up does not run semantic selection a second time:
+
+```json
+{
+  "query": "What was Apple’s profit in 2023?",
+  "assumptions": {
+    "measure": "net income",
+    "concept": "us-gaap:NetIncomeLoss"
+  }
+}
+```
+
+Clarification is a completed turn, not an HTTP error: both streaming and non-streaming clients
+receive it in the normal `nlws` message, with `status: "needs_clarification"`. The bundled web UI
+uses `ask` and renders each option as a one-click follow-up.
+
 **ARD discovery directly:**
 
 ```bash
 python3 registry/index.py search "who funds Stanford"
+
+# The HTTP API can retrieve several complementary phrasings with one compact rerank:
+curl -s http://127.0.0.1:8088/search \
+  -H 'content-type: application/json' \
+  -d '{"query":{"text":"total revenue","texts":["total revenue","Apple total revenue"]},"pageSize":12}'
 ```
 
 ---

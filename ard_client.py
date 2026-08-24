@@ -145,8 +145,13 @@ def health():
     return _get("/healthz") or {"ok": False}
 
 
-def search(text, k=10, sources=None, rerank=True):
-    body = json.dumps({"query": {"text": text}, "pageSize": k, "sources": sources, "rerank": rerank}).encode()
+def search_many(texts, k=10, sources=None, rerank=True, rerank_query=None):
+    """One finder request for several phrasings; the finder embeds them together and reranks once."""
+    texts = list(dict.fromkeys(str(text).strip() for text in texts if str(text).strip()))
+    if not texts:
+        return []
+    body = json.dumps({"query": {"text": rerank_query or texts[0], "texts": texts},
+                       "pageSize": k, "sources": sources, "rerank": rerank}).encode()
     req = urllib.request.Request(BASE + "/search", data=body,
                                  headers={"Content-Type": "application/json"}, method="POST")
     try:
@@ -169,3 +174,7 @@ def search(text, k=10, sources=None, rerank=True):
              "score": x.get("score"),
              "publisher": x.get("okf:source") or (x.get("tags") or [None])[0]}
             for x in results]
+
+
+def search(text, k=10, sources=None, rerank=True):
+    return search_many([text], k=k, sources=sources, rerank=rerank, rerank_query=text)

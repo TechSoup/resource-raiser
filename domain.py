@@ -112,3 +112,38 @@ class Answer:
 
     def to_dict(self):
         return asdict(self)
+
+
+@dataclass(slots=True)
+class ClarificationOption:
+    """One human-readable way to resolve a materially ambiguous query."""
+    id: str
+    label: str
+    value: Any = None
+    unit: str | None = None
+    period: str | None = None
+    source: str | None = None
+    concept: str | None = None
+    assumptions: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Source adapters sometimes cross a float-producing boundary even for exact whole-dollar
+        # facts. Keep the public protocol faithful to the quantity: 96995000000 is an integer, not
+        # an IEEE approximation that clients may display in scientific notation.
+        if isinstance(self.value, float) and self.value.is_integer():
+            self.value = int(self.value)
+
+    def to_dict(self):
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class Clarification:
+    """A terminal API outcome that a caller can resolve with a follow-up request."""
+    question: str
+    options: list[ClarificationOption]
+    attribute: str = ""
+
+    def to_dict(self):
+        return {"question": self.question, "attribute": self.attribute,
+                "options": [option.to_dict() for option in self.options]}

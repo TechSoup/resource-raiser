@@ -259,15 +259,22 @@ def _reported_cost(usage):
     return float(c) if isinstance(c, (int, float)) else None
 
 
-def chat(system, user, json_mode=False, model=None, stage="other"):
+def chat(system, user, json_mode=False, model=None, stage="other", max_tokens=None,
+         reasoning_effort=None):
     """One chat turn (system + user), temperature 0. json_mode asks for a JSON object back.
     `model` overrides the default chat model for one call (see rerank_model()).
     `stage` labels what the call was FOR — classify / resolve / check / synthesize — so a
-    question's bill can be read by what it was spent on rather than as one lump."""
+    question's bill can be read by what it was spent on rather than as one lump. Output and
+    reasoning limits are opt-in: short structural tasks such as reranking should not inherit the
+    provider's unconstrained reasoning defaults."""
     runtime.check()
     kw = {"response_format": {"type": "json_object"}} if json_mode else {}
+    if max_tokens is not None:
+        kw["max_tokens"] = int(max_tokens)
     if _openrouter():
         extra = {"usage": {"include": True}}              # ask OpenRouter for the actual charge
+        if reasoning_effort:
+            extra["reasoning"] = {"effort": reasoning_effort}
         # Route by THROUGHPUT, not sticker price. A cheap model is often served by a single
         # provider whose rate limit a parallel fan-out hits immediately, turning a "cheaper" model
         # into stalls and 429s. Set LLM_PROVIDER_SORT="" to let OpenRouter choose.

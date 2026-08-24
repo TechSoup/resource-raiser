@@ -310,9 +310,12 @@ def _rerank(query, candidates, k):
             "downstream from the actual reported data, and a dropped candidate can never be chosen. "
             "For an amount prefer a dollar/count/median value; for a rate or share prefer a percentage. "
             f'Return JSON {{"ranked":[{{"i":<candidate number>,"score":<0-100 relevance>}}]}} '
-            f"for the {k} most relevant tables, best first. Omit only the CLEARLY irrelevant.",
+            f"for the {k} most relevant tables, best first. Omit only the CLEARLY irrelevant. "
+            "Return only the compact JSON object; do not explain any choice.",
             f"Query: {query}\n\nCandidate tables:\n{listing}", json_mode=True,
-            model=llm.rerank_model())).get("ranked", [])
+            model=llm.rerank_model(),
+            max_tokens=int(os.getenv("ARD_RERANK_MAX_TOKENS", "400")),
+            reasoning_effort=os.getenv("ARD_RERANK_REASONING_EFFORT", "low"))).get("ranked", [])
     except Exception:
         return []
     out = []
@@ -357,16 +360,25 @@ def _srcdir(identifier):
 PREFILTER = int(os.getenv("ARD_PREFILTER", "15"))
 
 
-def search(query, k=5, prefilter=None, sources=None, rerank=True):
-    """Two-stage retrieval: embedding cosine prefilter (optionally scoped to given
-    source directories — pass 2 of the entity->source, attribute->field design),
-    then small-LM re-rank of the attribute against the fields in scope."""
+def search_many(queries, k=5, prefilter=None, sources=None, rerank=True, rerank_query=None):
+    """Retrieve several phrasings in one embedding call and rerank their union once.
+
+    The aggregate is max similarity, not an averaged vector: a table surfaced decisively by either
+    the entity-expunged attribute or the original question must remain eligible. One union rerank is
+    the cost-saving boundary; independently reranking each phrasing repeats the expensive prompt.
+    """
     if os.getenv("ARD_RERANK", "1").lower() in ("0", "false", "no"):
         rerank = False                                 # embedding-only (fast on slow/local models)
-    prefilter = prefilter or PREFILTER
+    queries = list(dict.fromkeys(str(q).strip() for q in queries if str(q).strip()))
+    if not queries:
+        return []
+    # `k` is a caller contract. The default rerank pool is deliberately small, but an embedding-only
+    # caller (SEC resolution asks for 50 reported concepts) must not be silently truncated to the
+    # 15-entry rerank prefilter before slicing to k.
+    prefilter = max(prefilter or PREFILTER, k)
     vecs, meta = _store()
-    q = normed(embed([query]))[0]
-    scores = vecs @ q
+    q = normed(embed(queries))
+    scores = np.max(vecs @ q.T, axis=1)
     cand = []
     for i in np.argsort(-scores):
         m = meta[i]
@@ -377,10 +389,16 @@ def search(query, k=5, prefilter=None, sources=None, rerank=True):
             break
     if not rerank:                                            # embedding-only: the caller ranks by data
         return [{**c, "score": c["embed_score"]} for c in cand[:k]]
-    reranked = _rerank(query, cand, k)
+    reranked = _rerank(rerank_query or queries[0], cand, k)
     if reranked:
         return reranked
     return [{**c, "score": c["embed_score"]} for c in cand[:k]]
+
+
+def search(query, k=5, prefilter=None, sources=None, rerank=True):
+    """Two-stage retrieval for one query; see search_many for the shared implementation."""
+    return search_many([query], k=k, prefilter=prefilter, sources=sources, rerank=rerank,
+                       rerank_query=query)
 
 
 if __name__ == "__main__":

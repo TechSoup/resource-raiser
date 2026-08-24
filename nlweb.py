@@ -16,8 +16,9 @@ NLWeb **Item**: its `schema_object` is the descriptor's own frontmatter, which i
 thing this system has to structured data about a result, because it is literally that.
 
 Request (GET or POST /ask): query, site, mode, max_results, min_score, streaming, sse_format,
-conversation_id, prev, debug. Streaming is the default; `streaming=false` returns one JSON
-document of the same messages, which is what upstream does.
+conversation_id, on_ambiguity, assumptions, debug. Streaming is the default; `streaming=false`
+returns one JSON document of the same messages, which is what upstream does. `assumptions` is a
+JSON object either way: a GET client sends it encoded, since a query string has no nested objects.
 """
 import json, time, uuid
 
@@ -140,16 +141,40 @@ def parse_request(params):
     mode = str(one("mode") or "generate").strip().lower()
     if mode not in ("generate", "list"):
         mode = "generate"
+    on_ambiguity = str(one("on_ambiguity") or "answer").strip().lower()
+    if on_ambiguity not in ("answer", "ask", "all"):
+        on_ambiguity = "answer"
     assumptions = {}
+    assumptions_error = ""
+    nested = one("assumptions")
+    if isinstance(nested, str) and nested.strip():
+        # A query string cannot carry a nested object, so a GET client sends it JSON-encoded. Decode
+        # before the dict check below, or the binding is dropped and an ambiguous question silently
+        # falls back to its FIRST interpretation: the caller resolves a clarification by choosing
+        # "gross profit" and is told, with full confidence, Apple's net income.
+        try:
+            nested = json.loads(nested)
+        except (TypeError, ValueError):
+            nested, assumptions_error = None, "'assumptions' is not valid JSON"
+        else:
+            if not isinstance(nested, dict):
+                nested, assumptions_error = None, "'assumptions' must be a JSON object"
+    if isinstance(nested, dict):
+        aliases = {"measure": "attribute", "operation": "shape"}
+        for key in ("entity", "type", "measure", "attribute", "period", "operation", "shape", "concept"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                assumptions[aliases.get(key, key)] = value.strip()
     for param, field in (("assumption_entity", "entity"), ("assumption_type", "type"),
                          ("assumption_measure", "attribute"), ("assumption_period", "period"),
-                         ("assumption_operation", "shape")):
+                         ("assumption_operation", "shape"),
+                         ("assumption_concept", "concept")):
         value = one(param)
         if isinstance(value, str) and value.strip():
             assumptions[field] = value.strip()
 
     return {
-        "query": (one("query") or "").strip(),
+        "query": (one("query") or one("question") or "").strip(),
         "sites": sites,
         "mode": mode,
         "max_results": max(1, min(as_int("max_results", 10), 100)),
@@ -158,5 +183,7 @@ def parse_request(params):
         "named_events": str(one("sse_format") or "").strip().lower() == "named",
         "conversation_id": one("conversation_id"),
         "debug": str(one("debug") or "").strip().lower() in ("1", "true", "yes"),
+        "on_ambiguity": on_ambiguity,
         "assumptions": assumptions,
+        "assumptions_error": assumptions_error,
     }
