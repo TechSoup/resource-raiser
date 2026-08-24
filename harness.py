@@ -414,7 +414,20 @@ def discover(question, sites=None, assumptions=None):
             hits.append(h)
     _say("candidates", items=[{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")}
                               for h in hits[:6]])
-    return ctx, hits
+    # Embedding neighbours are candidates, not answers. Judge the declared subject of each
+    # against the question here, so a table that measures something else never costs a fetch.
+    eligible, dropped = _eligible(question, hits)
+    if dropped:
+        _say("status", icon="🧹",
+             msg=f"{dropped} of {len(hits)} candidate tables measure something else — dropped before fetching")
+    # Only an emptied-by-judgement pool refuses here. A pool that was empty to begin with is
+    # a different condition ("agent finder returned no sources") and is the caller's to report.
+    if hits and not eligible:
+        raise SystemExit(
+            "no available source measures this. The catalog was searched and every candidate "
+            "table measures something else, so there is nothing to fetch "
+            "(this data may not be published in the sources this system indexes).")
+    return ctx, eligible
 
 
 # The philanthropic grant graph (IRS 990: who funds whom) and the FEDERAL grant sources
@@ -540,6 +553,20 @@ class Backtrack(Exception):
     pass
 
 
+class Prune(Backtrack):
+    """Abandon every remaining option BELOW a named choice, not just this leaf.
+
+    A verdict can be about the choice itself rather than the combination that produced it.
+    "This table measures poverty, not broadband" is true for every entity, key and period
+    under that table, so retrying them re-asks a question already answered. Raising
+    Prune("hit") makes the solver advance the `hit` choice instead of its descendants.
+    """
+
+    def __init__(self, step, reason):
+        super().__init__(reason)
+        self.step = step
+
+
 def _solve(steps, goal, state, i=0):
     """General depth-first backtracking search. `steps` = [(name, options_fn), ...] where
     options_fn(state) yields the ranked candidate values for that choice; `goal(state)` attempts
@@ -552,6 +579,12 @@ def _solve(steps, goal, state, i=0):
     for opt in options_fn(state):
         try:
             return _solve(steps, goal, {**state, name: opt}, i + 1)
+        except Prune as e:
+            # Only the choice the verdict was about consumes it; deeper levels pass it up
+            # rather than trying their remaining options against a settled dead end.
+            if e.step != name:
+                raise
+            last = e
         except Backtrack as e:
             last = e
     raise Backtrack(f"no viable {name} ({last})")
@@ -562,6 +595,98 @@ def _solve(steps, goal, state, i=0):
 # re-runs the same LLM + Wikidata calls dozens of times while exhausting candidates (the capex case).
 _TICKER_CACHE = {}
 _ENTITY_CACHE = {}
+
+
+# --------------------------------------------------------------------------------------
+# Local semantic eligibility.
+#
+# Embedding retrieval is recall: it always returns its k nearest neighbours, so "nothing
+# relevant exists" and "relevant things exist" look identical downstream. The registry card
+# already states what each table measures, so a table whose declared subject cannot answer
+# the question is rejectable HERE, before any upstream call. Fetching is for checking a
+# candidate's actual value, dimensions, period and availability - not for re-litigating a
+# subject line we already hold.
+# --------------------------------------------------------------------------------------
+
+_META = None
+
+
+def _cards(identifiers):
+    """Registry cards (title/scope/description/example queries) for candidate identifiers."""
+    global _META
+    if _META is None:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "registry", "meta.json"), encoding="utf-8") as f:
+                rows = json.load(f)
+            rows = rows if isinstance(rows, list) else list(rows.values())[0]
+            _META = {r.get("identifier"): r for r in rows if isinstance(r, dict)}
+        except Exception:
+            _META = {}
+    return {i: _META.get(i) for i in identifiers}
+
+
+def _eligible(question, hits):
+    """Drop candidates whose declared subject cannot answer the question.
+
+    Fails OPEN: if the judgement cannot be made, every candidate stays eligible and the
+    old fetch-and-check behaviour applies. A broken judge must not make the engine refuse
+    questions it can actually answer.
+    """
+    if not hits:
+        return hits, None
+    cards = _cards([h["identifier"] for h in hits])
+    listing = []
+    for i, h in enumerate(hits):
+        c = cards.get(h["identifier"]) or {}
+        listing.append(
+            f"{i}. title: {c.get('title') or h.get('title') or ''}\n"
+            f"   measures: {str(c.get('description') or '')[:300]}\n"
+            f"   covers: {str(c.get('scope') or '')[:200]}"
+        )
+    try:
+        out = json.loads(TK.llm(
+            "You are filtering data tables for a question. For each numbered table you are given "
+            "what it MEASURES and what it COVERS. Return the indices of tables that could plausibly "
+            "answer the question - the measured quantity must be the one asked about. A table about "
+            "a different quantity is NOT eligible even if it covers the right place, entity or "
+            "period. Do not guess: judge only from the stated subject. "
+            'Return JSON {"eligible":[<indices>]}.\n\nQUESTION: ' + question + "\n\nTABLES:\n"
+            + "\n".join(listing),
+            question, json_mode=True, stage="eligibility"))
+        keep = out.get("eligible")
+        if not isinstance(keep, list):
+            return hits, None
+        keep = {i for i in keep if isinstance(i, int) and 0 <= i < len(hits)}
+    except Exception:
+        return hits, None                                  # fail open; judge unavailable
+    dropped = len(hits) - len(keep)
+    return [h for i, h in enumerate(hits) if i in keep], dropped
+
+
+# Identifier families that positively establish what an entity IS. Used to reject a resolved
+# candidate of the wrong kind; absence of keys proves nothing, so absence never rejects.
+_TYPE_KEYS = {
+    "place": ("fips_place", "fips_county", "fips_state", "gnis"),
+    "company": ("cik", "ticker", "lei"),
+    "nonprofit": ("ein",),
+}
+
+
+def _type_compatible(keys, thint):
+    """False only when the resolved identifiers positively contradict the requested type.
+
+    Conservative on purpose: a place whose Wikidata entry carries no FIPS code is still a
+    place, so it passes. Only a candidate carrying *another* type's identifiers and none of
+    its own is rejected - that is the "Detroit Institute of Arts has an EIN and no FIPS
+    code" case, and nothing else.
+    """
+    wanted = _TYPE_KEYS.get(thint)
+    if not wanted or not keys:
+        return True
+    if any(keys.get(k) for k in wanted):
+        return True
+    return not any(keys.get(k) for other, ks in _TYPE_KEYS.items() if other != thint for k in ks)
 
 
 def _entity_options(mention, thint):
@@ -591,9 +716,17 @@ def _entity_options(mention, thint):
     for i in order[:3]:
         try:
             label, keys = resolver._claims(cands[i]["id"])
-            out.append({"qid": cands[i]["id"], "label": label, "keys": keys})
         except Exception:
-            pass
+            continue
+        if not _type_compatible(keys, thint):
+            # "Detroit Institute of Arts" is a real Wikidata match for the mention
+            # "Detroit" and the ranker will sometimes keep it. A nonprofit cannot answer a
+            # question about a place, so this is settled deterministically from the resolved
+            # identifiers rather than left to the ranking.
+            _say("status", icon="🚫",
+                 msg=f"“{label}” is not a {thint} — not a candidate for this question")
+            continue
+        out.append({"qid": cands[i]["id"], "label": label, "keys": keys})
     if out:
         _say("resolve", mention=mention, label=out[0].get("label") or mention, keys=out[0].get("keys") or {})
     _ENTITY_CACHE[(mention, thint)] = res = out + [None]
@@ -1754,15 +1887,28 @@ def _search(question, ctx=None, hits=None):
     ]
 
     attempts = [0]
+    tried_tables = set()                    # distinct tables actually reached, for the failure message
+    done = {}                               # complete fetch identity -> outcome, within this question
     MAX_ATTEMPTS = 40                       # 3 entities x 2 periods x a couple keys is the honest ceiling;
                                             # beyond it the search is looping, not exploring — stop cleanly.
 
     def goal(s):
         if attempts[0] >= MAX_ATTEMPTS:
-            raise SystemExit("no source could answer this after exhausting the ranked candidates "
-                             "(the requested data may not be published yet).")
-        attempts[0] += 1
+            raise SystemExit(
+                f"no source could answer this. {len(tried_tables)} of {len(hits)} candidate tables "
+                f"were tried in {attempts[0]} attempts before the search budget ran out"
+                + ("" if len(tried_tables) >= len(hits) else
+                   " — the remaining candidates were never reached, so this is not proof the data is absent")
+                + ".")
         ent = (s.get("entity") or {}).get("label")
+        # Identity of the actual request, not its display name: the same table can be fetched
+        # for several entities, keys and periods, and only the whole tuple distinguishes them.
+        identity = (s["hit"]["identifier"], (s.get("entity") or {}).get("qid"), ent,
+                    json.dumps(s.get("key"), sort_keys=True, default=str), s.get("period"))
+        if identity in done:
+            raise Backtrack(f"already attempted ({done[identity]})")
+        attempts[0] += 1
+        tried_tables.add(s["hit"]["identifier"])
         _say("status", icon="📥", msg=f"Fetching live from “{s['hit']['title']}”"
              + (f" for {ent}…" if ent else "…"))
         attempt = Attempt(source=s["hit"].get("publisher") or s["hit"]["title"],
@@ -1775,10 +1921,16 @@ def _search(question, ctx=None, hits=None):
                 intent, attempt, s["hit"], lambda: _fetch(s, ctx),
                 adjudicator=lambda data, verdict: _answers(question, data, verdict))
         except connectors.Rejected as e:
+            # The adjudicator judged the TABLE, not this particular entity/key/period, so
+            # every remaining combination beneath it would be rejected for the same reason.
+            done[identity] = "wrong table"
             trace.append(e.attempt)
-            _say("status", icon="↩️", msg=f"Wrong table ({e}) — backtracking to the next candidate…")
-            raise Backtrack(f"answer rejected: {e}")
+            _say("status", icon="↩️", msg=f"Wrong table ({e}) — skipping it and trying the next candidate…")
+            raise Prune("hit", f"answer rejected: {e}")
         except Backtrack as e:
+            # A usable table with nothing for this key or period: the next key or period is
+            # genuinely worth trying, so this stays an ordinary leaf failure.
+            done[identity] = str(e)
             trace.append(attempt)
             _say("status", icon="↩️", msg=f"No usable data ({e}) — backtracking…")
             raise

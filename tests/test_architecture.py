@@ -579,5 +579,106 @@ class IndexArtifactTests(unittest.TestCase):
                 self.assertTrue(ok, detail)
 
 
+class SearchOrderTests(unittest.TestCase):
+    """A verdict about a table must not be re-asked once per entity, key and period."""
+
+    STEPS = [("hit", lambda s: ["A", "B", "C"]),
+             ("entity", lambda s: ["e1", "e2", "e3"]),
+             ("period", lambda s: ["p1", "p2"])]
+
+    def test_rejecting_a_table_skips_its_whole_subtree(self):
+        seen = []
+
+        def goal(state):
+            seen.append((state["hit"], state["entity"], state["period"]))
+            if state["hit"] != "C":
+                raise harness.Prune("hit", "this table measures something else")
+            return state
+
+        result = harness._solve(self.STEPS, goal, {})
+        # One attempt per table, not one per table x entity x period.
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(result["hit"], "C")
+
+    def test_an_ordinary_dead_end_still_tries_the_next_key(self):
+        """A table with no data for one key may have data for the next; only Prune skips."""
+        seen = []
+
+        def goal(state):
+            seen.append((state["hit"], state["entity"], state["period"]))
+            if (state["hit"], state["entity"]) != ("B", "e2"):
+                raise harness.Backtrack("no data for this key")
+            return state
+
+        result = harness._solve(self.STEPS, goal, {})
+        self.assertEqual((result["hit"], result["entity"]), ("B", "e2"))
+        self.assertGreater(len(seen), 3)
+
+    def test_a_prune_is_consumed_only_by_the_choice_it_names(self):
+        seen = []
+
+        def goal(state):
+            seen.append(state["entity"])
+            if state["entity"] != "e3":
+                raise harness.Prune("entity", "entity cannot answer this")
+            return state
+
+        harness._solve(self.STEPS, goal, {})
+        self.assertEqual(seen, ["e1", "e2", "e3"])
+
+
+class EntityTypeGateTests(unittest.TestCase):
+    """A resolved place must not fan out to nonprofits that share its name."""
+
+    def test_a_nonprofit_is_not_a_candidate_for_a_place_question(self):
+        self.assertFalse(harness._type_compatible({"ein": "381359231"}, "place"))
+
+    def test_a_place_is_not_a_candidate_for_a_company_question(self):
+        self.assertFalse(harness._type_compatible({"fips_place": "2622000"}, "company"))
+
+    def test_a_real_place_passes(self):
+        self.assertTrue(harness._type_compatible({"fips_place": "2622000"}, "place"))
+
+    def test_missing_identifiers_never_reject(self):
+        """Absence of a FIPS code is not evidence of not being a place."""
+        self.assertTrue(harness._type_compatible({}, "place"))
+        self.assertTrue(harness._type_compatible({"cik": "320193"}, None))
+
+    def test_an_entity_carrying_both_kinds_is_kept(self):
+        self.assertTrue(harness._type_compatible({"ein": "1", "fips_place": "2"}, "place"))
+
+
+class EligibilityGateTests(unittest.TestCase):
+    """Candidates whose declared subject cannot answer the question cost no fetch."""
+
+    HITS = [{"identifier": "sources/census/poverty.md", "title": "Poverty rate"},
+            {"identifier": "sources/census/broadband.md", "title": "Broadband subscriptions"}]
+
+    def test_ineligible_candidates_are_dropped(self):
+        with mock.patch.object(harness.TK, "llm", return_value=json.dumps({"eligible": [1]})):
+            kept, dropped = harness._eligible("broadband in Detroit", self.HITS)
+        self.assertEqual([h["identifier"] for h in kept], ["sources/census/broadband.md"])
+        self.assertEqual(dropped, 1)
+
+    def test_a_broken_judge_fails_open(self):
+        """A judge that cannot answer must not make the engine refuse answerable questions."""
+        with mock.patch.object(harness.TK, "llm", side_effect=RuntimeError("provider down")):
+            kept, dropped = harness._eligible("broadband in Detroit", self.HITS)
+        self.assertEqual(kept, self.HITS)
+        self.assertIsNone(dropped)
+
+    def test_a_malformed_verdict_fails_open(self):
+        with mock.patch.object(harness.TK, "llm", return_value=json.dumps({"eligible": "all"})):
+            kept, _ = harness._eligible("broadband in Detroit", self.HITS)
+        self.assertEqual(kept, self.HITS)
+
+    def test_judging_everything_ineligible_is_allowed(self):
+        """An empty result is the honest outcome when nothing measures what was asked."""
+        with mock.patch.object(harness.TK, "llm", return_value=json.dumps({"eligible": []})):
+            kept, dropped = harness._eligible("broadband in Detroit", self.HITS)
+        self.assertEqual(kept, [])
+        self.assertEqual(dropped, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
