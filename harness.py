@@ -664,29 +664,60 @@ def _eligible(question, hits):
     return [h for i, h in enumerate(hits) if i in keep], dropped
 
 
-# Identifier families that positively establish what an entity IS. Used to reject a resolved
-# candidate of the wrong kind; absence of keys proves nothing, so absence never rejects.
+# What an entity IS, from Wikidata. Identifier families are strong evidence when present,
+# but most Wikidata items carry none - "University of Detroit Mercy" has no EIN - so absence
+# of identifiers cannot be read as absence of a type. P31 (instance of) is the evidence that
+# actually discriminates, and it is matched on the CLASS LABEL rather than a curated QID set,
+# because the set of classes meaning "a place" is large, open, and changes without notice.
 _TYPE_KEYS = {
     "place": ("fips_place", "fips_county", "fips_state", "gnis"),
     "company": ("cik", "ticker", "lei"),
     "nonprofit": ("ein",),
 }
 
+_CLASS_WORDS = {
+    "place": ("city", "town", "village", "municipality", "county", "state", "borough",
+              "settlement", "census", "township", "district", "region", "territory",
+              "capital", "metropolis", "commune", "prefecture", "province", "country"),
+    "company": ("business", "company", "corporation", "enterprise", "manufacturer", "brand"),
+    "nonprofit": ("nonprofit", "non-profit", "charity", "foundation", "university", "college",
+                  "school", "museum", "hospital", "institute", "association", "society",
+                  "organization", "organisation", "church"),
+}
 
-def _type_compatible(keys, thint):
-    """False only when the resolved identifiers positively contradict the requested type.
 
-    Conservative on purpose: a place whose Wikidata entry carries no FIPS code is still a
-    place, so it passes. Only a candidate carrying *another* type's identifiers and none of
-    its own is rejected - that is the "Detroit Institute of Arts has an EIN and no FIPS
-    code" case, and nothing else.
+def _kind_from_classes(labels):
+    """Which of our types the Wikidata classes describe, or None when they describe none."""
+    text = " ".join(str(l).lower() for l in labels)
+    if not text.strip():
+        return None
+    # Place first: "capital city" is a place even though "city" appears in company names.
+    for kind in ("place", "nonprofit", "company"):
+        if any(w in text for w in _CLASS_WORDS[kind]):
+            return kind
+    return "other"
+
+
+def _type_compatible(keys, thint, class_labels=()):
+    """False when the evidence says this candidate is not the kind of thing asked for.
+
+    Order matters. Identifiers of the requested kind accept immediately. Otherwise P31 class
+    labels decide, because they are present for effectively every item while identifiers are
+    not: "University of Detroit Mercy" carries no EIN at all, so an identifier-only rule let
+    it answer a question about the city of Detroit. Only when there is no evidence of any
+    kind does the candidate pass, since absence is not disqualifying.
     """
     wanted = _TYPE_KEYS.get(thint)
-    if not wanted or not keys:
+    if not wanted:
         return True
-    if any(keys.get(k) for k in wanted):
+    if keys and any(keys.get(k) for k in wanted):
         return True
-    return not any(keys.get(k) for other, ks in _TYPE_KEYS.items() if other != thint for k in ks)
+    kind = _kind_from_classes(class_labels)
+    if kind is not None:
+        return kind == thint
+    if keys and any(keys.get(k) for other, ks in _TYPE_KEYS.items() if other != thint for k in ks):
+        return False
+    return True
 
 
 def _entity_options(mention, thint):
@@ -718,7 +749,11 @@ def _entity_options(mention, thint):
             label, keys = resolver._claims(cands[i]["id"])
         except Exception:
             continue
-        if not _type_compatible(keys, thint):
+        try:
+            classes = list(resolver.class_labels(resolver.instance_of(cands[i]["id"])).values())
+        except Exception:
+            classes = []
+        if not _type_compatible(keys, thint, classes):
             # "Detroit Institute of Arts" is a real Wikidata match for the mention
             # "Detroit" and the ranker will sometimes keep it. A nonprofit cannot answer a
             # question about a place, so this is settled deterministically from the resolved

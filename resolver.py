@@ -53,6 +53,48 @@ def _claims(qid):
     return label, keys
 
 
+def instance_of(qid):
+    """P31 class QIDs. Already present in the _claims response, so this costs no extra call
+    when the claims are cached, and it is the only evidence that distinguishes a city from a
+    university when neither carries a registry identifier."""
+    ck = f"p31|{qid}"
+    if ck in _cache:
+        return _cache[ck]
+    try:
+        e = _get(f"{WD}?action=wbgetentities&ids={qid}&props=claims&format=json")["entities"][qid]
+        out = []
+        for c in e.get("claims", {}).get("P31", []):
+            try:
+                out.append(c["mainsnak"]["datavalue"]["value"]["id"])
+            except Exception:
+                pass
+    except Exception:
+        out = []
+    _cache[ck] = out
+    return out
+
+
+def class_labels(qids):
+    """English labels for class QIDs, one batched request."""
+    qids = [q for q in dict.fromkeys(qids) if q]
+    out, need = {}, []
+    for q in qids:
+        ck = f"clabel|{q}"
+        if ck in _cache:
+            out[q] = _cache[ck]
+        else:
+            need.append(q)
+    for i in range(0, len(need), 40):
+        chunk = need[i:i + 40]
+        try:
+            e = _get(f"{WD}?action=wbgetentities&ids={'|'.join(chunk)}&props=labels&format=json")["entities"]
+        except Exception:
+            continue
+        for q, v in e.items():
+            out[q] = _cache[f"clabel|{q}"] = (v.get("labels", {}).get("en") or {}).get("value", "")
+    return out
+
+
 def hierarchy(qid, max_depth=4):
     """Walk 'located in' (P131) from an entity up to its state, returning the containment
     chain [self, county, state] most-specific first — the ordered granularity alternatives

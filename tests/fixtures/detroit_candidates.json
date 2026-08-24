@@ -1,0 +1,66 @@
+{
+ "Q12439": {
+  "label": "Detroit",
+  "keys": {
+   "lei": "549300BQRJP7MKKHOY28",
+   "fips_place": "26-22000",
+   "gnis": "1617959"
+  },
+  "classes": [
+   "city in the United States",
+   "county seat",
+   "border city",
+   "big city"
+  ]
+ },
+ "Q1320232": {
+  "label": "University of Detroit Mercy",
+  "keys": {},
+  "classes": [
+   "university",
+   "private not-for-profit educational institution",
+   "Catholic school"
+  ]
+ },
+ "Q1201549": {
+  "label": "Detroit Institute of Arts",
+  "keys": {
+   "ein": "38-1359510"
+  },
+  "classes": [
+   "art museum",
+   "movie theater",
+   "performing arts center",
+   "nonprofit organization",
+   "museum"
+  ]
+ },
+ "Q1642809": {
+  "label": "Detroit",
+  "keys": {},
+  "classes": [
+   "video game"
+  ]
+ },
+ "Q194116": {
+  "label": "Detroit Red Wings",
+  "keys": {},
+  "classes": [
+   "ice hockey team"
+  ]
+ },
+ "Q271880": {
+  "label": "Detroit Lions",
+  "keys": {},
+  "classes": [
+   "American football team"
+  ]
+ },
+ "Q141104587": {
+  "label": "Detroit",
+  "keys": {},
+  "classes": [
+   "television series episode"
+  ]
+ }
+}

@@ -628,24 +628,50 @@ class SearchOrderTests(unittest.TestCase):
 
 
 class EntityTypeGateTests(unittest.TestCase):
-    """A resolved place must not fan out to nonprofits that share its name."""
+    """The reported leak: a question about the city of Detroit fetched for nonprofits.
 
-    def test_a_nonprofit_is_not_a_candidate_for_a_place_question(self):
-        self.assertFalse(harness._type_compatible({"ein": "381359231"}, "place"))
+    The fixture holds the REAL Wikidata claims and P31 class labels for every candidate the
+    resolver returns for the mention "Detroit", captured from the live API. An identifier-only
+    rule passes University of Detroit Mercy, which carries no EIN at all, so this is the case
+    that proves the production bug rather than the helper.
+    """
 
-    def test_a_place_is_not_a_candidate_for_a_company_question(self):
-        self.assertFalse(harness._type_compatible({"fips_place": "2622000"}, "company"))
+    with open(os.path.join(ROOT, "tests", "fixtures", "detroit_candidates.json")) as f:
+        DETROIT = json.load(f)
 
-    def test_a_real_place_passes(self):
-        self.assertTrue(harness._type_compatible({"fips_place": "2622000"}, "place"))
+    def _keep(self, thint):
+        return {d["label"] for d in self.DETROIT.values()
+                if harness._type_compatible(d["keys"], thint, d["classes"])}
 
-    def test_missing_identifiers_never_reject(self):
-        """Absence of a FIPS code is not evidence of not being a place."""
-        self.assertTrue(harness._type_compatible({}, "place"))
-        self.assertTrue(harness._type_compatible({"cik": "320193"}, None))
+    def test_only_the_city_answers_a_place_question(self):
+        self.assertEqual(self._keep("place"), {"Detroit"})
 
-    def test_an_entity_carrying_both_kinds_is_kept(self):
-        self.assertTrue(harness._type_compatible({"ein": "1", "fips_place": "2"}, "place"))
+    def test_the_reported_leaks_are_both_dropped(self):
+        for qid in ("Q1320232", "Q1201549"):          # U of Detroit Mercy, Detroit Institute of Arts
+            d = self.DETROIT[qid]
+            self.assertFalse(harness._type_compatible(d["keys"], "place", d["classes"]),
+                             f"{d['label']} must not answer a question about a place")
+
+    def test_an_entity_with_no_identifiers_is_still_judged(self):
+        """University of Detroit Mercy has no EIN; absence of identifiers cannot mean 'allow'."""
+        self.assertEqual(self.DETROIT["Q1320232"]["keys"], {})
+        self.assertFalse(harness._type_compatible({}, "place", ["university"]))
+
+    def test_sports_teams_and_creative_works_are_dropped(self):
+        for qid in ("Q1642809", "Q194116", "Q271880", "Q141104587"):
+            d = self.DETROIT[qid]
+            self.assertFalse(harness._type_compatible(d["keys"], "place", d["classes"]))
+
+    def test_no_evidence_at_all_still_passes(self):
+        """Absence of both identifiers and classes is not disqualifying."""
+        self.assertTrue(harness._type_compatible({}, "place", []))
+
+    def test_identifiers_of_the_requested_kind_accept_immediately(self):
+        self.assertTrue(harness._type_compatible({"fips_place": "2622000"}, "place", []))
+        self.assertTrue(harness._type_compatible({"cik": "320193"}, "company", []))
+
+    def test_no_type_hint_never_rejects(self):
+        self.assertTrue(harness._type_compatible({"ein": "1"}, None, ["university"]))
 
 
 class EligibilityGateTests(unittest.TestCase):
