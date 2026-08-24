@@ -407,8 +407,12 @@ def discover(question, sites=None, assumptions=None):
     # Attribute-only and full-question retrieval are complementary views, not two separately billed
     # ranking tasks. The finder embeds both in one provider call, unions by max similarity, and runs
     # one rerank over the shared candidate pool.
-    for h in ard_client.search_many([primary, secondary], k=12, sources=sources,
-                                    rerank_query=primary):
+    try:
+        found = ard_client.search_many([primary, secondary], k=12, sources=sources,
+                                       rerank_query=primary)
+    except ard_client.DiscoveryError as e:
+        raise SystemExit(str(e)) from e
+    for h in found:
         if h["identifier"] not in seen:
             seen.add(h["identifier"])
             hits.append(h)
@@ -585,35 +589,6 @@ def _solve(steps, goal, state, i=0):
 # re-runs the same LLM + Wikidata calls dozens of times while exhausting candidates (the capex case).
 _TICKER_CACHE = {}
 _ENTITY_CACHE = {}
-
-
-# --------------------------------------------------------------------------------------
-# Local semantic eligibility.
-#
-# Embedding retrieval is recall: it always returns its k nearest neighbours, so "nothing
-# relevant exists" and "relevant things exist" look identical downstream. The registry card
-# already states what each table measures, so a table whose declared subject cannot answer
-# the question is rejectable HERE, before any upstream call. Fetching is for checking a
-# candidate's actual value, dimensions, period and availability - not for re-litigating a
-# subject line we already hold.
-# --------------------------------------------------------------------------------------
-
-_META = None
-
-
-def _cards(identifiers):
-    """Registry cards (title/scope/description/example queries) for candidate identifiers."""
-    global _META
-    if _META is None:
-        try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "registry", "meta.json"), encoding="utf-8") as f:
-                rows = json.load(f)
-            rows = rows if isinstance(rows, list) else list(rows.values())[0]
-            _META = {r.get("identifier"): r for r in rows if isinstance(r, dict)}
-        except Exception:
-            _META = {}
-    return {i: _META.get(i) for i in identifiers}
 
 
 # What an entity IS, from Wikidata. Identifier families are strong evidence when present,

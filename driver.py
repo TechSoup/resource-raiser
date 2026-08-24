@@ -37,6 +37,8 @@ _SEC_CONCEPT_CACHE = {}
 _SEC_SEARCH_CACHE = {}      # the concept-candidate search per metric_query — identical across backtracks
 _METRIC_CACHE = {}          # whole fetch_metric result (or failure) per (metric, cik, period)
 _SEC_CONCEPT_META = None
+# This bounds one process. The deployed service intentionally runs one Python worker; a future
+# multi-worker or multi-VM deployment needs a shared limiter rather than silently relying on this.
 _SEC_REQUEST_LOCK = threading.Lock()
 _SEC_NEXT_REQUEST = 0.0
 
@@ -117,6 +119,7 @@ _TMAP = None
 def ticker_to_cik(ticker):
     global _TMAP
     if _TMAP is None:
+        _pace_sec_request()                                  # one cached SEC request, still paced
         req = urllib.request.Request("https://www.sec.gov/files/company_tickers.json", headers={"User-Agent": UA})
         _TMAP = {v["ticker"].upper(): (str(v["cik_str"]), v["title"]) for v in json.load(urllib.request.urlopen(req, timeout=30)).values()}
     return _TMAP.get(ticker.upper(), (None, None))

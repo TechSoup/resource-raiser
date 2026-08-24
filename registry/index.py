@@ -294,6 +294,17 @@ def _card(i, c):
 MIN_RERANK_SCORE = float(os.getenv("ARD_MIN_RERANK_SCORE", "50"))
 
 
+class RelevanceScoringError(RuntimeError):
+    """The LLM relevance stage failed; embedding neighbors must not escape as answers."""
+
+
+class NoRelevantTablesError(LookupError):
+    def __init__(self, top_score=None, threshold=MIN_RERANK_SCORE):
+        self.top_score = top_score
+        self.threshold = threshold
+        super().__init__("no table cleared the LLM relevance threshold")
+
+
 def _rerank(query, candidates, k):
     """Stage 2: a small LM scores the embedding candidates by actual relevance, seeing the
     full card for each (title, description, and the questions people ask for it)."""
@@ -321,14 +332,22 @@ def _rerank(query, candidates, k):
             reasoning_effort=os.getenv("ARD_RERANK_REASONING_EFFORT", "low"))).get("ranked", [])
     except Exception:
         return None
-    out = []
+    if not isinstance(ranked, list):
+        return None
+    scored = []
     for r in ranked[:k]:
+        if not isinstance(r, dict):
+            continue
         i = r.get("i")
         score = r.get("score")
         if (isinstance(i, int) and 0 <= i < len(candidates)
-                and isinstance(score, (int, float)) and score >= MIN_RERANK_SCORE):
-            out.append({**candidates[i], "score": score})
-    return out
+                and isinstance(score, (int, float))):
+            scored.append({**candidates[i], "score": score})
+    eligible = [candidate for candidate in scored if candidate["score"] >= MIN_RERANK_SCORE]
+    if candidates and not eligible:
+        top = max((candidate["score"] for candidate in scored), default=None)
+        raise NoRelevantTablesError(top)
+    return eligible
 
 
 _STORE = None
@@ -396,7 +415,7 @@ def search_many(queries, k=5, prefilter=None, sources=None, rerank=True, rerank_
         return [{**c, "score": c["embed_score"]} for c in cand[:k]]
     reranked = _rerank(rerank_query or queries[0], cand, k)
     if reranked is None:
-        raise RuntimeError("LLM table relevance scoring failed")
+        raise RelevanceScoringError("LLM table relevance scoring failed")
     return reranked
 
 

@@ -13,6 +13,18 @@ BASE = os.getenv("AGENT_FINDER_URL", "http://127.0.0.1:8088").rstrip("/")
 TIMEOUT = int(os.getenv("AGENT_FINDER_TIMEOUT", "180"))
 
 
+class DiscoveryError(RuntimeError):
+    """The finder answered, but safe semantic discovery could not produce candidates."""
+
+
+class RelevanceScoringError(DiscoveryError):
+    pass
+
+
+class NoRelevantTablesError(DiscoveryError):
+    pass
+
+
 # --- discovery usage ----------------------------------------------------------------------------
 # The finder reports what each search cost it. Those calls belong to the finder, not to the caller's
 # question, so they are accumulated SEPARATELY here and never folded into the caller's own ledger —
@@ -157,14 +169,34 @@ def search_many(texts, k=10, sources=None, rerank=True, rerank_query=None):
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             payload = json.load(r)
-        results = payload.get("results", [])
         u = usage()
         if u is not None:
             u.add(payload.get("usage"))             # reported, not charged to the caller
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.load(e)
+        except Exception:
+            payload = {}
+        u = usage()
+        if u is not None:
+            u.add(payload.get("usage"))
+        if payload.get("code") == "relevance_scoring_failed":
+            raise RelevanceScoringError(payload.get("error") or
+                                        "table relevance scoring is temporarily unavailable") from e
+        raise SystemExit(f"agent finder error {e.code}: "
+                         f"{payload.get('error') or e.reason}") from e
     except (urllib.error.URLError, ConnectionError, TimeoutError, socket.timeout, OSError) as e:
         raise SystemExit(f"agent finder unreachable or too slow at {BASE} ({e}). "
                          f"Start it (python3 agent_finder.py); for slow local models raise "
-                         f"AGENT_FINDER_TIMEOUT or set ARD_RERANK=0.")
+                         f"AGENT_FINDER_TIMEOUT.")
+    eligibility = payload.get("eligibility") or {}
+    if eligibility.get("status") == "no_match":
+        top, threshold = eligibility.get("topScore"), eligibility.get("threshold")
+        observed = "no valid score was returned" if top is None else f"top score {top:g}"
+        raise NoRelevantTablesError(
+            f"no indexed table cleared the LLM relevance threshold ({observed}; "
+            f"threshold {threshold:g}); nothing was fetched")
+    results = payload.get("results", [])
     # ARD v0.91 identifiers are URNs. Everything downstream addresses a table by its OKF document
     # path (that is what the planner, the accessor and the fetchers all take), so map the wire form
     # back here — this client is the seam between the protocol and the engine.

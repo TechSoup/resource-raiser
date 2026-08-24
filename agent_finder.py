@@ -472,8 +472,25 @@ class Handler(BaseHTTPRequestHandler):
         # results are ardEntryProjections: only `identifier` is required, and `score`/`source`
         # ride alongside as the transport's own annotations.
         results = []
-        for h in index.search_many(texts, k, sources=req.get("sources"),
-                                   rerank=req.get("rerank", True), rerank_query=text):
+        try:
+            matches = index.search_many(texts, k, sources=req.get("sources"),
+                                        rerank=req.get("rerank", True), rerank_query=text)
+        except index.RelevanceScoringError:
+            return self._json(503, {
+                "code": "relevance_scoring_failed",
+                "error": ("table relevance scoring is temporarily unavailable; embedding "
+                          "similarity was not used as a substitute"),
+                "usage": led.snapshot(),
+            })
+        except index.NoRelevantTablesError as e:
+            return self._json(200, {
+                "@context": [ARD_CONTEXT, {"okf": OKF_NS}],
+                "results": [], "referrals": [], "pageToken": None,
+                "eligibility": {"status": "no_match", "threshold": e.threshold,
+                                "topScore": e.top_score},
+                "usage": led.snapshot(),
+            })
+        for h in matches:
             e = _entry_from_meta({"identifier": h["identifier"], "title": h["title"],
                                   "description": h.get("description", ""),
                                   "queries": h.get("queries") or []})

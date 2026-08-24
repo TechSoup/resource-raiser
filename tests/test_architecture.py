@@ -623,7 +623,8 @@ class IndexArtifactTests(unittest.TestCase):
     def test_reranker_is_low_reasoning_and_output_bounded(self):
         with mock.patch.dict(os.environ, {"ARD_RERANK_MAX_TOKENS": "321",
                                           "ARD_RERANK_REASONING_EFFORT": "low"}), \
-             mock.patch.object(driver, "ask_llm", return_value='{"ranked":[]}') as ask:
+             mock.patch.object(driver, "ask_llm",
+                               return_value='{"ranked":[{"i":0,"score":100}]}') as ask:
             index._rerank("revenue", [{"title": "Revenue"}], 1)
         self.assertEqual(ask.call_args.kwargs["max_tokens"], 321)
         self.assertEqual(ask.call_args.kwargs["reasoning_effort"], "low")
@@ -647,14 +648,45 @@ class IndexArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "relevance scoring failed"):
                 index.search("broadband in Detroit", sources=["census"])
 
-    def test_valid_empty_rerank_stays_empty(self):
-        import numpy as np
-        vectors = np.asarray([[1.0, 0.0]], dtype=np.float32)
-        metadata = [{"identifier": "sources/census/poverty.md", "title": "Poverty"}]
-        with mock.patch.object(index, "_store", return_value=(vectors, metadata)), \
-             mock.patch.object(index, "embed", return_value=vectors), \
-             mock.patch.object(index, "_rerank", return_value=[]):
-            self.assertEqual(index.search("broadband in Detroit", sources=["census"]), [])
+    def test_below_threshold_refusal_preserves_top_score(self):
+        candidates = [{"identifier": "sources/census/poverty.md", "title": "Poverty"}]
+        with mock.patch.object(driver, "ask_llm",
+                               return_value='{"ranked":[{"i":0,"score":49}]}'):
+            with self.assertRaises(index.NoRelevantTablesError) as raised:
+                index._rerank("broadband in Detroit", candidates, 1)
+        self.assertEqual(raised.exception.top_score, 49)
+        self.assertEqual(raised.exception.threshold, 50)
+
+    def test_client_reports_a_scored_refusal_for_calibration(self):
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+
+        payload = Response(json.dumps({
+            "results": [],
+            "eligibility": {"status": "no_match", "topScore": 49, "threshold": 50},
+        }).encode())
+        with mock.patch("ard_client.urllib.request.urlopen", return_value=payload):
+            with self.assertRaisesRegex(ard_client.NoRelevantTablesError,
+                                        "top score 49; threshold 50"):
+                ard_client.search("broadband in Detroit")
+
+    def test_client_distinguishes_rerank_failure_from_unreachable_service(self):
+        import io
+        from urllib.error import HTTPError
+
+        body = io.BytesIO(json.dumps({
+            "code": "relevance_scoring_failed",
+            "error": "table relevance scoring is temporarily unavailable",
+        }).encode())
+        failure = HTTPError("fixture", 503, "unavailable", {}, body)
+        with mock.patch("ard_client.urllib.request.urlopen", side_effect=failure):
+            with self.assertRaisesRegex(ard_client.RelevanceScoringError,
+                                        "relevance scoring is temporarily unavailable") as raised:
+                ard_client.search("broadband in Detroit")
+        self.assertNotIn("ARD_RERANK=0", str(raised.exception))
 
     def test_multi_query_search_embeds_once_and_unions_by_best_similarity(self):
         import numpy as np
