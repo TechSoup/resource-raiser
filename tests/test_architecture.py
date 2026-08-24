@@ -596,27 +596,63 @@ class SecCanonicalConceptTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *_): pass
 
-        key = ("789019", "AssetsFixture")
-        driver._SEC_CONCEPT_CACHE.pop(key, None)
+        company_key = "789019"
+        driver._SEC_COMPANYFACTS_CACHE.pop(company_key, None)
         throttled = HTTPError("fixture", 429, "rate limited", {"Retry-After": "0"}, None)
-        payload = Response(b'{"entityName":"MICROSOFT CORPORATION","units":{}}')
+        payload = Response(json.dumps({
+            "entityName": "MICROSOFT CORPORATION",
+            "facts": {"us-gaap": {"AssetsFixture": {"units": {}}}},
+        }).encode())
         with mock.patch("driver._pace_sec_request"), \
              mock.patch("driver.urllib.request.urlopen", side_effect=[throttled, payload]) as get:
             result = driver._sec_concept("789019", "AssetsFixture")
         self.assertEqual(result["entityName"], "MICROSOFT CORPORATION")
         self.assertEqual(get.call_count, 2)
-        self.assertIs(driver._SEC_CONCEPT_CACHE[key], result)
+        self.assertIn(company_key, driver._SEC_COMPANYFACTS_CACHE)
+        self.assertIn("/companyfacts/CIK0000789019.json", get.call_args.args[0].full_url)
 
-    def test_only_a_404_is_cached_as_an_absent_concept(self):
-        from urllib.error import HTTPError
-        key = ("789019", "MissingFixture")
-        driver._SEC_CONCEPT_CACHE.pop(key, None)
-        missing = HTTPError("fixture", 404, "not found", {}, None)
+    def test_one_companyfacts_request_serves_present_and_absent_concepts(self):
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+
+        company_key = "789019"
+        driver._SEC_COMPANYFACTS_CACHE.pop(company_key, None)
+        payload = Response(json.dumps({
+            "entityName": "MICROSOFT CORPORATION",
+            "facts": {"us-gaap": {"AssetsFixture": {"units": {"USD": []}}}},
+        }).encode())
         with mock.patch("driver._pace_sec_request"), \
-             mock.patch("driver.urllib.request.urlopen", side_effect=missing):
+             mock.patch("driver.urllib.request.urlopen", return_value=payload) as get:
+            self.assertEqual(driver._sec_concept("789019", "AssetsFixture")["entityName"],
+                             "MICROSOFT CORPORATION")
             self.assertIsNone(driver._sec_concept("789019", "MissingFixture"))
-        self.assertIn(key, driver._SEC_CONCEPT_CACHE)
-        self.assertIsNone(driver._SEC_CONCEPT_CACHE[key])
+        self.assertEqual(get.call_count, 1)
+
+    def test_companyfacts_cache_is_bounded(self):
+        import io
+
+        class Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+
+        original = driver._SEC_COMPANYFACTS_CACHE_SIZE
+        driver._SEC_COMPANYFACTS_CACHE.clear()
+        try:
+            driver._SEC_COMPANYFACTS_CACHE_SIZE = 2
+            payloads = [Response(json.dumps({"entityName": str(i), "facts": {}}).encode())
+                        for i in range(1, 4)]
+            with mock.patch("driver.urllib.request.urlopen", side_effect=payloads) as get, \
+                 mock.patch("driver._pace_sec_request"):
+                for cik in (1, 2, 3):
+                    driver._sec_companyfacts(cik)
+            self.assertEqual(get.call_count, 3)
+            self.assertEqual(list(driver._SEC_COMPANYFACTS_CACHE), ["2", "3"])
+        finally:
+            driver._SEC_COMPANYFACTS_CACHE_SIZE = original
+            driver._SEC_COMPANYFACTS_CACHE.clear()
 
 
 class IndexArtifactTests(unittest.TestCase):

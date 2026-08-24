@@ -11,7 +11,7 @@
 Run:  source the Azure keys, then  python3 driver.py "how much did Apple spend on R&D in 2023?"
 """
 import os, re, sys, json, time, threading, subprocess, urllib.request, urllib.error
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
 import yaml
 import llm            # provider-agnostic chat/embeddings (Azure OpenAI | OpenAI | Gemini)
 import ard_client
@@ -30,10 +30,11 @@ class CredentialError(Exception):
 class SourceRateLimitError(RuntimeError):
     """A publisher is temporarily throttling requests; callers should report and retry later."""
 
-# In-process cache of SEC companyconcept responses, keyed by (cik, concept). fetch_metric probes
-# ~25 candidate concepts per query and the harness may re-enter it while backtracking; caching makes
-# repeats free. None = the company doesn't report that concept (a 404), also worth remembering.
-_SEC_CONCEPT_CACHE = {}
+# One SEC `companyfacts` payload contains every us-gaap concept a company reports. Cache that
+# payload by CIK, then expose the old per-concept lookup interface to the selection code below.
+# This turns a 50-candidate measure search from ~50 SEC requests into one.
+_SEC_COMPANYFACTS_CACHE = OrderedDict()
+_SEC_COMPANYFACTS_CACHE_SIZE = int(os.getenv("SEC_COMPANYFACTS_CACHE_SIZE", "16"))
 _SEC_SEARCH_CACHE = {}      # the concept-candidate search per metric_query — identical across backtracks
 _METRIC_CACHE = {}          # whole fetch_metric result (or failure) per (metric, cik, period)
 _SEC_CONCEPT_META = None
@@ -41,10 +42,11 @@ _SEC_CONCEPT_META = None
 # multi-worker or multi-VM deployment needs a shared limiter rather than silently relying on this.
 _SEC_REQUEST_LOCK = threading.Lock()
 _SEC_NEXT_REQUEST = 0.0
+_SEC_COMPANYFACTS_LOCK = threading.Lock()
 
 
 def _pace_sec_request():
-    """Keep all concurrent concept probes in this process below eight SEC requests/second."""
+    """Keep all SEC requests in this process below eight requests/second."""
     global _SEC_NEXT_REQUEST
     with _SEC_REQUEST_LOCK:
         now = time.monotonic()
@@ -53,51 +55,62 @@ def _pace_sec_request():
         _SEC_NEXT_REQUEST = time.monotonic() + 0.125
 
 
+def _sec_companyfacts(cik):
+    """Fetch all XBRL facts for one company once; cache only success or a definitive 404."""
+    key = str(int(cik))
+    # Several ambiguity branches can ask about the same company concurrently. One lock makes the
+    # first branch fetch while the others wait for its cache entry instead of issuing duplicates.
+    with _SEC_COMPANYFACTS_LOCK:
+        if key in _SEC_COMPANYFACTS_CACHE:
+            data = _SEC_COMPANYFACTS_CACHE.pop(key)
+            _SEC_COMPANYFACTS_CACHE[key] = data               # bounded LRU: this company is hot
+            return data
+        url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):0>10}.json"
+        data, absent, last_error = None, False, None
+        for attempt in range(5):
+            try:
+                _pace_sec_request()
+                with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
+                                            timeout=30) as response:
+                    data = json.load(response)
+                break
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    absent = True
+                    break
+                last_error = error
+                if error.code in (429, 500, 502, 503) and attempt < 4:
+                    retry_after = error.headers.get("Retry-After") if error.headers else None
+                    try:
+                        delay = float(retry_after)
+                    except (TypeError, ValueError):
+                        delay = min(8.0, 0.75 * (2 ** attempt))
+                    time.sleep(delay)
+                    continue
+                if error.code == 429:
+                    raise SourceRateLimitError(
+                        "SEC is temporarily rate limiting requests; please try again shortly") from error
+                raise
+            except Exception as error:
+                last_error = error
+                if attempt < 4:
+                    time.sleep(min(4.0, 0.5 * (2 ** attempt)))
+                    continue
+                raise
+        if data is None and not absent:
+            raise RuntimeError(f"SEC companyfacts request failed for CIK {key}: {last_error}")
+        _SEC_COMPANYFACTS_CACHE[key] = data
+        while len(_SEC_COMPANYFACTS_CACHE) > max(1, _SEC_COMPANYFACTS_CACHE_SIZE):
+            _SEC_COMPANYFACTS_CACHE.popitem(last=False)
+        return data
+
+
 def _sec_concept(cik, concept):
-    """One SEC companyconcept, fetched IN-PROCESS (no subprocess) and cached. Returns the JSON, or
-    None if the company doesn't report it. Retries 429/5xx so rate-limiting isn't misread as 'not
-    reported' (which would silently drop the right concept)."""
-    key = (str(int(cik)), concept)
-    if key in _SEC_CONCEPT_CACHE:
-        return _SEC_CONCEPT_CACHE[key]
-    url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{int(cik):0>10}/us-gaap/{concept}.json"
-    data, absent, last_error = None, False, None
-    for attempt in range(5):
-        try:
-            _pace_sec_request()
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
-                                        timeout=20) as r:
-                data = json.load(r)
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                absent = True
-                break                                         # not reported -> None
-            last_error = e
-            if e.code in (429, 500, 502, 503) and attempt < 4:
-                retry_after = e.headers.get("Retry-After") if e.headers else None
-                try:
-                    delay = float(retry_after)
-                except (TypeError, ValueError):
-                    delay = min(8.0, 0.75 * (2 ** attempt))
-                time.sleep(delay)
-                continue
-            if e.code == 429:
-                raise SourceRateLimitError(
-                    "SEC is temporarily rate limiting requests; please try again shortly") from e
-            raise
-        except Exception as e:
-            last_error = e
-            if attempt < 4:
-                time.sleep(min(4.0, 0.5 * (2 ** attempt)))
-                continue
-            raise
-    if data is None and not absent:
-        raise RuntimeError(f"SEC concept request failed for {concept}: {last_error}")
-    # Cache a successful payload or a definitive 404. A 429/5xx/network failure must never become
-    # a durable lie that the company does not report the concept.
-    _SEC_CONCEPT_CACHE[key] = data
-    return data
+    """Return one us-gaap concept from the company's cached `companyfacts` payload."""
+    company = _sec_companyfacts(cik)
+    fact = (((company or {}).get("facts") or {}).get("us-gaap") or {}).get(concept)
+    return ({**fact, "entityName": company.get("entityName", "")}
+            if isinstance(fact, dict) else None)
 
 
 def ask_llm(system, user, json_mode=False, model=None, stage="other", max_tokens=None,
@@ -280,11 +293,9 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
             if meta and not any(h.get("identifier") == meta.get("identifier") for h in hits):
                 hits.insert(0, meta)
         _SEC_SEARCH_CACHE[skey] = hits
-    # Probe the candidate concepts CONCURRENTLY (each is one cached SEC call). Sequentially this was
-    # ~25 subprocess+HTTP round-trips (~14s) and dominated latency; in parallel it's a couple seconds.
-    # Modest fan-out keeps us under SEC's ~10 req/s ceiling; the cache absorbs the rest.
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        results = list(ex.map(try_hit, hits))
+    # `companyfacts` has already made every reported concept a local dictionary lookup, so there is
+    # no network fan-out to parallelize here.
+    results = [try_hit(hit) for hit in hits]
     reported = [(rank, r) for rank, r in enumerate(results) if r]
     if not reported:
         _METRIC_CACHE[mk] = msg = f"no reportable data for {metric_query!r} / {title}"
