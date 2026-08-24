@@ -41,7 +41,9 @@ def baseline_key(src, fm, path):
     variable code, a 990 field), so the mapping is per-source. Hand-authored leaves, which
     tools/enrich_descriptions.py handles, are keyed by filename."""
     if src == "census" and fm.get("variable"):
-        return f"census:{fm['variable']}"
+        dataset = fm.get("dataset") or "profile"
+        return (f"census:{fm['variable']}" if dataset == "profile"
+                else f"census:{dataset}:{fm['variable']}")
     if src == "cdc-places" and fm.get("measureid"):
         return f"cdc-places:{fm['measureid']}"
     if src == "nonprofit-990" and fm.get("field"):

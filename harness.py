@@ -2059,7 +2059,8 @@ def run(question, sites=None, assumptions=None, on_ambiguity="answer"):
                 "plan": f"ambiguous measure → {len(data['interpretations'])} interpretations answered separately",
                 "source": {"identifier": hits[0]["identifier"], "title": hits[0]["title"],
                            "publisher": hits[0].get("publisher")},
-                "candidates": [{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")}
+                "candidates": [{"identifier": h.get("identifier"), "title": h["title"],
+                                "score": h["score"], "publisher": h.get("publisher")}
                                for h in hits],
                 "data": data}
     p = planner.plan(shape, hits, ctx.get("quantifier") or "exhaustive")
@@ -2097,7 +2098,8 @@ def run(question, sites=None, assumptions=None, on_ambiguity="answer"):
                 "evidence": evidence.to_dict(), "answer_renderer": renderer,
                 "plan": planner.describe(shape, p),
                 "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
-                "candidates": [{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")} for h in hits],
+                "candidates": [{"identifier": h.get("identifier"), "title": h["title"],
+                                "score": h["score"], "publisher": h.get("publisher")} for h in hits],
                 "data": data}
 
     if p["verdict"] == "infeasible":
@@ -2168,7 +2170,8 @@ def run(question, sites=None, assumptions=None, on_ambiguity="answer"):
         "answer_renderer": renderer,
         "plan": planner.describe(shape, p),
         "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
-        "candidates": [{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")} for h in hits],
+        "candidates": [{"identifier": h.get("identifier"), "title": h["title"],
+                        "score": h["score"], "publisher": h.get("publisher")} for h in hits],
         "data": data,
     }
 
@@ -2939,7 +2942,7 @@ refused, not approximated. Refusing costs one classification; guessing costs cre
 
 <h2>Data flow</h2>
 <p>Nothing is ingested. The only thing this system stores is <em>descriptions</em>:</p>
-<pre>OKF descriptors  ──embed──▶  ARD index     (~8,900 tables, ~50 MB of vectors)
+<pre>OKF descriptors  ──embed──▶  ARD index     (~10,400 tables, ~60 MB of vectors)
                                   │
 question ─────────────────────────┘  picks ONE table
                                   │
@@ -2966,7 +2969,7 @@ fast aggregates, one query language. It costs real things too.</p>
 </table>
 <p>The trade is deliberate. Normalization is what makes the long tail unaffordable: nobody funds a
 pipeline for the 8,096th us-gaap concept, so it never arrives. A description is cheap enough to
-write for all of them, which is why this covers ~8,900 measures rather than a curated few.</p>
+write for all of them, which is why this covers ~10,400 measures rather than a curated few.</p>
 <p>The cost is equally real. Cross-source joins are the warehouse's home ground and this system's
 weak spot, and questions over a whole population need a source that can scan one — which is
 exactly what the planner checks before it answers.</p>

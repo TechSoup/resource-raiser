@@ -8,6 +8,7 @@ os.environ.setdefault("ARD_STORE", "json")       # importing harness must not cr
 
 import ard_client, connectors, docpage, driver, grants, harness, nlweb, planner, renderers, validation
 from registry import index
+from tools import check_descriptions, gen_census_okf
 from domain import Attempt, Evidence, QueryIntent
 
 
@@ -36,6 +37,7 @@ class DomainTests(unittest.TestCase):
             "value": 758376000000, "entity": "Microsoft", "metric": "assets"})
         self.assertTrue(verdict.accepted)
         self.assertIn("entity-name", [check.name for check in verdict.checks])
+
 
     def test_renderer_uses_evidence_kind_not_classifier_shape(self):
         case = FIXTURES["evidence"][0]
@@ -89,6 +91,40 @@ class DomainTests(unittest.TestCase):
         with mock.patch.object(ard_client, "_get", return_value={"ok": True}) as get:
             self.assertTrue(ard_client.health()["ok"])
             get.assert_called_once_with("/healthz")
+
+
+class CensusCatalogTests(unittest.TestCase):
+    @staticmethod
+    def _var(label):
+        return {"label": label, "concept": "fixture concept"}
+
+    def test_profiles_are_complete_before_subject_tables_fill_the_cap(self):
+        datasets = {
+            "profile": {f"DP02_{i:04d}E": self._var(f"Profile {i}") for i in range(3)},
+            "subject": {f"S{group}_{i:03d}E": self._var(f"Subject {group}-{i}")
+                        for group in (100, 200) for i in range(4)},
+        }
+        selected = gen_census_okf.select_variables(datasets, cap=5)
+        self.assertEqual([dataset for dataset, _, _ in selected],
+                         ["profile", "profile", "profile", "subject", "subject"])
+        self.assertEqual({code.split("_")[0] for _, code, _ in selected[3:]}, {"S100", "S200"})
+
+    def test_profile_cache_keys_remain_backward_compatible(self):
+        self.assertEqual(gen_census_okf._item_key("profile", "DP02_0154E"), "DP02_0154E")
+        self.assertEqual(gen_census_okf._description_key("profile", "DP02_0154E"),
+                         "census:DP02_0154E")
+        self.assertEqual(gen_census_okf._item_key("subject", "S2801_C02_014E"),
+                         "subject:S2801_C02_014E")
+
+    def test_shared_census_accessor_routes_each_leaf_to_its_dataset(self):
+        access = driver.frontmatter("sources/census/_access.md")
+        self.assertIn("{dataset}", access["access"]["operations"]["acs"]["url"])
+        self.assertEqual(access["fetch"]["params"]["dataset"], "~dataset")
+
+    def test_description_checker_uses_the_subject_cache_namespace(self):
+        self.assertEqual(check_descriptions.baseline_key(
+            "census", {"dataset": "subject", "variable": "S2801_C02_014E"}, "unused"),
+            "census:subject:S2801_C02_014E")
 
 
 class DocPageTests(unittest.TestCase):
@@ -523,6 +559,7 @@ class EndToEndRenderingTests(unittest.TestCase):
         self.assertEqual(res["data"]["value"], 16.9)          # normalized, not the raw string
         self.assertEqual(res["data"]["unit"], "%")
         self.assertNotEqual(res["answer_renderer"], "llm-fallback")
+        self.assertEqual(res["candidates"][0]["identifier"], "sources/census/dp03-0128e.md")
 
     def test_treasury_point_reaches_the_renderer_formatted(self):
         res = self._answer(

@@ -1,7 +1,7 @@
 ---
 type: Data Source
 title: US Census — American Community Survey (access)
-description: Demographic and socioeconomic estimates from the Census Bureau ACS 5-year API, used by nonprofits for community needs assessment.
+description: Demographic and socioeconomic estimates from the Census Bureau ACS 5-year Data Profile and Subject APIs, used by nonprofits for community needs assessment.
 resource: https://api.census.gov/data/
 publisher: census.gov
 trust:
@@ -12,7 +12,7 @@ access:
   operations:
     acs:
       method: GET
-      url: "https://api.census.gov/data/2022/acs/acs5/profile?get={get}&for={geo}&key={key}"
+      url: "https://api.census.gov/data/2022/acs/acs5/{dataset}?get={get}&for={geo}&key={key}"
       capability:
         grain: county
         entity_kind: fips
@@ -22,7 +22,7 @@ access:
 # The leaf supplies `get`/`variable`/`key`; this says how to call, read, and shape the answer.
 fetch:
   op: acs
-  params: {geo: $geo}          # $geo = the entity's Census geography (native place names resolved)
+  params: {dataset: ~dataset, geo: $geo} # dataset is pinned by the leaf; geo is resolved at query time
   rows: matrix                 # response is an array-of-arrays: header row + one data row
   quirk: acs_pe                # ACS percent-column (E vs PE) + jam-sentinel handling
   fields:

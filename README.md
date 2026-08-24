@@ -87,13 +87,13 @@ the code is provider-agnostic (see [`llm.py`](llm.py)). Override the model with 
 ## What the first run builds
 
 The repo ships the **code, the generators, and each source's `_access.md` description** — but not
-the ~8,900 machine-generated per-table descriptors, which are rebuilt locally so the repo stays
+the ~10,400 machine-generated per-table descriptors, which are rebuilt locally so the repo stays
 small and self-describing. On first launch only, `run.sh` runs the generators, then embeds the
 ARD index:
 
 ```
 tools/gen_sec_okf.py       # SEC EDGAR us-gaap concepts, from the FASB taxonomy (~8,100 tables)
-tools/gen_census_okf.py    # Census ACS Data Profile variables (~510)
+tools/gen_census_okf.py    # Census ACS Data Profile + Subject variables (2,000)
 tools/gen_treasury_okf.py  # Treasury FiscalData series (~180)
 tools/gen_cdc_okf.py       # CDC PLACES measures (~40)
 tools/gen_np_okf.py        # IRS 990 nonprofit fields (~57)
@@ -325,7 +325,7 @@ run.sh             build (first run) + serve
   models. Set `ARD_RERANK=0` (embedding-only discovery is fast and accurate). See [SETUP.md](SETUP.md).
 - **Gemini stops after a few questions** — the free tier is ~20 requests/day (~3-4 questions).
   Enable billing. See [SETUP.md](SETUP.md).
-- **First run is slow** — expected (~10 min): it's embedding ~8,900 table descriptors. It's
+- **First run is slow** — expected (~10 min): it's embedding ~10,400 table descriptors. It's
   cached; later runs are fast, and an interrupted build resumes. Rebuild with
   `python3 registry/index.py build`. To shrink it, park the SEC leaves (see [SETUP.md](SETUP.md)).
 - **Grant-graph questions return nothing** — run `python3 tools/grants_download.py` (and
