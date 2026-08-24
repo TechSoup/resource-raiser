@@ -25,6 +25,12 @@ be voted on; a stated rationale can be checked. When either of us reports a
 benchmark or "the running system does X", the other reproduces it before it
 becomes a decision.
 
+**Hand off when you finish, without being asked.** If the work involved a
+judgement the diff does not show, left anything unverified, or touches code the
+other agent works in, write a `kind: handoff` note. Do not block on it: hold the
+baton if you are stopping, or snapshot the diff and carry on if you are not. Skip
+it only for formatting, typos, or a mechanical change that involved no choice.
+
 **Commit promptly.** Uncommitted work is the only thing an overwrite destroys
 outright; anything CI covers costs minutes to redo. Know which parts of this repo
 CI does *not* cover — those are where a clobbered edit is silent.
