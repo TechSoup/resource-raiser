@@ -11,11 +11,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
+
+def configure_azure_monitor():
+    """Enable Azure Monitor's OpenTelemetry distribution when App Service supplies a connection."""
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if not connection_string:
+        return False
+    try:
+        from azure.monitor.opentelemetry import configure_azure_monitor as configure
+    except ImportError as exc:  # fail startup instead of silently losing production telemetry
+        raise RuntimeError(
+            "APPLICATIONINSIGHTS_CONNECTION_STRING is set but azure-monitor-opentelemetry is missing"
+        ) from exc
+    configure(connection_string=connection_string, logger_name="resource_raiser")
+    return True
+
+
+# Azure's distro must instrument Starlette before the application class is imported/constructed.
+AZURE_MONITOR_ENABLED = configure_azure_monitor()
 
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
@@ -34,10 +53,14 @@ from source_clients import AsyncSourceClients
 
 
 class AsyncTelemetryExporter:
-    """Bounded, non-blocking request telemetry with an optional async HTTP sink."""
-    def __init__(self, http, endpoint=None, max_queue=1024):
+    """Bounded request telemetry exported away from the request task."""
+    def __init__(self, http, endpoint=None, max_queue=1024, azure_monitor=False):
         self.http = http
         self.endpoint = endpoint or os.getenv("TELEMETRY_EXPORT_URL")
+        self.azure_monitor = azure_monitor
+        self.logger = logging.getLogger("resource_raiser.telemetry")
+        if azure_monitor:
+            self.logger.setLevel(logging.INFO)
         self.queue = asyncio.Queue(maxsize=max_queue)
         self.recent = deque(maxlen=100)
         self.exported = self.dropped = 0
@@ -59,6 +82,12 @@ class AsyncTelemetryExporter:
             try:
                 if self.endpoint:
                     await self.http.post(self.endpoint, json=event, timeout=10)
+                elif self.azure_monitor:
+                    # Azure Monitor's logging instrumentation exports this record. It runs in the
+                    # bounded exporter task, never in the latency-sensitive request task.
+                    self.logger.info(json.dumps({"event": "resource_raiser.request", **event},
+                                                separators=(",", ":")))
+                    self.recent.append(event)
                 else:
                     self.recent.append(event)
                 self.exported += 1
@@ -69,6 +98,11 @@ class AsyncTelemetryExporter:
 
     async def close(self):
         if self._task:
+            try:
+                await asyncio.wait_for(
+                    self.queue.join(), float(os.getenv("TELEMETRY_DRAIN_SECONDS", "5")))
+            except asyncio.TimeoutError:
+                self.dropped += self.queue.qsize()
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
 
@@ -207,9 +241,11 @@ def create_app(engine=harness.run, clients_factory=AsyncSourceClients):
     async def lifespan(application):
         application.state.started = time.time()
         application.state.instance_id = os.getenv("WEBSITE_INSTANCE_ID") or uuid.uuid4().hex[:12]
+        application.state.azure_monitor = AZURE_MONITOR_ENABLED
         application.state.clients = await clients_factory().start()
         application.state.telemetry = await AsyncTelemetryExporter(
-            application.state.clients.http).start()
+            application.state.clients.http,
+            azure_monitor=application.state.azure_monitor).start()
         application.state.lag = await LoopLag().start()
         application.state.active = 0
         application.state.progress_queues = 0
@@ -313,7 +349,8 @@ def create_app(engine=harness.run, clients_factory=AsyncSourceClients):
                         bucket["calls"] += value.get("calls", 0)
                         bucket["tokens"] += value.get("tokens", 0)
                         bucket["cost_usd"] += value.get("cost_usd", 0.0)
-                state.telemetry.record({"trace_id": trace_id, "status": terminal,
+                state.telemetry.record({"trace_id": trace_id, "instance_id": state.instance_id,
+                    "status": terminal,
                     "latency_ms": round((time.monotonic() - started) * 1000, 1),
                     "streaming": spec["streaming"], "usage": usage,
                     "discovery_usage": discovery})
@@ -347,6 +384,7 @@ def create_app(engine=harness.run, clients_factory=AsyncSourceClients):
         if pool is not None and hasattr(pool, "get_stats"):
             grant_stats = pool.get_stats()
         healthy = bool(finder_health.get("ok")) and state.clients.descriptor_count > 0
+        sec = getattr(state.clients, "sec", None)
         payload = {"ok": healthy, "tables": int(finder_health.get("entries") or
                    state.clients.descriptor_count), "descriptors_loaded": state.clients.descriptor_count,
             "agent_finder": bool(finder_health.get("ok")),
@@ -356,7 +394,9 @@ def create_app(engine=harness.run, clients_factory=AsyncSourceClients):
             "event_loop_lag_ms": round(state.lag.current_ms, 2),
             "event_loop_lag_max_ms": round(state.lag.max_ms, 2),
             "provider_permits": state.clients.permits.snapshot(), "grant_pool": grant_stats,
-            "telemetry": state.telemetry.snapshot()}
+            "telemetry": state.telemetry.snapshot(),
+            "azure_monitor": state.azure_monitor,
+            "sec_pacing": sec.snapshot() if sec and hasattr(sec, "snapshot") else {}}
         return JSONResponse(payload, 200 if healthy else 503)
 
     async def health(request):
@@ -455,6 +495,11 @@ def create_app(engine=harness.run, clients_factory=AsyncSourceClients):
     application = Starlette(routes=routes, lifespan=lifespan)
     application.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
                                allow_headers=["*"], expose_headers=["X-Request-ID", "Retry-After"])
+    if AZURE_MONITOR_ENABLED:
+        # Starlette is not one of Azure Monitor's bundled framework instrumentations. Its generic
+        # ASGI middleware is therefore registered explicitly after the global providers exist.
+        from opentelemetry.instrumentation.asgi import OpenTelemetryMiddleware
+        application.add_middleware(OpenTelemetryMiddleware)
     return application
 
 

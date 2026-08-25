@@ -14,6 +14,7 @@ import harness
 import llm
 from query_context import ProviderPermits, QueryBudget, QueryContext
 import runtime
+from domain import Evidence
 
 
 def context(**kwargs):
@@ -22,6 +23,39 @@ def context(**kwargs):
 
 
 class StructuredConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_comparison_answer_is_synthesized_from_question_and_table(self):
+        ctx = context()
+        table = {"shape": "comparison", "series": [
+            {"label": "A", "value": 10}, {"label": "B", "value": 20}],
+            "difference": 10, "source": "Example"}
+        evidence = Evidence(kind="comparison", source="Example", identifier="example",
+                            payload=table, measure="revenue")
+        with mock.patch.object(harness.TK, "synthesize_async",
+                               mock.AsyncMock(return_value="B has more revenue.")) as synthesize:
+            answer, renderer = await harness._present_async(
+                "Compare the revenue of A and B", evidence, context=ctx)
+        self.assertEqual(answer, "B has more revenue.")
+        self.assertEqual(renderer, "llm-synthesis")
+        expected = {**table, "evidence_kind": "comparison", "measure": "revenue"}
+        synthesize.assert_awaited_once_with(
+            "Compare the revenue of A and B", expected, context=ctx)
+
+    async def test_point_answer_also_uses_llm_synthesis(self):
+        ctx = context()
+        evidence = Evidence(kind="point", source="Census", identifier="example",
+                            payload={"value": 12.3}, entity={"label": "Detroit"},
+                            measure="poverty rate", value=12.3, unit="percent")
+        with mock.patch.object(harness.TK, "synthesize_async",
+                               mock.AsyncMock(return_value="Detroit's poverty rate is 12.3%.")) as synthesize:
+            answer, renderer = await harness._present_async(
+                "What is Detroit's poverty rate?", evidence, context=ctx)
+        self.assertEqual(answer, "Detroit's poverty rate is 12.3%.")
+        self.assertEqual(renderer, "llm-synthesis")
+        supplied = synthesize.await_args.args[1]
+        self.assertEqual(supplied["entity"], {"label": "Detroit"})
+        self.assertEqual(supplied["measure"], "poverty rate")
+        self.assertEqual(supplied["source"], "Census")
+
     async def test_task_group_executes_concurrently_but_consumes_plan_order(self):
         started = 0
         all_started = asyncio.Event()
@@ -166,6 +200,23 @@ class StructuredConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 "attribute": "value", "entities": ["A", "B"]}, "comparison", context=ctx)
         self.assertEqual(result["highest"], "B")
         self.assertEqual(before, {thread.ident for thread in threading.enumerate()})
+
+    async def test_comparison_fanout_preserves_period_and_currency(self):
+        ctx = context()
+        results = [
+            {"value": 10, "source": "IRS 990", "data": {
+                "value_usd": 10, "period": "FY2023"}},
+            {"value": 20, "source": "IRS 990", "data": {
+                "value_usd": 20, "period": "FY2024"}},
+        ]
+        with mock.patch.object(harness, "retrieve_for", mock.AsyncMock(side_effect=results)):
+            result = await harness._run_fanout_async("compare", {
+                "attribute": "revenue", "entities": ["A", "B"]}, "comparison", context=ctx)
+        self.assertEqual(result["series"][0]["period"], "FY2023")
+        self.assertEqual(result["series"][1]["period"], "FY2024")
+        self.assertEqual(result["unit"], "USD")
+        self.assertEqual(result["currency"], "USD")
+        self.assertTrue(result["alignment_warnings"])
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ Run as a CLI; the ASGI application in app.py owns HTTP serving:
 """
 import asyncio, os, sys, json, math, re
 import runtime
-import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime, docpage
+import driver, ard_client, planner, store, llm, nlweb, connectors, runtime, docpage
 from domain import Attempt, Clarification, ClarificationOption, Evidence, QueryIntent
 from core import Toolkit
 from query_context import QueryContext
@@ -278,7 +278,7 @@ def _discovery_system(src_list):
             "- retrieval runs on the attribute, so the general measure is returned instead.\n"
             "Analyze a data question. Return JSON with: 'entity' (the single company/nonprofit/place/org "
             "it is about, or empty), 'entities' (ALL named entities if it compares several, else []), "
-            "'type' (one of: company, nonprofit, place, org, none), 'attribute' (the metric/measure asked, "
+            "'type' (a short lowercase noun phrase naming the KIND of thing the entity is, using the most specific term that fits - e.g. 'company', 'educational organization', 'government agency', 'nonprofit', 'person', 'place'; 'none' when the question names no entity at all), 'attribute' (the metric/measure asked, "
             "'canonical_entity' (the entity's full commonly-used name, specific enough to identify it "
             "uniquely, disambiguated using THE QUESTION'S CONTEXT: 'St. Jude' in a question about NIH "
             "research funding is 'St. Jude Children's Research Hospital'; 'Stanford' is 'Stanford "
@@ -876,8 +876,8 @@ def _ambiguity_evidence(intent, hit, clarification, payload):
                     warnings=["the requested measure has multiple materially different interpretations"])
 
 
-def _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
-                      ledger, discovery, attempts=None):
+async def _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
+                            ledger, discovery, attempts=None, *, context):
     """Return Answer or Clarification from the same fetched alternatives."""
     hit = hits[0] if hits else {"identifier": "", "title": "", "publisher": ""}
     public_options = clarification.to_dict()["options"]
@@ -900,9 +900,9 @@ def _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
                 "answer_renderer": None, "clarification": clarification.to_dict(),
                 "plan": f"material ambiguity → ask the caller to choose among {len(public_options)} fetched values"}
     if on_ambiguity == "all":
-        return {**base, "status": "answered", "answer_renderer": "alternatives",
-                "answer": (f"“{clarification.attribute}” has {len(public_options)} materially different "
-                           "interpretations; each fetched answer is shown below."),
+        answer, renderer = await _present_async(question, evidence, context=context)
+        return {**base, "status": "answered", "answer_renderer": renderer,
+                "answer": answer, "usage": ledger.snapshot(),
                 "plan": f"material ambiguity → {len(public_options)} interpretations answered separately"}
 
     # Non-interactive clients receive a usable answer plus every alternative in structured data.
@@ -914,11 +914,10 @@ def _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
                      value=selected.value, unit=selected.unit,
                      currency="USD" if str(selected.unit or "").upper() == "USD" else None,
                      period=selected.period, warnings=evidence.warnings)
-    rendered = renderers.render(point)
-    answer = rendered.text if rendered else f"{selected.label}: {selected.value} {selected.unit or ''}".strip()
+    answer, renderer = await _present_async(question, point, context=context)
     payload["selected"] = selected.id
     return {**base, "status": "answered", "answer": answer,
-            "answer_renderer": rendered.renderer if rendered else "dominant-interpretation",
+            "usage": ledger.snapshot(), "answer_renderer": renderer,
             "evidence": point.to_dict(),
             "plan": f"material ambiguity → answer the preferred interpretation and expose {len(public_options) - 1} alternatives"}
 
@@ -963,10 +962,16 @@ async def discover_async(question, sites=None, assumptions=None, *, context):
             ctx.update(entity_status="resolved", canonical_entity=applied["entity"],
                        entity_candidates=[])
         ctx = _normalize_shape(ctx)
-    if ctx.get("type") == "place" and not (ctx.get("entity") or "").strip():
+    if not (ctx.get("entity") or "").strip():
         recovered = _recover_place(question)
         if recovered:
             ctx["entity"] = recovered
+    await _asay(context, "entity_detected", entity=ctx.get("entity") or "",
+                canonical=ctx.get("canonical_entity") or "", type=ctx.get("type") or "none",
+                status=ctx.get("entity_status") or "none")
+    await _asay(context, "property_identified", attribute=ctx.get("attribute") or "",
+                interpretations=ctx.get("interpretations") or [],
+                period=ctx.get("period") or "latest", shape=ctx.get("shape") or "point")
     sources = [source for source in (ctx.get("sources") or []) if source in SOURCE_TYPES]
     sources = _ensure_grant_graph(question, sources or list(SOURCE_TYPES))
     if sites:
@@ -978,8 +983,11 @@ async def discover_async(question, sites=None, assumptions=None, *, context):
         sources = list(SOURCE_TYPES)
     await _asay(context, "plan", entity=ctx.get("entity") or "", type=ctx.get("type") or "none",
                 attribute=ctx.get("attribute") or "", period=ctx.get("period") or "latest",
-                sources=sources)
-    resolvable = ctx.get("type") in ("company", "nonprofit", "place")
+                shape=ctx.get("shape") or "point", sources=sources)
+    # Do NOT gate on a fixed type vocabulary: the classifier returns an open noun phrase.
+    # What this actually asks is whether a specific named entity was identified.
+    resolvable = bool((ctx.get("entity") or "").strip()) and \
+        (ctx.get("entity_status") or "").strip().lower() != "none"
     attribute = ctx.get("attribute") or ""
     readings = [reading for reading in (ctx.get("interpretations") or []) if reading]
     if not attribute and readings:
@@ -1000,7 +1008,7 @@ async def discover_async(question, sites=None, assumptions=None, *, context):
         if hit["identifier"] not in seen:
             seen.add(hit["identifier"])
             hits.append(hit)
-    await _asay(context, "candidates", items=[
+    await _asay(context, "candidates", count=len(hits), items=[
         {"title": hit["title"], "score": hit["score"], "publisher": hit.get("publisher")}
         for hit in hits[:6]])
     return ctx, hits
@@ -1042,6 +1050,8 @@ async def _link_records_async(name, question="", kind="", *, context):
         raise
     except Exception:
         candidates = []
+    await _asay(context, "entity_mapping", phase="candidates", mention=name,
+                count=len(candidates))
     if not candidates:
         cache[key] = []
         return []
@@ -1081,10 +1091,27 @@ async def _link_entity_async(ctx, *, context):
     status = (ctx.get("entity_status") or "").strip().lower()
     canonical = (ctx.get("canonical_entity") or "").strip()
     mention = (ctx.get("entity") or "").strip()
+    cache = context.memo.setdefault("linked_entities", {})
+    cache_key = (status, canonical, mention, (ctx.get("entity_qid") or "").strip(),
+                 ctx.get("question") or "", ctx.get("type") or "")
+    if cache_key in cache:
+        return cache[cache_key]
+
+    async def finish(result, phase, **data):
+        cache[cache_key] = result
+        await _asay(context, "entity_mapping", phase=phase, mention=mention,
+                    canonical=canonical, **data)
+        return result
+
     if status in ("none", "ambiguous"):
-        return [None]
+        reason = "no named entity" if status == "none" else "entity needs clarification"
+        return await finish([None], "skipped", reason=reason)
     import resolver
     qid = (ctx.get("entity_qid") or "").strip()
+    if not (canonical or mention or qid):
+        return await finish([None], "skipped", reason="no named entity")
+    await _asay(context, "entity_mapping", phase="searching", mention=mention,
+                canonical=canonical, qid=qid)
     if qid:
         try:
             label, keys = await resolver.claims_async(qid, context=context)
@@ -1093,15 +1120,21 @@ async def _link_entity_async(ctx, *, context):
         except Exception:
             label, keys = None, {}
         if label or keys:
-            return [{"qid": qid, "label": label or canonical or qid,
-                     "name": canonical or label or qid, "keys": keys}, None]
-    if not (canonical or mention):
-        return [None]
+            entity = {"qid": qid, "label": label or canonical or qid,
+                      "name": canonical or label or qid, "keys": keys}
+            return await finish([entity, None], "mapped", label=entity["label"], qid=qid,
+                                key_types=sorted(keys))
     found = await _link_records_async(canonical or mention, ctx.get("question") or "",
                                       ctx.get("type") or "", context=context)
     if len(found) > 1:
-        return found
-    return [found[0], None] if found else [None]
+        return await finish(found, "ambiguous", count=len(found),
+                            labels=[entity.get("label") for entity in found])
+    if found:
+        entity = found[0]
+        return await finish([entity, None], "mapped", label=entity.get("label") or mention,
+                            qid=entity.get("qid") or "",
+                            key_types=sorted((entity.get("keys") or {}).keys()))
+    return await finish([None], "not_found", reason="no matching crosswalk record")
 
 
 async def _place_levels_async(entity, *, context):
@@ -1397,10 +1430,18 @@ async def _search_async(question, ctx=None, hits=None, *, context):
 
 
 async def _present_async(question, evidence, *, context):
-    rendered = renderers.render(evidence)
-    if rendered:
-        return rendered.text, rendered.renderer
-    return await TK.synthesize_async(question, evidence.payload, context=context), "llm-fallback"
+    data = dict(evidence.payload)
+    metadata = {
+        "evidence_kind": evidence.kind, "source": evidence.source,
+        "entity": evidence.entity, "measure": evidence.measure, "unit": evidence.unit,
+        "currency": evidence.currency, "period": evidence.period,
+        "warnings": evidence.warnings,
+    }
+    for key, value in metadata.items():
+        if value not in (None, "", []):
+            data.setdefault(key, value)
+    answer = await TK.synthesize_async(question, data, context=context)
+    return answer.strip(), "llm-synthesis"
 
 
 async def retrieve_for(question, *, context):
@@ -1629,8 +1670,15 @@ async def _run_fanout_async(question, ctx, shape, *, context):
         async def sub_branch(label, subquestion, branch_context):
             try:
                 result = await retrieve_for(subquestion, context=branch_context)
+                leaf = result.get("data") or {}
                 return {"label": str(label), "value": result.get("value"),
-                        "source": result.get("source")}
+                        "source": result.get("source"),
+                        "period": (leaf.get("period") or leaf.get("year") or
+                                   leaf.get("fiscal_year")),
+                        "unit": (leaf.get("unit") or leaf.get("units") or
+                                 ("USD" if "value_usd" in leaf else None)),
+                        "currency": (leaf.get("currency") or
+                                     ("USD" if "value_usd" in leaf else None))}
             except (runtime.Refused, runtime.Refused) as exc:
                 return {"label": str(label), "value": None, "error": str(exc)}
         series = await _ordered(context, [
@@ -1643,10 +1691,19 @@ async def _run_fanout_async(question, ctx, shape, *, context):
         raise runtime.Refused(f"could not retrieve comparable values for {shape}")
     out = {"question": question, "shape": shape, "attribute": attribute, "series": series,
            "source": hit["title"] if hit else got[0].get("source")}
+    units = {item.get("unit") for item in got if item.get("unit")}
+    currencies = {item.get("currency") for item in got if item.get("currency")}
+    if len(units) == 1:
+        out["unit"] = units.pop()
+    if len(currencies) == 1:
+        out["currency"] = currencies.pop()
     if shape == "comparison":
         best = max(got, key=lambda item: item["value"])
         out.update({"highest": best["label"],
                     "difference": round(best["value"] - min(item["value"] for item in got), 2)})
+        periods = {str(item.get("period")) for item in got if item.get("period")}
+        if len(periods) > 1:
+            out["alignment_warnings"] = ["the compared figures cover different reporting periods"]
     else:
         first, last = got[0], got[-1]
         out["change"] = round(last["value"] - first["value"], 2)
@@ -1891,9 +1948,9 @@ async def run(question, sites=None, assumptions=None, on_ambiguity="answer", *, 
             if clarification:
                 trace = [attempt for option in data.get("interpretations") or []
                          for attempt in option.get("attempts") or []]
-                return _ambiguity_result(
+                return await _ambiguity_result(
                     question, ctx, hits, intent, clarification, on_ambiguity,
-                    context.usage_ledger, context.discovery_ledger, trace)
+                    context.usage_ledger, context.discovery_ledger, trace, context=context)
             hit = hits[0]
             evidence, attempts = await _admit_async(intent, hit, data, context=context)
             answer, renderer = await _present_async(question, evidence, context=context)
@@ -1961,9 +2018,9 @@ async def run(question, sites=None, assumptions=None, on_ambiguity="answer", *, 
                 ordered_hits = [hit] + [item for item in hits
                                         if item.get("identifier") != hit.get("identifier")]
                 trace = [item.to_dict() for item in ((state or {}).get("_attempts") or [])]
-                return _ambiguity_result(
+                return await _ambiguity_result(
                     question, ctx, ordered_hits, intent, clarification, on_ambiguity,
-                    context.usage_ledger, context.discovery_ledger, trace)
+                    context.usage_ledger, context.discovery_ledger, trace, context=context)
             if clarification:
                 data["ambiguity"] = {"attribute": clarification.attribute,
                                      "reason": resolution.get("reason"),
@@ -2507,15 +2564,63 @@ def _nlweb_text(ev):
     k = ev.get("kind")
     if k == "status":
         return f"{ev.get('icon','')} {ev.get('msg','')}".strip()
+    if k == "entity_detected":
+        mention, canonical = ev.get("entity") or "", ev.get("canonical") or ""
+        status, kind = ev.get("status") or "none", ev.get("type") or "none"
+        if not mention and not canonical:
+            return "🏷️ Entity detection: no named entity"
+        label = f"“{mention}”"
+        if canonical and canonical.casefold() != mention.casefold():
+            label += f" → {canonical}"
+        suffix = f" · {kind}" + (f" · {status}" if status not in ("", "resolved") else "")
+        return "🏷️ Entity detection: " + label + suffix
+    if k == "property_identified":
+        properties = ([ev.get("attribute")] if ev.get("attribute") else
+                      list(ev.get("interpretations") or []))
+        label = " / ".join(str(item) for item in properties[:3] if item) or "not identified"
+        return (f"🔎 Property identification: {label} · {ev.get('period') or 'latest'}"
+                f" · {ev.get('shape') or 'point'}")
     if k == "plan":
-        bits = [b for b in (f"entity {ev.get('entity')}" if ev.get("entity") else "",
-                            f"measure {ev.get('attribute')}" if ev.get("attribute") else "",
-                            f"period {ev.get('period')}" if ev.get("period") else "") if b]
-        return "🧭 " + " · ".join(bits) + f" · scanning {len(ev.get('sources') or [])} sources"
+        sources = list(ev.get("sources") or [])
+        listed = ", ".join(sources[:4]) + (", …" if len(sources) > 4 else "")
+        family_label = "source family" if len(sources) == 1 else "source families"
+        return (f"🧭 Initial plan: {ev.get('shape') or 'point'} · {ev.get('period') or 'latest'}"
+                f" · search {len(sources)} {family_label}" + (f" ({listed})" if listed else ""))
     if k == "candidates":
-        return "📚 ARD returned " + str(len(ev.get("items") or [])) + " candidate tables"
+        items = list(ev.get("items") or [])
+        summaries = []
+        for item in items[:3]:
+            score = item.get("score")
+            score_text = f"{score:g}" if isinstance(score, (int, float)) else str(score or "?")
+            summaries.append(f"{item.get('title') or 'untitled'} ({score_text}, "
+                             f"{item.get('publisher') or 'unknown'})")
+        count = ev.get("count") if ev.get("count") is not None else len(items)
+        table_label = "candidate table" if count == 1 else "candidate tables"
+        return (f"📚 ARD summary: {count} {table_label}" +
+                (" · top: " + "; ".join(summaries) if summaries else ""))
     if k == "plan_chosen":
-        return "🧭 " + (ev.get("summary") or ev.get("verdict") or "")
+        return "🧭 Execution plan: " + (ev.get("summary") or ev.get("verdict") or "")
+    if k == "entity_mapping":
+        phase, name = ev.get("phase"), ev.get("canonical") or ev.get("mention") or "the entity"
+        if phase == "searching":
+            return f"🔗 Entity identifier mapping: searching crosswalk records for “{name}”…"
+        if phase == "candidates":
+            count = ev.get("count") or 0
+            return (f"🔗 Entity identifier mapping: {count} crosswalk candidate"
+                    f"{'s' if count != 1 else ''} found; checking against the full question…")
+        if phase == "mapped":
+            identity = ev.get("label") or name
+            if ev.get("qid"):
+                identity += f" · Wikidata {ev['qid']}"
+            return "🔗 Entity identifier mapping: crosswalk match · " + identity
+        if phase == "ambiguous":
+            return (f"🔗 Entity identifier mapping: {ev.get('count') or 0} plausible records remain"
+                    "; clarification is needed")
+        if phase == "skipped":
+            return "⏭️ Entity identifier mapping: skipped · " + (ev.get("reason") or "not needed")
+        if phase == "not_found":
+            return ("⚠️ Entity identifier mapping: no crosswalk found for “" + name +
+                    "”; source-specific identifiers will be tried")
     if k == "resolve":
         return f"🧩 resolved “{ev.get('mention','')}” → {ev.get('label','')}"
     return ""

@@ -62,6 +62,7 @@ export CENSUS_API_KEY=""
 # no prose — so reasoning and output are deliberately bounded. On the 193-case routing corpus the
 # defaults cut measured discovery cost from about $0.00051 to $0.00013 per question.
 # export RERANK_MODEL="openai/gpt-oss-20b"     # default: falls back to CHAT_MODEL
+# export SYNTHESIS_MODEL="openai/gpt-4o"       # optional: high-quality final prose model
 # export ARD_RERANK_REASONING_EFFORT="low"     # default: low; finder needs only compact indices
 # export ARD_RERANK_MAX_TOKENS=400              # hard cap for the finder JSON, not answer prose
 #

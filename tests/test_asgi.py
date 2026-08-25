@@ -26,6 +26,7 @@ class Http:
 class Clients:
     def __init__(self):
         self.http = Http(); self.descriptor_count = 10425; self.grants = None
+        self.sec = None
         self.permits = ProviderPermits({"llm": 8, "finder": 8})
 
     async def start(self): return self
@@ -126,8 +127,38 @@ class AsgiTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(payload["tables"], 10425)
         for key in ("event_loop_lag_ms", "active_requests", "request_queue_depth",
-                    "provider_permits", "telemetry", "uptime_seconds", "instance_id"):
+                    "provider_permits", "telemetry", "uptime_seconds", "instance_id",
+                    "azure_monitor", "sec_pacing"):
             self.assertIn(key, payload)
+
+    async def test_telemetry_carries_instance_and_request_ids(self):
+        response = await self.client.post("/ask", json={"query": "trace", "streaming": False})
+        await asyncio.wait_for(self.application.state.telemetry.queue.join(), 1)
+        event = self.application.state.telemetry.recent[-1]
+        self.assertEqual(event["trace_id"], response.headers["X-Request-ID"])
+        self.assertEqual(event["instance_id"], self.application.state.instance_id)
+
+    async def test_azure_monitor_configuration_selects_only_application_logger(self):
+        with mock.patch.dict(os.environ, {"APPLICATIONINSIGHTS_CONNECTION_STRING": "fixture"}), \
+             mock.patch("azure.monitor.opentelemetry.configure_azure_monitor") as configure:
+            self.assertTrue(asgi.configure_azure_monitor())
+        configure.assert_called_once_with(
+            connection_string="fixture", logger_name="resource_raiser")
+
+    async def test_azure_request_event_is_written_by_bounded_exporter_task(self):
+        exporter = asgi.AsyncTelemetryExporter(Http(), azure_monitor=True)
+        with mock.patch.object(exporter.logger, "info") as info:
+            await exporter.start()
+            exporter.record({"trace_id": "trace-1"})
+            await asyncio.wait_for(exporter.queue.join(), 1)
+            await exporter.close()
+        self.assertIn('"trace_id":"trace-1"', info.call_args.args[0])
+
+    async def test_azure_mode_wraps_starlette_with_asgi_instrumentation(self):
+        with mock.patch.object(asgi, "AZURE_MONITOR_ENABLED", True):
+            application = asgi.create_app(engine=mock.AsyncMock(), clients_factory=Clients)
+        self.assertIn("OpenTelemetryMiddleware",
+                      [item.cls.__name__ for item in application.user_middleware])
 
     async def test_ordinary_refusal_does_not_kill_server(self):
         async def refuses(question, context=None, **kwargs):

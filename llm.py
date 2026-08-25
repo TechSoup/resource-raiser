@@ -162,6 +162,11 @@ def rerank_model():
     return os.getenv("RERANK_MODEL") or chat_model()
 
 
+def synthesis_model():
+    """High-quality prose model, independently configurable from classification and reranking."""
+    return os.getenv("SYNTHESIS_MODEL") or chat_model()
+
+
 def embed_model():
     if provider() == "azure":
         return os.getenv("EMBED_DEPLOYMENT", "text-embedding-3-large")

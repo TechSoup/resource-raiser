@@ -49,6 +49,10 @@ _SYNTHESIS_SYSTEM = (
     "If the data has a 'series' with a 'change'/'change_pct' (a TIMESERIES), report the FIRST "
     "and LAST values and the change between them, quoting those computed fields verbatim. Never "
     "add the periods together — a sum across years is not a revenue figure. "
+    "If the data has shape 'comparison', answer the user's comparison directly from its 'series' "
+    "table. Name every row by its label, preserve each value and reporting period, identify the "
+    "highest row, and use the supplied 'difference' rather than recomputing it. This is a comparison "
+    "between entities, NOT movement over time. Never replace a missing period with the word 'None'. "
     "If the data has 'alignment_warnings' (a cross-source join whose figures are NOT strictly "
     "comparable), you MUST present the computed figure as approximate and state the reason in plain "
     "words. Never report such a result as a clean precise statistic. "
@@ -66,4 +70,4 @@ class Toolkit:
         import llm
         return await llm.chat_async(
             _SYNTHESIS_SYSTEM, json.dumps({"question": question, "data": data}),
-            context=context, stage="synthesize")
+            context=context, model=llm.synthesis_model(), stage="synthesize")

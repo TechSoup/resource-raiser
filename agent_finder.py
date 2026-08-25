@@ -40,7 +40,7 @@ SELF = os.getenv("AGENT_FINDER_SELF") or f"http://{'127.0.0.1' if HOST in ('0.0.
 # it embeds the query and (unless rerank is off) runs an LLM over the candidates, so every call
 # spends real credits. Exposed publicly that is an open tab on someone else's card, which is why
 # the cap applies to /search specifically rather than to the whole service.
-SEARCH_LIMIT_PER_DAY = int(os.getenv("SEARCH_LIMIT_PER_DAY", "500"))     # 0 disables
+SEARCH_LIMIT_PER_DAY = int(os.getenv("SEARCH_LIMIT_PER_DAY", "10000"))   # 0 disables
 TRUST_PROXY = os.getenv("TRUST_PROXY", "0").lower() in ("1", "true", "yes")
 _QUOTA = {}  # event-loop-owned; quota_ok contains no await, so each update is one critical section
 

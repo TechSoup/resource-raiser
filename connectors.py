@@ -54,7 +54,10 @@ def _evidence(intent, hit, data, attempt):
     currency = data.get("currency")
     if not currency and isinstance(unit, str) and len(unit) == 3 and unit.isalpha():
         currency = unit.upper()
-    kind = "status" if intent.operation == "status" else renderers.kind_of(data)
+    if intent.operation in ("comparison", "timeseries") and isinstance(data.get("series"), (list, tuple)):
+        kind = intent.operation
+    else:
+        kind = "status" if intent.operation == "status" else renderers.kind_of(data)
     value = _status_value(intent, data) if kind == "status" else _value(data)
     return Evidence(kind=kind, source=data.get("source") or hit.get("title") or hit.get("publisher") or "",
                     identifier=hit.get("identifier") or "", payload=data, entity=entity,

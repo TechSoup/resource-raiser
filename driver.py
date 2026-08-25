@@ -112,8 +112,22 @@ def _sec_concept(cik, concept):
 
 class AsyncSecClient:
     """Application-owned SEC client with one event-loop token bucket and de-duplicated CIK fetches."""
-    def __init__(self, http_client, requests_per_second=8):
+    def __init__(self, http_client, requests_per_second=None):
         self.http = http_client
+        if requests_per_second is None:
+            fleet_rate = float(os.getenv("SEC_FLEET_REQUESTS_PER_SECOND", "8"))
+            max_instances = int(os.getenv("WEBAPP_MAX_INSTANCES", "1"))
+            if fleet_rate <= 0 or max_instances <= 0:
+                raise ValueError("SEC_FLEET_REQUESTS_PER_SECOND and WEBAPP_MAX_INSTANCES must be positive")
+            requests_per_second = fleet_rate / max_instances
+        else:
+            fleet_rate = requests_per_second
+            max_instances = 1
+        if requests_per_second <= 0:
+            raise ValueError("SEC requests_per_second must be positive")
+        self.requests_per_second = requests_per_second
+        self.fleet_requests_per_second = fleet_rate
+        self.max_instances = max_instances
         self.interval = 1 / requests_per_second
         self.next_request = 0.0
         self.pace_lock = asyncio.Lock()
@@ -122,6 +136,13 @@ class AsyncSecClient:
         self.cik_locks = {}
         self.ticker_lock = asyncio.Lock()
         self.tickers = None
+
+    def snapshot(self):
+        return {
+            "requests_per_second": self.requests_per_second,
+            "fleet_requests_per_second": self.fleet_requests_per_second,
+            "configured_max_instances": self.max_instances,
+        }
 
     async def _pace(self, context):
         await context.wait(self.pace_lock.acquire())

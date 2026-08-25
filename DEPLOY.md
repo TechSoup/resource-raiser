@@ -1,5 +1,9 @@
 # Deploying to a server
 
+For the autoscaling native Azure App Service deployment, verified ZIP release, SEC fleet pacing, and
+Application Insights setup, see [`deploy/README.md`](deploy/README.md). The remainder of this file
+also covers the existing VM deployment.
+
 Two processes: the **ARD Agent Finder** (holds the embedding index, answers `POST /search`) and the
 **harness** (the web UI and `POST /ask`). The finder is an internal dependency of the harness — only
 the harness needs to be reachable from outside.

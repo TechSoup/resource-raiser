@@ -217,6 +217,17 @@ class RendererGoldenTests(unittest.TestCase):
         self.assertIn("$1,000", text)
         self.assertIn("$2,500", text)
 
+    def test_connector_preserves_comparison_kind_for_series_payload(self):
+        intent = QueryIntent("Compare A and B", operation="comparison", measure="revenue",
+                             entities=["A", "B"])
+        hit = {"identifier": "sources/example.md", "title": "Example"}
+        attempt = Attempt("Example", hit["identifier"])
+        evidence = connectors.GENERIC.execute(intent, attempt, hit, lambda: {
+            "shape": "comparison", "series": [
+                {"label": "A", "value": 10}, {"label": "B", "value": 20}],
+            "difference": 10, "source": "Example"}, adjudicator=lambda *_: (True, ""))
+        self.assertEqual(evidence.kind, "comparison")
+
     def test_census_connector_supplies_percent_and_numeric_value(self):
         intent = QueryIntent("What is Chicago's poverty rate?", operation="point",
                              entity="Chicago", entity_type="place", measure="poverty rate")

@@ -183,6 +183,25 @@ class AsyncResolverTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AsyncSecTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_rate_divides_fleet_budget_by_scale_ceiling(self):
+        with mock.patch.dict(os.environ, {
+                "SEC_FLEET_REQUESTS_PER_SECOND": "8", "WEBAPP_MAX_INSTANCES": "4"}):
+            sec = driver.AsyncSecClient(object())
+        self.assertEqual(sec.interval, .5)
+        self.assertEqual(sec.snapshot(), {
+            "requests_per_second": 2.0,
+            "fleet_requests_per_second": 8.0,
+            "configured_max_instances": 4,
+        })
+
+    async def test_invalid_fleet_rate_or_scale_ceiling_fails_startup(self):
+        for name, value in (("SEC_FLEET_REQUESTS_PER_SECOND", "0"),
+                            ("WEBAPP_MAX_INSTANCES", "0")):
+            with self.subTest(name=name), mock.patch.dict(os.environ, {
+                    "SEC_FLEET_REQUESTS_PER_SECOND": "8", "WEBAPP_MAX_INSTANCES": "2",
+                    name: value}), self.assertRaises(ValueError):
+                driver.AsyncSecClient(object())
+
     async def test_simultaneous_same_cik_fetches_companyfacts_once(self):
         calls = 0
         async def handler(request):
