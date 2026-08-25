@@ -21,6 +21,12 @@ def _entity(e):
 
 def _measure(e):
     text = (e.measure or e.payload.get("measure") or e.payload.get("metric") or "the value").strip()
+    # A source that selected one series out of many names it in `series`. Without it the answer
+    # to "Japanese yen to dollar exchange rate" reads "Exchange rate is 162.38", which is
+    # indistinguishable from the euro answer and from a wrong currency.
+    picked = e.payload.get("series")
+    if isinstance(picked, str) and picked.strip() and picked.strip().lower() not in text.lower():
+        text = f"{text} ({picked.strip()})"
     # User language should already be preferred by Evidence. This only prevents raw all-caps source
     # labels from becoming shouty answer prose when no user measure was available.
     return text.capitalize() if text.isupper() else text
@@ -93,7 +99,11 @@ def kind_of(data):
     direction = data.get("direction")
     if direction in ("grants_made", "funded_by", "geo_flow", "overview"):
         return direction
-    if data.get("series"):
+    # A LIST of observations, not merely a truthy `series`. Treasury leaves use `series` for
+    # the name of the series they selected ("Euro Zone-Euro"), so a truthiness test classified
+    # a point answer as a timeseries and the timeseries renderer then indexed into a string.
+    series = data.get("series")
+    if isinstance(series, (list, tuple)) and series:
         return "timeseries"
     if data.get("ranking") is not None:
         return "threshold" if data.get("matches") is not None or data.get("threshold") else "ranking"

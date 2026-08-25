@@ -892,5 +892,58 @@ class EntityTypeGateTests(unittest.TestCase):
         self.assertTrue(harness._type_compatible({"ein": "1"}, None, ["university"]))
 
 
+class SilentWrongAnswerTests(unittest.TestCase):
+    """Cases where the system answered confidently with the wrong number, or crashed.
+
+    Each of these produced a sourced, plausible-looking answer that was not the answer to the
+    question asked, which is worse than a refusal because nothing signals it.
+    """
+
+    def test_a_named_series_is_not_a_list_of_observations(self):
+        """Treasury sets `series` to the series it picked ("Euro Zone-Euro"), a string.
+
+        A truthiness test classified that as a timeseries, and the timeseries renderer then
+        indexed into the string: AttributeError, and both exchange-rate queries died.
+        """
+        self.assertEqual(renderers.kind_of({"series": "Euro Zone-Euro", "value": 0.88}), "point")
+        self.assertEqual(renderers.kind_of({"series": [{"value": 1}, {"value": 2}]}), "timeseries")
+        self.assertEqual(renderers.kind_of({"series": [], "value": 3}), "point")
+
+    def test_the_selected_series_is_named_in_the_answer(self):
+        """"Exchange rate is 162.38" is indistinguishable from the euro answer."""
+        e = Evidence(kind="point", source="US Treasury", identifier="x",
+                     payload={"metric": "Exchange rate", "series": "Japan-Yen"},
+                     value=162.38, measure="Exchange rate")
+        self.assertIn("Japan-Yen", renderers.render(e).text)
+
+    def test_an_undashed_place_fips_is_not_silently_a_county(self):
+        """Wikidata spells Detroit "26-22000" and Miami "1245000".
+
+        Accepting only the dashed form fell through to the county, so a question about Miami
+        was answered for Miami-Dade County and still said "Miami".
+        """
+        self.assertEqual(harness._geo_from_fips({"fips_place": "1245000"}),
+                         "place:45000&in=state:12")
+        self.assertEqual(harness._geo_from_fips({"fips_place": "26-22000"}),
+                         "place:22000&in=state:26")
+        self.assertEqual(harness._geo_from_fips({"fips_place": "0644000"}),
+                         "place:44000&in=state:06")
+
+    def test_a_five_digit_place_code_is_still_refused(self):
+        """Without a state half there is nothing to key on; guessing would be worse."""
+        self.assertIsNone(harness._geo_from_fips({"fips_place": "12450"}))
+
+    def test_the_place_recovery_accepts_more_than_in(self):
+        """"the population OF Colorado" had no safety net when the classifier dropped the entity."""
+        import re
+        pattern = r"\b(?:in|of|for|across|throughout) (?:the )?([A-Z][\w .,\'&-]+?)\s*\??$"
+        for q, want in [("What is the population of Colorado?", "Colorado"),
+                        ("What is the population in Colorado?", "Colorado"),
+                        ("Poverty rate across Wayne County?", "Wayne County")]:
+            m = re.search(pattern, q)
+            self.assertIsNotNone(m, q)
+            self.assertEqual(m.group(1).strip(), want)
+
+
 if __name__ == "__main__":
     unittest.main()

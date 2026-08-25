@@ -316,6 +316,12 @@ def discover(question, sites=None, assumptions=None):
     _say("status", icon="🔍", msg="Reading your question…")
     src_list = "\n".join(f"- {d}: covers {t}" for d, t in SOURCE_TYPES.items())
     ctx = json.loads(TK.llm(
+        "A demographic or population restriction ('for Asian residents', 'for women', 'among "
+        "adults 18-64', 'for renters') is part of the ATTRIBUTE, never part of the entity. The "
+        "entity is only the named company, nonprofit, place or organization: in 'unemployment "
+        "rate for Asian residents in Texas' the entity is 'Texas' and the attribute is "
+        "'unemployment rate for Asian residents'. Putting the restriction in the entity loses it "
+        "- retrieval runs on the attribute, so the general measure is returned instead.\n"
         "Analyze a data question. Return JSON with: 'entity' (the single company/nonprofit/place/org "
         "it is about, or empty), 'entities' (ALL named entities if it compares several, else []), "
         "'type' (one of: company, nonprofit, place, org, none), 'attribute' (the metric/measure asked, "
@@ -374,7 +380,11 @@ def discover(question, sites=None, assumptions=None):
     # Robustness: the classifier sometimes drops the place from a "<measure> in <Place>" question
     # (leaving an empty entity). Recover it from the question so a place lookup doesn't fail with no geo.
     if ctx.get("type") == "place" and not (ctx.get("entity") or "").strip():
-        m = re.search(r"\bin (?:the )?([A-Z][\w .,'&-]+?)\s*\??$", question)
+        # "in" was the only preposition here, so "the population OF Colorado" had no safety net:
+        # the classifier dropped the entity, nothing recovered it, and every candidate then failed
+        # with "no geo" until the attempt budget ran out.
+        m = re.search(r"\b(?:in|of|for|across|throughout) (?:the )?([A-Z][\w .,'&-]+?)\s*\??$",
+                      question)
         if m:
             ctx["entity"] = m.group(1).strip()
     sources = [s for s in (ctx.get("sources") or []) if s in SOURCE_TYPES] or list(SOURCE_TYPES)
@@ -494,9 +504,13 @@ def _ard_publishers():
 
 
 def _geo_from_fips(keys):
-    if keys.get("fips_place") and "-" in keys["fips_place"]:   # "SS-PPPPP" (else fall through to county)
-        s, p = keys["fips_place"].split("-", 1)
-        return f"place:{p}&in=state:{s}"
+    if keys.get("fips_place"):                                # "SS-PPPPP" or "SSPPPPP"
+        # Wikidata carries both spellings - Detroit is "26-22000", Miami is "1245000". Accepting
+        # only the dashed one silently fell through to the county, so a question about Miami was
+        # answered for Miami-Dade County and still said "Miami".
+        v = "".join(ch for ch in keys["fips_place"] if ch.isdigit())
+        if len(v) == 7:
+            return f"place:{v[2:]}&in=state:{v[:2]}"
     if keys.get("fips_county"):                               # "SSCCC" or "SS-CCC"
         v = "".join(ch for ch in keys["fips_county"] if ch.isdigit())
         if len(v) == 5:
