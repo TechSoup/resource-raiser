@@ -4,10 +4,10 @@
   "runs": [
     {
       "workers": 1,
-      "wall_ms": 228,
+      "wall_ms": 227,
       "thread_counts": {
         "harness": {
-          "pid": 24336,
+          "pid": 78949,
           "before": 2,
           "peak": 8,
           "after": 4
@@ -25,7 +25,7 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 222,
+          "latency_ms": 221,
           "llm_calls": 0,
           "error": null
         }
@@ -33,10 +33,10 @@
     },
     {
       "workers": 4,
-      "wall_ms": 227,
+      "wall_ms": 217,
       "thread_counts": {
         "harness": {
-          "pid": 24336,
+          "pid": 78949,
           "before": 4,
           "peak": 17,
           "after": 4
@@ -54,7 +54,7 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 219,
+          "latency_ms": 212,
           "llm_calls": 0,
           "error": null
         },
@@ -63,7 +63,7 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 218,
+          "latency_ms": 211,
           "llm_calls": 0,
           "error": null
         },
@@ -72,7 +72,7 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 219,
+          "latency_ms": 208,
           "llm_calls": 0,
           "error": null
         },
@@ -81,7 +81,7 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 215,
+          "latency_ms": 207,
           "llm_calls": 0,
           "error": null
         }
@@ -89,12 +89,12 @@
     },
     {
       "workers": 8,
-      "wall_ms": 225,
+      "wall_ms": 220,
       "thread_counts": {
         "harness": {
-          "pid": 24336,
+          "pid": 78949,
           "before": 4,
-          "peak": 21,
+          "peak": 23,
           "after": 4
         },
         "finder": {
@@ -110,7 +110,7 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 219,
+          "latency_ms": 216,
           "llm_calls": 0,
           "error": null
         },
@@ -119,7 +119,7 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 218,
+          "latency_ms": 207,
           "llm_calls": 0,
           "error": null
         },
@@ -128,27 +128,27 @@
           "status": "answered",
           "source_identifier": null,
           "answer_value": 1,
-          "latency_ms": 217,
+          "latency_ms": 215,
           "llm_calls": 0,
           "error": null
         },
         {
           "question": "synthetic delay 8-3",
-          "status": "answered",
-          "source_identifier": null,
-          "answer_value": 1,
-          "latency_ms": 218,
-          "llm_calls": 0,
-          "error": null
-        },
-        {
-          "question": "synthetic delay 8-4",
           "status": "transport_error",
           "source_identifier": null,
           "answer_value": null,
-          "latency_ms": 107,
+          "latency_ms": 4,
           "llm_calls": 0,
           "error": "HTTPError: HTTP Error 503: Service Unavailable"
+        },
+        {
+          "question": "synthetic delay 8-4",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 214,
+          "llm_calls": 0,
+          "error": null
         },
         {
           "question": "synthetic delay 8-5",
@@ -164,7 +164,7 @@
           "status": "transport_error",
           "source_identifier": null,
           "answer_value": null,
-          "latency_ms": 3,
+          "latency_ms": 83,
           "llm_calls": 0,
           "error": "HTTPError: HTTP Error 503: Service Unavailable"
         },
@@ -173,7 +173,7 @@
           "status": "transport_error",
           "source_identifier": null,
           "answer_value": null,
-          "latency_ms": 3,
+          "latency_ms": 83,
           "llm_calls": 0,
           "error": "HTTPError: HTTP Error 503: Service Unavailable"
         }
@@ -181,8 +181,8 @@
     }
   ],
   "schema_version": 1,
-  "generated_at": "2026-08-25T16:19:39Z",
-  "commit": "7da2074a89db4c92fbd19c3b6f6584fa1c1a70ef",
-  "dirty": true,
-  "command": "/Users/guha/code/resource-raiser/.venv/bin/python tools/async_rewrite_baseline.py synthetic-delay --output tests/baselines/synthetic-delay-7da2074.json"
+  "generated_at": "2026-08-25T16:41:59Z",
+  "commit": "a3594a22b2d48217c2aa1c8f3b2d99a8fcf97d94",
+  "dirty": false,
+  "command": "/Users/guha/code/resource-raiser/.venv/bin/python tools/async_rewrite_baseline.py synthetic-delay --output tests/baselines/synthetic-delay-a3594a2.json"
 }
