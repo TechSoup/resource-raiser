@@ -290,6 +290,9 @@ class HttpPipelineTests(unittest.TestCase):
         servers = queue.Queue()
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(harness, "TELEMETRY_PATH", os.path.join(td, "telemetry.jsonl")), \
+             mock.patch.object(harness, "OPERATIONAL_TELEMETRY_PATH",
+                               os.path.join(td, "operations.jsonl")), \
+             mock.patch.object(harness, "TELEMETRY_STDOUT", False), \
              mock.patch.object(harness, "discover", side_effect=discover), \
              mock.patch.object(harness, "_link_entity", return_value=[{"label": "Chicago", "keys": {}}]), \
              mock.patch.object(harness, "_key_options", return_value=["fixture-key"]), \
@@ -333,7 +336,12 @@ class HttpPipelineTests(unittest.TestCase):
         servers = queue.Queue()
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(harness, "TELEMETRY_PATH", os.path.join(td, "telemetry.jsonl")), \
+             mock.patch.object(harness, "OPERATIONAL_TELEMETRY_PATH",
+                               os.path.join(td, "operations.jsonl")), \
+             mock.patch.object(harness, "TELEMETRY_STDOUT", False), \
+             mock.patch.object(ard_client, "health", return_value={"ok": True, "entries": 10425}), \
              mock.patch.object(harness, "run", side_effect=fake_run):
+            operations_path = harness.OPERATIONAL_TELEMETRY_PATH
             thread = threading.Thread(target=harness.serve, args=(0, servers.put), daemon=True)
             thread.start()
             server = servers.get(timeout=3)
@@ -345,13 +353,31 @@ class HttpPipelineTests(unittest.TestCase):
             try:
                 with urllib.request.urlopen(request, timeout=5) as response:
                     body = json.load(response)
+                    request_id = response.headers.get("X-Request-ID")
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{server.server_address[1]}/healthz", timeout=5) as response:
+                    health = json.load(response)
             finally:
                 server.shutdown()
                 thread.join(timeout=3)
+            with open(operations_path) as f:
+                operations = [json.loads(line) for line in f if line.strip()]
         content = next(m["content"] for m in body["messages"] if m["message_type"] == nlweb.NLWS)
         self.assertEqual(seen["on_ambiguity"], "ask")
         self.assertEqual(content["@type"], "ClarificationRequest")
         self.assertEqual(content["options"][0]["value"], 97)
+        self.assertEqual(len(request_id), 32)
+        self.assertEqual({row["trace_id"] for row in operations}, {request_id})
+        self.assertEqual(operations[0]["event"], "received")
+        self.assertEqual(operations[1]["event"], "admitted")
+        self.assertIn("progress", [row["event"] for row in operations])
+        self.assertEqual(operations[-1]["event"], "needs_clarification")
+        self.assertEqual(operations[-1]["active_queries"], 0)
+        self.assertEqual(health["active_queries"], 0)
+        self.assertEqual(health["max_concurrent_queries"], harness.MAX_CONCURRENT_QUERIES)
+        self.assertFalse(health["saturated"])
+        self.assertEqual(health["tables"], 10425)
+        self.assertTrue(health["agent_finder"])
 
 
 class PlannerGoldenTests(unittest.TestCase):

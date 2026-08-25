@@ -312,6 +312,18 @@ store.py           the materialized commons; store_backends.py selects sqlite/po
 run.sh             build (first run) + serve
 ```
 
+### Server telemetry
+
+Every `/ask` response includes an `X-Request-ID`. Query lifecycle events are written as JSONL to
+`cache/operations.jsonl` as they happen and are also emitted as structured stdout records, so the
+last completed stage remains visible when a request stalls. Set `OPERATIONAL_TELEMETRY_PATH` to
+move the event file or `TELEMETRY_STDOUT=0` to suppress the stdout copy. The existing completed-
+query summaries remain in `cache/telemetry.jsonl` (configured with `TELEMETRY_PATH`).
+
+`GET /healthz` reports Agent Finder readiness and table count together with the serving instance,
+uptime, active query count, configured concurrency ceiling, and saturation state. `GET /health`
+is the lightweight process-only version and does not contact Agent Finder.
+
 ---
 
 ## Troubleshooting

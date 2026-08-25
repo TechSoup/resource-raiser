@@ -11,7 +11,7 @@ Run as a CLI or as a server the connectors skill calls:
   python3 harness.py "How much did Apple spend on R&D in 2023?"     # one-shot (prints JSON)
   python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
 """
-import os, sys, json, time, math, re, signal, traceback, urllib.parse, queue
+import os, sys, json, time, math, re, signal, traceback, urllib.parse, queue, uuid
 import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime, docpage
 from domain import Attempt, Clarification, ClarificationOption, Evidence, QueryIntent
 from core import Toolkit
@@ -2669,12 +2669,84 @@ _TOTALS = {"questions": 0, "llm_calls": 0, "total_tokens": 0, "cost_usd": 0.0,
 _TOTALS_LOCK = threading.Lock()
 _TELEMETRY_LOCK = threading.Lock()
 TELEMETRY_PATH = os.getenv("TELEMETRY_PATH", os.path.join(ROOT, "cache", "telemetry.jsonl"))
+OPERATIONAL_TELEMETRY_PATH = os.getenv(
+    "OPERATIONAL_TELEMETRY_PATH", os.path.join(ROOT, "cache", "operations.jsonl"))
+TELEMETRY_STDOUT = os.getenv("TELEMETRY_STDOUT", "1").lower() in ("1", "true", "yes")
+_SERVER_STARTED_AT = time.time()
+_INSTANCE_ID = os.getenv("WEBSITE_INSTANCE_ID") or os.getenv("HOSTNAME") or "local"
 
 # A public endpoint that fans out into several provider calls needs a hard concurrency ceiling in
 # addition to the daily quota. Rejecting quickly is safer than allowing an unbounded ThreadingHTTPServer
 # queue to turn a traffic spike into provider spend and memory pressure.
 MAX_CONCURRENT_QUERIES = max(1, int(os.getenv("MAX_CONCURRENT_QUERIES", "4")))
 _QUERY_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES)
+_ACTIVE_QUERIES = 0
+_ACTIVE_QUERIES_LOCK = threading.Lock()
+
+
+def _question_hash(question):
+    import hashlib
+    return hashlib.sha256(str(question or "").encode()).hexdigest()[:16]
+
+
+def _active_queries(delta=0):
+    """Atomically adjust and return the number of admitted, unfinished queries."""
+    global _ACTIVE_QUERIES
+    with _ACTIVE_QUERIES_LOCK:
+        _ACTIVE_QUERIES = max(0, _ACTIVE_QUERIES + delta)
+        return _ACTIVE_QUERIES
+
+
+def _operational_event(trace_id, event, started_at, question_hash="", **fields):
+    """Write a query lifecycle event immediately, including while a request is stalled.
+
+    The completed-query telemetry below is intentionally retained as a stable summary. These
+    events live in a separate JSONL stream and stdout so a VM journal or an autoscaled service's
+    log collector can see the last stage without depending on instance-local durable storage.
+    """
+    row = {
+        "at": time.time(),
+        "trace_id": trace_id,
+        "event": event,
+        "elapsed_ms": round((time.monotonic() - started_at) * 1000),
+        "question": question_hash,
+        "instance_id": _INSTANCE_ID,
+        "pid": os.getpid(),
+        "active_queries": _active_queries(),
+        "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
+        **fields,
+    }
+    line = json.dumps(row, separators=(",", ":"), default=str)
+    try:
+        os.makedirs(os.path.dirname(OPERATIONAL_TELEMETRY_PATH), exist_ok=True)
+        with _TELEMETRY_LOCK, open(OPERATIONAL_TELEMETRY_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    if TELEMETRY_STDOUT:
+        try:
+            print(json.dumps({"log_type": "query_telemetry", **row}, separators=(",", ":"),
+                             default=str), flush=True)
+        except OSError:
+            pass
+
+
+def _record_progress(trace_id, started_at, question_hash, message):
+    """Record protocol progress at the moment it is produced, not only at query completion."""
+    message_type = message.get("message_type")
+    if message_type not in (nlweb.INTERMEDIATE, nlweb.ERROR, nlweb.NLWS):
+        return
+    content = message.get("content")
+    fields = {"message_type": message_type, "sequence": message.get("sequence")}
+    if message_type == nlweb.INTERMEDIATE:
+        fields["stage"] = str(content or "")[:500]
+    elif message_type == nlweb.ERROR:
+        fields["error"] = str(content or "")[:500]
+    elif isinstance(content, dict):
+        fields["status"] = content.get("status")
+        fields["shape"] = content.get("shape")
+        fields["source"] = (content.get("evidence") or {}).get("source")
+    _operational_event(trace_id, "progress", started_at, question_hash, **fields)
 
 
 def _usage_from_messages(messages):
@@ -2686,15 +2758,15 @@ def _usage_from_messages(messages):
     return None, None
 
 
-def _record_telemetry(ip, req, content, elapsed_ms, status="complete"):
+def _record_telemetry(ip, req, content, elapsed_ms, status="complete", trace_id=""):
     """Durable JSONL request telemetry. Questions are represented by a hash by default so the
     operational record is useful without silently retaining user text."""
-    import hashlib
     content = content or {}
     question = req.get("query") or ""
-    row = {"at": time.time(), "status": status, "latency_ms": round(elapsed_ms),
-           "client": hashlib.sha256(str(ip).encode()).hexdigest()[:12],
-           "question": hashlib.sha256(str(question).encode()).hexdigest()[:16],
+    row = {"at": time.time(), "trace_id": trace_id, "instance_id": _INSTANCE_ID,
+           "status": status, "latency_ms": round(elapsed_ms),
+           "client": _question_hash(ip)[:12],
+           "question": _question_hash(question),
            "intent": content.get("intent"), "attempts": content.get("attempts") or [],
            "evidence_kind": (content.get("evidence") or {}).get("kind"),
            "answer_renderer": content.get("answer_renderer"),
@@ -3122,6 +3194,7 @@ def serve(port, ready=None):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Expose-Headers", "X-Request-ID, Retry-After")
 
         def do_OPTIONS(self):
             self.send_response(204)
@@ -3129,12 +3202,14 @@ def serve(port, ready=None):
             self.send_header("Access-Control-Max-Age", "86400")
             self.end_headers()
 
-        def _json(self, code, obj):
+        def _json(self, code, obj, headers=None):
             b = json.dumps(obj).encode()
             self.send_response(code)
             self._cors()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b)))
+            for key, value in (headers or {}).items():
+                self.send_header(key, str(value))
             self.end_headers()
             self.wfile.write(b)
 
@@ -3166,7 +3241,17 @@ def serve(port, ready=None):
                 finder = bool(health.get("ok"))
                 n = int(health.get("entries") or 0)
                 code = 200 if (n and finder) else 503
-                return self._json(code, {"ok": code == 200, "tables": n, "agent_finder": finder})
+                active = _active_queries()
+                return self._json(code, {
+                    "ok": code == 200,
+                    "tables": n,
+                    "agent_finder": finder,
+                    "uptime_seconds": round(time.time() - _SERVER_STARTED_AT),
+                    "instance_id": _INSTANCE_ID,
+                    "active_queries": active,
+                    "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
+                    "saturated": active >= MAX_CONCURRENT_QUERIES,
+                })
             if p == "/costs":
                 with _TOTALS_LOCK:
                     t = json.loads(json.dumps(_TOTALS))     # snapshot under the lock
@@ -3189,7 +3274,13 @@ def serve(port, ready=None):
                 return self._json(200, {"message_type": "sites",
                                         "sites": [s["dir"] for s in _sources_catalog()]})
             if p == "/health":
-                return self._json(200, {"status": "ok"})
+                active = _active_queries()
+                return self._json(200, {"status": "ok",
+                                        "uptime_seconds": round(time.time() - _SERVER_STARTED_AT),
+                                        "instance_id": _INSTANCE_ID,
+                                        "active_queries": active,
+                                        "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
+                                        "saturated": active >= MAX_CONCURRENT_QUERIES})
             if p in ("/how-it-works", "/how"):
                 return self._html(HOW_PAGE)
             if p in ("/life-of-a-query", "/loq"):
@@ -3237,6 +3328,8 @@ def serve(port, ready=None):
             same messages as a single JSON document, which is what NLWeb clients expect."""
             req = nlweb.parse_request(params)
             request_started = time.monotonic()
+            trace_id = uuid.uuid4().hex
+            question_hash = _question_hash(req.get("query"))
             if not req["query"]:
                 return self._json(400, {"error": "missing 'query'"})
             # An unreadable binding must not be ignored. Answering anyway would resolve a
@@ -3244,12 +3337,17 @@ def serve(port, ready=None):
             if req.get("assumptions_error"):
                 return self._json(400, {"error": req["assumptions_error"]})
             ip = _client_ip(self)
+            _operational_event(trace_id, "received", request_started, question_hash,
+                               streaming=bool(req["streaming"]))
             allowed, used, reset_in = _quota_check(ip)
             if not allowed:
+                _operational_event(trace_id, "rejected_quota", request_started, question_hash,
+                                   retry_after_seconds=reset_in)
                 self.send_response(429)
                 self._cors()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Retry-After", str(reset_in))
+                self.send_header("X-Request-ID", trace_id)
                 body = json.dumps({"error": f"daily limit reached: {ASK_LIMIT_PER_DAY} queries per "
                                             f"day per source", "retry_after_seconds": reset_in}).encode()
                 self.send_header("Content-Length", str(len(body)))
@@ -3258,32 +3356,48 @@ def serve(port, ready=None):
                 return
 
             if not _QUERY_SLOTS.acquire(blocking=False):
-                return self._json(503, {"error": "server is at its concurrent query limit"})
+                _operational_event(trace_id, "rejected_concurrency", request_started, question_hash)
+                return self._json(503, {"error": "server is at its concurrent query limit"},
+                                  {"X-Request-ID": trace_id, "Retry-After": "1"})
+
+            _active_queries(1)
+            _operational_event(trace_id, "admitted", request_started, question_hash)
 
             if not req["streaming"]:
+                terminal_status = "error"
                 try:
-                    msgs = list(run_nlweb(req))
+                    msgs = []
+                    for message in run_nlweb(req):
+                        _record_progress(trace_id, request_started, question_hash, message)
+                        msgs.append(message)
                     usage, discovery = _usage_from_messages(msgs)
                     _accumulate(usage, discovery)
                     content = next((m.get("content") for m in reversed(msgs)
                                     if m.get("message_type") == nlweb.NLWS), {})
+                    terminal_status = ("needs_clarification" if content.get("status") ==
+                                       "needs_clarification" else
+                                       ("complete" if content else "error"))
                     _record_telemetry(ip, req, content,
                                       (time.monotonic() - request_started) * 1000,
-                                      ("needs_clarification" if content.get("status") == "needs_clarification"
-                                       else "complete"))
-                    return self._json(200, {"messages": msgs})
+                                      terminal_status, trace_id)
+                    return self._json(200, {"messages": msgs}, {"X-Request-ID": trace_id})
                 finally:
                     _QUERY_SLOTS.release()
+                    _active_queries(-1)
+                    _operational_event(trace_id, terminal_status, request_started, question_hash)
 
             self.send_response(200)
             self._cors()
+            self.send_header("X-Request-ID", trace_id)
             for k, v in nlweb.SSE_HEADERS.items():
                 self.send_header(k, v)
             self.end_headers()
             usage = discovery = None
             answer_content = {}
+            terminal_status = "error"
             try:
                 for m in run_nlweb(req):
+                    _record_progress(trace_id, request_started, question_hash, m)
                     if m.get("message_type") == nlweb.NLWS and isinstance(m.get("content"), dict):
                         answer_content = m["content"]
                         usage = m["content"].get("usage")
@@ -3291,15 +3405,19 @@ def serve(port, ready=None):
                     self.wfile.write(nlweb.encode(m, named=req["named_events"]))
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                pass                                   # client hung up mid-stream; nothing to do
+                terminal_status = "disconnected"
             finally:
+                if terminal_status != "disconnected":
+                    terminal_status = (("needs_clarification" if answer_content.get("status") ==
+                                        "needs_clarification" else "complete") if answer_content
+                                       else "error")
                 _accumulate(usage, discovery)
                 _record_telemetry(ip, req, answer_content,
                                   (time.monotonic() - request_started) * 1000,
-                                  (("needs_clarification" if answer_content.get("status") ==
-                                    "needs_clarification" else "complete") if answer_content else
-                                   "disconnected-or-error"))
+                                  terminal_status, trace_id)
                 _QUERY_SLOTS.release()
+                _active_queries(-1)
+                _operational_event(trace_id, terminal_status, request_started, question_hash)
 
         def do_POST(self):
             path = urllib.parse.urlparse(self.path).path.rstrip("/")
