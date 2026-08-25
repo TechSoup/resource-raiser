@@ -378,6 +378,7 @@ def discover(question, sites=None, assumptions=None):
         "rate', 'diabetes rate') — do NOT invent ambiguity for a specific measure.\n"
         "SOURCES:\n" + src_list, question, json_mode=True, stage="classify"))
     ctx = _normalize_shape(ctx)
+    ctx["question"] = question
     if assumptions:
         allowed = {"entity", "type", "attribute", "period", "shape", "concept"}
         applied = {k: v for k, v in assumptions.items() if k in allowed and v not in (None, "")}
@@ -431,15 +432,25 @@ def discover(question, sites=None, assumptions=None):
     # (otherwise 'euro' is lost among ~30 identical exchange-rate leaves). The other search is appended
     # as a fallback; backtracking + the answer check settle the rest.
     resolvable = ctx.get("type") in ("company", "nonprofit", "place")
-    primary = (ctx.get("attribute") or question) if resolvable else question
-    secondary = question if resolvable else (ctx.get("attribute") or question)
+    # An ambiguous measure has no single attribute - the classifier returns the readings
+    # instead ("how big" -> total revenue, total assets, employees, net income). Retrieving on
+    # the raw question then matches nothing and the whole query fails before the per-reading
+    # fan-out can run, so retrieve on the readings themselves.
+    attribute = ctx.get("attribute") or ""
+    readings = [i for i in (ctx.get("interpretations") or []) if i]
+    if not attribute and readings:
+        attribute = readings[0]
+    primary = (attribute or question) if resolvable else question
+    secondary = question if resolvable else (attribute or question)
+    # the finder accepts at most four phrasings per request
+    extra = readings[1:3] if (not (ctx.get("attribute") or "") and readings) else []
     _say("status", icon="📚", msg="Asking the ARD Agent Finder which data tables can answer this…")
     seen, hits = set(), []
     # Attribute-only and full-question retrieval are complementary views, not two separately billed
     # ranking tasks. The finder embeds both in one provider call, unions by max similarity, and runs
     # one rerank over the shared candidate pool.
     try:
-        found = ard_client.search_many([primary, secondary], k=12, sources=sources,
+        found = ard_client.search_many([primary, secondary] + extra, k=12, sources=sources,
                                        rerank_query=primary)
     except ard_client.DiscoveryError as e:
         raise SystemExit(str(e)) from e
@@ -638,10 +649,6 @@ _TICKER_CACHE = {}
 _ENTITY_CACHE = {}
 
 
-def _norm(text):
-    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
-
-
 def _link_entity(ctx):
     """Map the entity the CLASSIFIER determined to Wikidata identifiers.
 
@@ -671,52 +678,83 @@ def _link_entity(ctx):
 
     if not (canonical or mention):
         return [None]
-    linked = _link_one(canonical or mention)
-    return [linked, None] if linked else [None]
+    found = _link_records(canonical or mention, ctx.get("question") or "", ctx.get("type") or "")
+    if len(found) > 1:
+        # Several records could be this entity. That is the same question as an ambiguous
+        # mention and belongs to the caller, not to whichever one happened to rank first.
+        return found
+    return [found[0], None] if found else [None]
 
 
-def _link_one(name):
-    """Identifiers for ONE determined name, or None.
+def _link_records(name, question="", kind=""):
+    """The Wikidata records that ARE the named entity: none, one, or several.
 
-    The classifier has already decided which entity this is. Searching a CANONICAL name is a
-    lookup, not a disambiguation: "Chicago, Illinois" returns the city, where the bare mention
-    "Chicago" ranks University of Chicago first. This never reinterprets the name - if the
-    lookup finds nothing, the link fails rather than settling for a different entity.
+    The classifier has already decided WHICH entity this is. What is left is record linkage,
+    and it is a semantic question rather than a string one: "Stanford" the census place and
+    "Stanford University", "St. Jude" the album and the children's hospital. An earlier version
+    compared normalized names for containment and accepted every one of those wrong records,
+    because a shorter name is always a substring of a longer one.
+
+    So the candidates go back to the model with the original question for context, and it may
+    answer with several - two records can both plausibly be the entity, and that is a question
+    for the caller rather than something to resolve by picking the first. Judgement that is
+    unavailable or names nothing fails the link; it never guesses.
     """
     name = (name or "").strip()
     if not name:
-        return None
-    if name in _ENTITY_CACHE:
-        return _ENTITY_CACHE[name]
+        return []
+    ck = (name, question)
+    if ck in _ENTITY_CACHE:
+        return _ENTITY_CACHE[ck]
     import resolver
     try:
         cands = resolver._search(name)
-        top = cands[0] if cands else None
-        # The top hit for a CANONICAL name is the right record, but check it actually denotes
-        # the name we asked for rather than trusting rank: Wikidata labels "Chicago, Illinois"
-        # as "Chicago", so containment either way is the honest test, and it still refuses
-        # "University of Detroit Mercy" for "Detroit, Michigan".
-        want, got = _norm(name), _norm(top and top.get("label"))
-        if not top or not got or not (got in want or want in got):
-            _say("status", icon="🚫",
-                 msg=f"“{name}” did not match a record ({(top or {}).get('label') or 'no candidates'})")
-            _ENTITY_CACHE[name] = None
-            return None
-        qid = top["id"]
-        label, keys = resolver._claims(qid)
     except Exception:
-        qid = None
-    if not qid:
+        cands = []
+    if not cands:
         _say("status", icon="🚫", msg=f"No identifier record for “{name}”")
-        _ENTITY_CACHE[name] = None
-        return None
-    _say("resolve", mention=name, label=label or name, keys=keys or {})
-    # `name` is what the classifier asked for and is what a human recognises: Wikidata labels
-    # all three Springfields "Springfield", which makes a clarification useless.
-    _ENTITY_CACHE[name] = res = {"qid": qid, "label": label or name, "name": name, "keys": keys}
-    return res
+        _ENTITY_CACHE[ck] = []
+        return []
 
+    listing = "\n".join(f"{i}. {c.get('label','')} — {c.get('description','')}"
+                         for i, c in enumerate(cands))
+    try:
+        out = json.loads(TK.llm(
+            f"A question mentions the {kind or 'entity'} \"{name}\". Below are database records "
+            "with similar names. Return the indices of the records that ARE that entity, judging "
+            "by the description - a place, a university, an album and a hospital can share a "
+            "name. Return an EMPTY list if none of them is it. Return SEVERAL indices if the "
+            "question genuinely does not distinguish between them and a person would have to "
+            "choose; do not pick one arbitrarily in that case. "
+            'Return JSON {"indices": [<n>, ...]}.\n\n'
+            f"QUESTION: {question}\n\nRECORDS:\n{listing}",
+            name, json_mode=True, stage="resolve-entity")).get("indices")
+    except Exception:
+        out = None
+    if not isinstance(out, list):
+        _say("status", icon="🚫", msg=f"Could not judge which record is “{name}”")
+        _ENTITY_CACHE[ck] = []
+        return []
+    picks = [i for i in out if isinstance(i, int) and 0 <= i < len(cands)]
+    if not picks:
+        _say("status", icon="🚫", msg=f"No record was judged to be “{name}”")
+        _ENTITY_CACHE[ck] = []
+        return []
 
+    found = []
+    for i in picks:
+        try:
+            qid = cands[i]["id"]
+            label, keys = resolver._claims(qid)
+        except Exception:
+            continue
+        found.append({"qid": qid, "label": label or cands[i].get("label") or name,
+                      "name": cands[i].get("label") or name,
+                      "description": cands[i].get("description") or "", "keys": keys})
+    if len(found) == 1:
+        _say("resolve", mention=name, label=found[0]["label"], keys=found[0]["keys"] or {})
+    _ENTITY_CACHE[ck] = found
+    return found
 
 
 def _key_options(state, ctx):
@@ -1559,8 +1597,17 @@ def _entity_clarification(question, ctx, candidates, ledger, discovery):
     Nothing is looked up here. These are the names the classifier produced, and no identifier
     registry can tell us which one the caller meant.
     """
-    options = [ClarificationOption(id=name, label=name, assumptions={"entity": name})
-               for name in candidates]
+    # Candidates are either names the classifier produced or records the crosswalk matched.
+    options = []
+    for c in candidates:
+        if isinstance(c, dict):
+            label = c.get("name") or c.get("label") or ""
+            desc = c.get("description") or ""
+            options.append(ClarificationOption(id=c.get("qid") or label,
+                                               label=f"{label} — {desc}" if desc else label,
+                                               assumptions={"entity": label}))
+        else:
+            options.append(ClarificationOption(id=c, label=c, assumptions={"entity": c}))
     # The classifier leaves `entity` empty when it declines to resolve, so name the thing the
     # caller actually typed by taking what the candidates share.
     subject = (ctx.get("entity") or "").strip() or (options[0].label.split(",")[0] if options else "That name")
@@ -2068,6 +2115,14 @@ def run(question, sites=None, assumptions=None, on_ambiguity="answer"):
     candidates = ctx.get("entity_candidates") or []
     if (ctx.get("entity_status") or "").lower() == "ambiguous" and len(candidates) > 1:
         return _entity_clarification(question, ctx, candidates, _ledger, _disc)
+
+    # A crosswalk that matched several records asks the same question as an ambiguous mention,
+    # but only once the measure is settled: an ambiguous measure is answered per reading
+    # downstream and must not be preempted by an entity question.
+    if len(ctx.get("interpretations") or []) < 2:
+        linked = _link_entity(ctx)
+        if len([e for e in linked if e]) > 1:
+            return _entity_clarification(question, ctx, [e for e in linked if e], _ledger, _disc)
     shape = ctx.get("shape") if ctx.get("shape") in planner.SHAPES else "point"
     intent = QueryIntent.from_context(question, ctx, sites)
     # A genuinely ambiguous measure over a single entity gets SEPARATE answers per interpretation

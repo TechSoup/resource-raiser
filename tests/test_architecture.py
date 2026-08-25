@@ -892,6 +892,7 @@ class EntityLinkingTests(unittest.TestCase):
 
     def test_a_determined_entity_is_looked_up_by_its_canonical_name(self):
         with mock.patch("resolver._search", return_value=[{"id": "Q1297", "label": "Chicago"}]), \
+             mock.patch.object(harness.TK, "llm", return_value='{"indices": [0]}'), \
              mock.patch("resolver._claims", return_value=("Chicago", {"fips_place": "17-14000"})):
             out = harness._link_entity(self.ctx(entity="Chicago", canonical_entity="Chicago, Illinois"))
         self.assertEqual(out[0]["qid"], "Q1297")
@@ -899,6 +900,7 @@ class EntityLinkingTests(unittest.TestCase):
     def test_at_most_one_identity_is_ever_returned(self):
         """The trailing None is the native-name key, not a second entity."""
         with mock.patch("resolver._search", return_value=[{"id": "Q1297", "label": "Chicago"}]), \
+             mock.patch.object(harness.TK, "llm", return_value='{"indices": [0]}'), \
              mock.patch("resolver._claims", return_value=("Chicago", {})):
             out = harness._link_entity(self.ctx(entity="Chicago", canonical_entity="Chicago, Illinois"))
         self.assertEqual(len([o for o in out if o]), 1)
@@ -922,7 +924,8 @@ class EntityLinkingTests(unittest.TestCase):
         """Wikidata covers more than Wikipedia, but a candidate must denote the same entity."""
         cands = [{"id": "Q1", "label": "Housing Trust Silicon Valley"},
                  {"id": "Q2", "label": "Silicon Valley Community Foundation"}]
-        with mock.patch("resolver._search", return_value=cands), \
+        with mock.patch.object(harness.TK, "llm", return_value='{"indices": [0]}'), \
+             mock.patch("resolver._search", return_value=cands), \
              mock.patch("resolver._claims", return_value=("Housing Trust Silicon Valley", {"ein": "1"})):
             out = harness._link_entity(self.ctx(canonical_entity="Housing Trust Silicon Valley"))
         self.assertEqual(out[0]["qid"], "Q1")
@@ -930,14 +933,16 @@ class EntityLinkingTests(unittest.TestCase):
     def test_a_differently_named_candidate_is_never_accepted(self):
         """Never fall through to another entity merely because it ranks first."""
         cands = [{"id": "Q9", "label": "University of Detroit Mercy"}]
-        with mock.patch("resolver._search", return_value=cands), \
+        with mock.patch.object(harness.TK, "llm", return_value='{"indices": []}'), \
+             mock.patch("resolver._search", return_value=cands), \
              mock.patch("resolver._claims", return_value=(cands[0]["label"], {})):
             out = harness._link_entity(self.ctx(entity="Detroit", canonical_entity="Detroit, Michigan"))
         self.assertEqual(out, [None])
 
     def test_a_record_that_does_not_denote_the_name_is_refused(self):
         cands = [{"id": "Q1", "label": "Totally Different Trust"}]
-        with mock.patch("resolver._search", return_value=cands), \
+        with mock.patch.object(harness.TK, "llm", return_value='{"indices": []}'), \
+             mock.patch("resolver._search", return_value=cands), \
              mock.patch("resolver._claims", return_value=(cands[0]["label"], {})):
             out = harness._link_entity(self.ctx(canonical_entity="Acme Fund"))
         self.assertEqual(out, [None])
