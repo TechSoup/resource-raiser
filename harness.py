@@ -633,6 +633,9 @@ class Prune(Backtrack):
         self.step = step
 
 
+MAX_SEARCH_ATTEMPTS = 40
+
+
 def _solve(steps, goal, state, i=0):
     """General depth-first backtracking search. `steps` = [(name, options_fn), ...] where
     options_fn(state) yields the ranked candidate values for that choice; `goal(state)` attempts
@@ -1991,11 +1994,13 @@ def _search(question, ctx=None, hits=None):
     attempts = [0]
     tried_tables = set()                    # distinct tables actually reached, for the failure message
     done = {}                               # complete fetch identity -> outcome, within this question
-    MAX_ATTEMPTS = 40                       # 3 entities x 2 periods x a couple keys is the honest ceiling;
-                                            # beyond it the search is looping, not exploring — stop cleanly.
+    # This counter is deliberately local to one _search call. Fan-out branches are independent
+    # questions and must not consume one another's budget merely because they overlap in time.
+    # 3 entities x 2 periods x a couple keys is the honest ceiling; beyond it the search is
+    # looping, not exploring — stop cleanly.
 
     def goal(s):
-        if attempts[0] >= MAX_ATTEMPTS:
+        if attempts[0] >= MAX_SEARCH_ATTEMPTS:
             raise SystemExit(
                 f"no source could answer this. {len(tried_tables)} of {len(hits)} candidate tables "
                 f"were tried in {attempts[0]} attempts before the search budget ran out"

@@ -1,0 +1,76 @@
+{
+  "note": "Transport-only contracts: tests synthesize engine results to pin POST /ask parsing and NLWeb serialization. Aspirational Harvard identity/value are not an engine regression guard; the live baseline records the current wrong-filer result.",
+  "cases": [
+    {
+      "id": "detroit-acs",
+      "question": "What percentage of households have broadband internet in Detroit?",
+      "status": "answered",
+      "shape": "point",
+      "source": "sources/census/dp02-0154pe.md",
+      "publisher": "census",
+      "value": 79.4,
+      "unit": "%",
+      "entity": "Detroit, Michigan"
+    },
+    {
+      "id": "stanford-nih",
+      "question": "How much NIH research funding does Stanford get?",
+      "status": "answered",
+      "shape": "entity-list",
+      "source": "sources/nih-reporter/research-grants.md",
+      "publisher": "nih-reporter",
+      "value": 686107112,
+      "unit": "USD",
+      "entity": "Stanford University"
+    },
+    {
+      "id": "microsoft-sec",
+      "question": "Microsoft net income in 2023",
+      "status": "answered",
+      "shape": "point",
+      "source": "sources/sec-edgar/net-income-loss.md",
+      "publisher": "sec-edgar",
+      "value": 72361000000,
+      "unit": "USD",
+      "entity": "Microsoft Corporation"
+    },
+    {
+      "id": "harvard-990",
+      "question": "Harvard University total revenue",
+      "status": "answered",
+      "shape": "point",
+      "source": "sources/nonprofit-990/totrevenue.md",
+      "publisher": "nonprofit-990",
+      "value": 6051934438,
+      "unit": "USD",
+      "entity": "President And Fellows Of Harvard College",
+      "ein": "042103580"
+    },
+    {
+      "id": "sierra-club-choice",
+      "question": "Is the Sierra Club a 501(c)(3)?",
+      "assumptions": {"entity": "Sierra Club", "entity_qid": "Q508775"},
+      "status": "answered",
+      "shape": "status",
+      "source": "sources/nonprofit-bmf/eligibility.md",
+      "publisher": "nonprofit-bmf",
+      "value": true,
+      "unit": "boolean",
+      "entity": "Sierra Club",
+      "entity_qid": "Q508775"
+    },
+    {
+      "id": "sierra-foundation-choice",
+      "question": "Is the Sierra Club a 501(c)(3)?",
+      "assumptions": {"entity": "Sierra Club Foundation", "entity_qid": "Q17061198"},
+      "status": "answered",
+      "shape": "status",
+      "source": "sources/nonprofit-bmf/eligibility.md",
+      "publisher": "nonprofit-bmf",
+      "value": true,
+      "unit": "boolean",
+      "entity": "Sierra Club Foundation",
+      "entity_qid": "Q17061198"
+    }
+  ]
+}

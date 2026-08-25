@@ -1,0 +1,188 @@
+{
+  "kind": "synthetic-delay",
+  "delay_ms": 200,
+  "runs": [
+    {
+      "workers": 1,
+      "wall_ms": 228,
+      "thread_counts": {
+        "harness": {
+          "pid": 24336,
+          "before": 2,
+          "peak": 8,
+          "after": 4
+        },
+        "finder": {
+          "pid": null,
+          "before": null,
+          "peak": null,
+          "after": null
+        }
+      },
+      "results": [
+        {
+          "question": "synthetic delay 1-0",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 222,
+          "llm_calls": 0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "workers": 4,
+      "wall_ms": 227,
+      "thread_counts": {
+        "harness": {
+          "pid": 24336,
+          "before": 4,
+          "peak": 17,
+          "after": 4
+        },
+        "finder": {
+          "pid": null,
+          "before": null,
+          "peak": null,
+          "after": null
+        }
+      },
+      "results": [
+        {
+          "question": "synthetic delay 4-0",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 219,
+          "llm_calls": 0,
+          "error": null
+        },
+        {
+          "question": "synthetic delay 4-1",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 218,
+          "llm_calls": 0,
+          "error": null
+        },
+        {
+          "question": "synthetic delay 4-2",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 219,
+          "llm_calls": 0,
+          "error": null
+        },
+        {
+          "question": "synthetic delay 4-3",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 215,
+          "llm_calls": 0,
+          "error": null
+        }
+      ]
+    },
+    {
+      "workers": 8,
+      "wall_ms": 225,
+      "thread_counts": {
+        "harness": {
+          "pid": 24336,
+          "before": 4,
+          "peak": 21,
+          "after": 4
+        },
+        "finder": {
+          "pid": null,
+          "before": null,
+          "peak": null,
+          "after": null
+        }
+      },
+      "results": [
+        {
+          "question": "synthetic delay 8-0",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 219,
+          "llm_calls": 0,
+          "error": null
+        },
+        {
+          "question": "synthetic delay 8-1",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 218,
+          "llm_calls": 0,
+          "error": null
+        },
+        {
+          "question": "synthetic delay 8-2",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 217,
+          "llm_calls": 0,
+          "error": null
+        },
+        {
+          "question": "synthetic delay 8-3",
+          "status": "answered",
+          "source_identifier": null,
+          "answer_value": 1,
+          "latency_ms": 218,
+          "llm_calls": 0,
+          "error": null
+        },
+        {
+          "question": "synthetic delay 8-4",
+          "status": "transport_error",
+          "source_identifier": null,
+          "answer_value": null,
+          "latency_ms": 107,
+          "llm_calls": 0,
+          "error": "HTTPError: HTTP Error 503: Service Unavailable"
+        },
+        {
+          "question": "synthetic delay 8-5",
+          "status": "transport_error",
+          "source_identifier": null,
+          "answer_value": null,
+          "latency_ms": 3,
+          "llm_calls": 0,
+          "error": "HTTPError: HTTP Error 503: Service Unavailable"
+        },
+        {
+          "question": "synthetic delay 8-6",
+          "status": "transport_error",
+          "source_identifier": null,
+          "answer_value": null,
+          "latency_ms": 3,
+          "llm_calls": 0,
+          "error": "HTTPError: HTTP Error 503: Service Unavailable"
+        },
+        {
+          "question": "synthetic delay 8-7",
+          "status": "transport_error",
+          "source_identifier": null,
+          "answer_value": null,
+          "latency_ms": 3,
+          "llm_calls": 0,
+          "error": "HTTPError: HTTP Error 503: Service Unavailable"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "generated_at": "2026-08-25T16:19:39Z",
+  "commit": "7da2074a89db4c92fbd19c3b6f6584fa1c1a70ef",
+  "dirty": true,
+  "command": "/Users/guha/code/resource-raiser/.venv/bin/python tools/async_rewrite_baseline.py synthetic-delay --output tests/baselines/synthetic-delay-7da2074.json"
+}
