@@ -70,8 +70,17 @@ import glob as _glob
 
 
 def _source_types():
+    """Source name -> entityType, in a STABLE order.
+
+    glob returns directory order, which differs between filesystems. The classifier is shown
+    this list and picks the first plausible source, so an unsorted order made the same question
+    route differently on macOS and on the Linux VM: "which nonprofit has the highest revenue"
+    chose irs-990-bq locally and nonprofit-990 in production, which then correctly refused a
+    ranking it cannot do. Deterministic per machine, divergent across them - which also means
+    local results were never evidence about production for any close routing decision.
+    """
     out = {}
-    for p in _glob.glob(os.path.join(ROOT, "sources", "*", "_access.md")):
+    for p in sorted(_glob.glob(os.path.join(ROOT, "sources", "*", "_access.md"))):
         fm = driver.frontmatter(p)
         if fm.get("entityType"):
             out[os.path.basename(os.path.dirname(p))] = fm["entityType"]
