@@ -13,7 +13,7 @@ tables). Run with the Azure keys loaded:
   set -a; source ./set_keys.sh; set +a
   python3 agent_finder.py            # serves on http://127.0.0.1:8088
 """
-import base64, json, os, re, signal, threading, time, urllib.parse
+import base64, json, os, re, signal, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
 import llm
 from registry import index
@@ -505,6 +505,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    release_ok, release_detail = index.verify(require_release=True)
+    if not release_ok:
+        print("ERROR: registry release is stale or incomplete", file=sys.stderr)
+        for error in release_detail.get("errors", [release_detail.get("error", "unknown error")]):
+            print(f"  - {error}", file=sys.stderr)
+        print(f"Run: {sys.executable} tools/build_registry_release.py", file=sys.stderr)
+        raise SystemExit(1)
     print(f"ARD Agent Finder on {SELF} (bind {HOST}:{PORT})  (POST /search) — "
           f"{len(json.load(open(index.CACHE_META)))} tables")
     server = HTTPServer((HOST, PORT), Handler)

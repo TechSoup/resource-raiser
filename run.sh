@@ -23,21 +23,22 @@ fi
 # GOOGLE_CLOUD_PROJECT is OPTIONAL — set it to activate the BigQuery-backed population sources.
 export GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-}"
 
-# --- local artifact refresh ----------------------------------------------------------
-# Generators run at RELEASE time (tools/build_registry_release.py), not on production boot: FASB
-# and Census taxonomy availability must not become a service startup dependency. The incremental
-# builder always runs over the local descriptor corpus; unchanged signatures cost no embedding calls.
+# --- registry release ---------------------------------------------------------------
+# Generators run at RELEASE time, not on production boot: FASB and Census taxonomy availability
+# must not become a service startup dependency. Existing artifacts must carry the release-builder
+# stamp and match both the deployed descriptors and the tracked generator inputs. A code-only pull
+# after a generator change therefore fails here instead of silently serving a stale catalog.
 if [ ! -f registry/current/vectors.npy ] && [ ! -f registry/vectors.npy ]; then
   echo "First run — building table descriptions and ARD index (~10 min)…"
-  "$PYTHON" tools/gen_sec_okf.py        # SEC EDGAR us-gaap concepts (from the FASB taxonomy)
-  "$PYTHON" tools/gen_census_okf.py     # Census ACS Data Profile variables
-  "$PYTHON" tools/gen_treasury_okf.py   # Treasury FiscalData series
-  "$PYTHON" tools/gen_cdc_okf.py        # CDC PLACES measures
-  "$PYTHON" tools/gen_np_okf.py         # IRS 990 nonprofit fields
-  "$PYTHON" registry/index.py build     # embed every leaf -> registry/vectors.npy + meta.json
+  "$PYTHON" tools/build_registry_release.py
   echo "Build complete."
 else
-  "$PYTHON" registry/index.py build
+  if ! "$PYTHON" registry/index.py verify --release; then
+    echo "ERROR: The generated descriptor/index release is stale or incomplete." >&2
+    echo "       Run: $PYTHON tools/build_registry_release.py" >&2
+    echo "       Or deploy sources/ and registry/current together from a verified build." >&2
+    exit 1
+  fi
 fi
 
 # --- serve --------------------------------------------------------------------------

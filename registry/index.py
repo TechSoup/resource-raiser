@@ -27,6 +27,23 @@ CURRENT = os.path.join(REGISTRY, "current")
 LEGACY_VEC = os.path.join(REGISTRY, "vectors.npy")
 LEGACY_META = os.path.join(REGISTRY, "meta.json")
 
+# These tracked files determine the generated descriptor corpus. The generated markdown itself is
+# gitignored, so a code-only deploy must compare this fingerprint with the one written by the
+# release builder or it can silently serve old leaves with an old index.
+RELEASE_GENERATORS = ("gen_sec_okf.py", "gen_census_okf.py", "gen_treasury_okf.py",
+                      "gen_cdc_okf.py", "gen_np_okf.py")
+RELEASE_INPUTS = tuple(os.path.join("tools", name) for name in RELEASE_GENERATORS) + (
+    "tools/descriptions.py",
+    "tools/descriptions_cache.json",
+    "tools/repr_queries.py",
+    "tools/repr_queries_cache.json",
+    "sources/sec-edgar/_access.md",
+    "sources/census/_access.md",
+    "sources/treasury/_access.md",
+    "sources/cdc-places/_access.md",
+    "sources/nonprofit-990/_access.md",
+)
+
 
 def _active_paths():
     """One immutable index generation. Legacy files remain readable during migration."""
@@ -97,21 +114,29 @@ SEED = ("revenue", "income", "asset", "liabilit", "equity", "profit", "expense",
         "poverty", "population", "insurance", "rent", "employ", "diabetes")  # hard-case anchors for sampling
 
 
-def build(batch=96, limit=None):
-    """Embed every OKF leaf and cache vectors + metadata, writing incrementally so an
-    interrupted build can resume. Each doc carries a `sig` (hash of its embedded text);
-    on restart we reuse the longest saved prefix whose docs still match, and embed only
-    the rest. A changed leaf (even just its representativeQueries) changes its sig, so a
-    stale prefix is detected and rebuilt rather than silently reused.
+def release_inputs_hash():
+    """Fingerprint every tracked input that can change the generated descriptor release."""
+    h = hashlib.sha256()
+    for rel in RELEASE_INPUTS:
+        path = os.path.join(ROOT, rel)
+        h.update(rel.encode("utf-8") + b"\0")
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+        except OSError:
+            h.update(b"<missing>")
+        h.update(b"\0")
+    return h.hexdigest()[:20]
 
-    limit=N builds a smaller test index of N leaves — every leaf whose title hits a SEED
-    anchor (so the hard disambiguation cases are kept) plus a stride sample of the rest."""
-    emodel = llm.embed_model()                         # sig includes the model, so switching embedding
-    docs, texts = [], []                               # providers (e.g. Gemini 3072-dim -> Ollama 768-dim)
-    for path in sorted(glob.glob(os.path.join(SOURCES, "**", "*.md"), recursive=True)):  # invalidates the cache
+
+def _collect_docs(emodel, limit=None):
+    """Read the descriptor corpus and return the metadata and exact text to embed."""
+    docs, texts = [], []
+    for path in sorted(glob.glob(os.path.join(SOURCES, "**", "*.md"), recursive=True)):
         fm = frontmatter(path)
         if not fm or not fm.get("representativeQueries"):
-            continue                                   # skip _access docs / non-entries
+            continue
         text = index_text(fm, path)
         docs.append({
             "identifier": os.path.relpath(path, ROOT),
@@ -130,10 +155,11 @@ def build(batch=96, limit=None):
         must = [i for i, d in enumerate(docs) if any(s in d["identifier"] for s in (
             "revenue-from-contract-with-customer-excluding-assessed-tax", "/revenues.md", "/profit-loss.md",
             "/assets.md", "/liabilities.md", "dp03-0062e", "dp03-0128e", "diabetes"))]
-        anchor = [i for i, d in enumerate(docs) if any(s in d["title"].lower() for s in SEED) and i not in set(must)]
+        anchor = [i for i, d in enumerate(docs) if any(s in d["title"].lower() for s in SEED)
+                  and i not in set(must)]
         rest = [i for i in range(len(docs)) if i not in set(must) | set(anchor)]
-        pick = set(must)                               # must-haves always survive truncation
-        for pool in (anchor, rest):                    # then stride-fill from hard cases, then the rest
+        pick = set(must)
+        for pool in (anchor, rest):
             need = limit - len(pick)
             if need > 0 and pool:
                 pick |= set(pool[::max(1, len(pool) // need)][:need])
@@ -143,13 +169,36 @@ def build(batch=96, limit=None):
         for d in docs:
             srcs[_srcdir(d["identifier"])] = srcs.get(_srcdir(d["identifier"]), 0) + 1
         print(f"test build: {len(docs)} leaves across sources {srcs}")
+    return docs, texts
 
-    corpus_hash = hashlib.sha256(json.dumps(
+
+def _corpus_hash(docs, emodel):
+    return hashlib.sha256(json.dumps(
         {"entries": [(d["identifier"], d["sig"]) for d in docs], "model": emodel},
         separators=(",", ":"), sort_keys=True).encode()).hexdigest()[:20]
+
+
+def build(batch=96, limit=None, release=False):
+    """Embed every OKF leaf and cache vectors + metadata, writing incrementally so an
+    interrupted build can resume. Each doc carries a `sig` (hash of its embedded text);
+    on restart we reuse the longest saved prefix whose docs still match, and embed only
+    the rest. A changed leaf (even just its representativeQueries) changes its sig, so a
+    stale prefix is detected and rebuilt rather than silently reused.
+
+    limit=N builds a smaller test index of N leaves — every leaf whose title hits a SEED
+    anchor (so the hard disambiguation cases are kept) plus a stride sample of the rest."""
+    emodel = llm.embed_model()                         # sig includes the model, so switching embedding
+    docs, texts = _collect_docs(emodel, limit)         # providers invalidate the signature and cache
+    corpus_hash = _corpus_hash(docs, emodel)
+    release_hash = release_inputs_hash() if release else None
+    # The same descriptor corpus can be rebuilt after generator inputs change. It needs a distinct
+    # immutable generation so the new release attestation is not discarded behind an existing
+    # corpus-only directory.
+    generation_hash = (hashlib.sha256(f"{corpus_hash}|{release_hash}".encode()).hexdigest()[:20]
+                       if release_hash else corpus_hash)
     os.makedirs(BUILDS, exist_ok=True)
-    final_dir = os.path.join(BUILDS, corpus_hash)
-    stage_dir = os.path.join(BUILDS, f".{corpus_hash}.staging")
+    final_dir = os.path.join(BUILDS, generation_hash)
+    stage_dir = os.path.join(BUILDS, f".{generation_hash}.staging")
     os.makedirs(stage_dir, exist_ok=True)
     stage_vec, stage_meta = (os.path.join(stage_dir, "vectors.npy"),
                              os.path.join(stage_dir, "meta.json"))
@@ -197,12 +246,18 @@ def build(batch=96, limit=None):
     if len(vecs_check) != len(meta_check) or len(meta_check) != len(docs) or len(vecs_check.shape) != 2:
         raise SystemExit("index validation failed: vector/metadata count or dimensions differ")
     manifest = {
-        "corpus_hash": corpus_hash, "embedding_provider": llm.provider(),
+        "generation_hash": generation_hash, "corpus_hash": corpus_hash,
+        "embedding_provider": llm.provider(),
         "embedding_model": emodel, "vector_dimension": int(vecs_check.shape[1]),
         "entry_count": len(meta_check), "generator_commit": _git_commit(),
+        "build_limit": limit,
         "prompt_versions": _prompt_versions(),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if release:
+        # Only the release builder sets this, after all generators have completed. A direct index
+        # build cannot truthfully claim the generated leaves correspond to the current inputs.
+        manifest["release_inputs_hash"] = release_hash
     with open(os.path.join(stage_dir, "manifest.json.tmp"), "w") as f:
         json.dump(manifest, f, indent=2)
     os.replace(os.path.join(stage_dir, "manifest.json.tmp"), os.path.join(stage_dir, "manifest.json"))
@@ -226,7 +281,7 @@ def build(batch=96, limit=None):
     for stale in glob.glob(os.path.join(BUILDS, ".*.staging")):
         if os.path.isdir(stale):
             shutil.rmtree(stale)
-    print(f"indexed {len(docs)} entries -> generation {corpus_hash}")
+    print(f"indexed {len(docs)} entries -> generation {generation_hash}")
 
 
 def _git_commit():
@@ -251,8 +306,8 @@ def _prompt_versions():
     return out
 
 
-def verify():
-    """Validate the active generation as a single artifact set without calling a provider."""
+def verify(require_release=False):
+    """Validate vectors, metadata, descriptors and (for deployment) generator inputs."""
     vec, meta = _active_paths()
     try:
         v = np.load(vec)
@@ -264,10 +319,36 @@ def verify():
                 manifest = json.load(f)
         else:
             manifest = {}
-        ok = len(v.shape) == 2 and len(v) == len(m) and len(m) > 0
+        errors = []
+        if not (len(v.shape) == 2 and len(v) == len(m) and len(m) > 0):
+            errors.append("vector/metadata count or dimensions differ")
         if manifest:
-            ok = ok and manifest.get("entry_count") == len(m) and manifest.get("vector_dimension") == v.shape[1]
-        return ok, {"entries": len(m), "dimensions": int(v.shape[1]), **manifest}
+            if manifest.get("entry_count") != len(m) or manifest.get("vector_dimension") != v.shape[1]:
+                errors.append("manifest does not describe the active vectors and metadata")
+            emodel = manifest.get("embedding_model")
+            if emodel:
+                metadata_hash = _corpus_hash(m, emodel)
+                if manifest.get("corpus_hash") != metadata_hash:
+                    errors.append("metadata corpus does not match the published manifest")
+                current_docs, _ = _collect_docs(emodel, manifest.get("build_limit"))
+                if _corpus_hash(current_docs, emodel) != metadata_hash:
+                    errors.append("deployed descriptors do not match the active index")
+        elif require_release:
+            errors.append("active index has no release manifest")
+
+        release_hash = manifest.get("release_inputs_hash") if manifest else None
+        current_release_hash = release_inputs_hash()
+        release_errors = []
+        if not release_hash:
+            release_errors.append("active index was not produced by the registry release builder")
+        elif release_hash != current_release_hash:
+            release_errors.append("descriptor generator inputs changed after this release was built")
+        checked_errors = errors + release_errors if require_release else errors
+        detail = {"entries": len(m), "dimensions": int(v.shape[1]), **manifest,
+                  "current_release_inputs_hash": current_release_hash,
+                  "release_ready": not errors and not release_errors,
+                  "errors": checked_errors, "release_errors": release_errors}
+        return not checked_errors, detail
     except Exception as e:
         return False, {"error": f"{type(e).__name__}: {e}"}
 
@@ -427,13 +508,16 @@ def search(query, k=5, prefilter=None, sources=None, rerank=True):
 
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "build":
-        build(limit=int(sys.argv[2]) if len(sys.argv) >= 3 else None)  # index.py build [limit]
+        args = sys.argv[2:]
+        release = "--release" in args
+        args = [arg for arg in args if arg != "--release"]
+        build(limit=int(args[0]) if args else None, release=release)  # build [limit] [--release]
     elif len(sys.argv) >= 3 and sys.argv[1] == "search":
         for r in search(" ".join(sys.argv[2:])):
             print(f'{r["score"]:5.1f}  {r["identifier"]}  ({r["title"]})')
     elif len(sys.argv) >= 2 and sys.argv[1] == "verify":
-        ok, detail = verify()
+        ok, detail = verify(require_release="--release" in sys.argv[2:])
         print(json.dumps(detail, indent=2))
         raise SystemExit(0 if ok else 1)
     else:
-        raise SystemExit("usage: index.py build | index.py search <query>")
+        raise SystemExit("usage: index.py build [limit] [--release] | verify [--release] | search <query>")

@@ -774,6 +774,60 @@ class IndexArtifactTests(unittest.TestCase):
                 self.assertEqual(manifest["vector_dimension"], 3)
                 ok, detail = index.verify()
                 self.assertTrue(ok, detail)
+                self.assertFalse(detail["release_ready"])
+
+    def test_release_verification_rejects_stale_inputs_and_descriptor_index_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            sources = os.path.join(td, "sources")
+            census = os.path.join(sources, "census")
+            registry = os.path.join(td, "registry")
+            builds, current = os.path.join(registry, "builds"), os.path.join(registry, "current")
+            legacy_vec = os.path.join(registry, "vectors.npy")
+            legacy_meta = os.path.join(registry, "meta.json")
+            os.makedirs(census)
+            access = os.path.join(census, "_access.md")
+            leaf = os.path.join(census, "population.md")
+            with open(access, "w") as f:
+                f.write("---\nentityType: places\n---\n")
+            with open(leaf, "w") as f:
+                f.write("---\ntitle: Population\ndescription: Population count.\n"
+                        "source: ./_access.md\nrepresentativeQueries:\n  - population\n---\n")
+
+            def fake_embed(texts, batch=96):
+                import numpy as np
+                return np.ones((len(texts), 3), dtype=np.float32)
+
+            with mock.patch.multiple(index, ROOT=td, SOURCES=sources, REGISTRY=registry,
+                                     BUILDS=builds, CURRENT=current,
+                                     LEGACY_VEC=legacy_vec, LEGACY_META=legacy_meta,
+                                     CACHE_VEC=legacy_vec, CACHE_META=legacy_meta), \
+                 mock.patch.object(index, "embed", side_effect=fake_embed), \
+                 mock.patch.object(index.llm, "embed_model", return_value="fixture-model"), \
+                 mock.patch.object(index.llm, "provider", return_value="fixture"), \
+                 mock.patch.object(index, "release_inputs_hash", return_value="inputs-a"):
+                index._STORE = None
+                index._SCOPE_CACHE.clear()
+                # A corpus-only generation may already exist from an ordinary local build. The
+                # release build still has to publish a distinct attested generation.
+                index.build()
+                index.build(release=True)
+                ok, detail = index.verify(require_release=True)
+                self.assertTrue(ok, detail)
+
+                with mock.patch.object(index, "release_inputs_hash", return_value="inputs-b"):
+                    ok, detail = index.verify(require_release=True)
+                self.assertFalse(ok)
+                self.assertIn("descriptor generator inputs changed", " ".join(detail["errors"]))
+
+                with open(leaf) as f:
+                    changed = f.read().replace("description: Population count.",
+                                               "description: Population count changed.")
+                with open(leaf, "w") as f:
+                    f.write(changed)
+                ok, detail = index.verify(require_release=True)
+                self.assertFalse(ok)
+                self.assertIn("deployed descriptors do not match", " ".join(detail["errors"]))
+            index._SCOPE_CACHE.clear()
 
 
 class SearchOrderTests(unittest.TestCase):

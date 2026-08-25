@@ -45,6 +45,20 @@ they are derived. Either:
 Option 2 is the better answer for more than one instance: the index is keyed on the embedding
 model, so instances that build separately are consistent only if they use the same model.
 
+Generated leaves and registry artifacts are gitignored, so **a `git pull` is not a complete
+deployment when a generator or its inputs changed**. Build a coherent release with:
+
+```bash
+set -a; source ./set_keys.sh; set +a
+python3 tools/build_registry_release.py
+```
+
+Then either run that command on the VM before restarting, or copy `sources/` and
+`registry/current/` together from the build machine. `run.sh` verifies the release-builder stamp,
+the descriptor corpus, and the active index before serving; it fails with the rebuild command
+instead of silently using stale artifacts. Restart both `rr-finder` and `rr-harness` after
+publishing because the finder keeps the index in memory.
+
 ## Database
 
 The grant graph lives in Azure Database for PostgreSQL (`rr-grants-pg`, `tsnlw-rg`, westus2,
