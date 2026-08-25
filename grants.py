@@ -14,7 +14,7 @@ when possible. The funder EIN is always present (it is the filer); recipient EIN
 Schedule I but not for 990-PF, so reverse also falls back to a name match and says which it used.
 Credential-free and local: the edge table is a small sqlite file, so this needs no GCP project.
 """
-import asyncio, os, sqlite3, re, decimal, threading
+import asyncio, os, sqlite3, re, decimal
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB = os.getenv("GRANTS_DB") or os.path.join(ROOT, "data", "990", "grants.sqlite")
@@ -67,14 +67,7 @@ class _Pg:
                       about one match in nine — the kind of loss that reads as "no grants found"
                       rather than as an error.
 
-    Connections are POOLED, not opened per query. Opening one costs a TCP handshake plus a TLS
-    negotiation, which is a few round trips — trivial on a local socket, ~1.5s when the caller and
-    the database are on different continents. sqlite made a fresh handle per call essentially free,
-    so the code was written that way; against a managed database that pattern dominated the
-    response time. Handles are kept per THREAD (the server is threaded, and a psycopg connection
-    is not safe to share across threads) and reused for the life of the process."""
-
-    _local = threading.local()
+    This class remains for offline commands. The server uses AsyncGrantPool below."""
 
     def __init__(self, url):
         self._url = url
@@ -82,19 +75,9 @@ class _Pg:
 
     @classmethod
     def _acquire(cls, url):
-        """This thread's connection, opened once and revived if the server dropped it."""
+        """Open an offline command connection; server connections come from AsyncGrantPool."""
         import psycopg
-        c = getattr(cls._local, "conn", None)
-        if c is not None and getattr(cls._local, "url", None) == url:
-            if not c.closed and not _broken(c):
-                return c
-            try:
-                c.close()
-            except Exception:
-                pass
-        c = psycopg.connect(url, connect_timeout=20, autocommit=True)
-        cls._local.conn, cls._local.url = c, url
-        return c
+        return psycopg.connect(url, connect_timeout=20, autocommit=True)
 
     @staticmethod
     def _translate(sql):
@@ -105,22 +88,22 @@ class _Pg:
             cur = self._c.cursor()
             cur.execute(self._translate(sql), tuple(params))
         except Exception:
-            # A pooled handle can go stale between questions (idle timeout, failover, restart).
-            # Reconnect once and retry, so a recycled connection is not a failed answer.
-            type(self)._local.conn = None
+            # Reconnect once for an offline command after idle timeout, failover, or restart.
+            self._c.close()
             self._c = self._acquire(self._url)
             cur = self._c.cursor()
             cur.execute(self._translate(sql), tuple(params))
         return _Rows(cur)
 
     def close(self):
-        pass                               # pooled: the handle outlives the caller
+        self._c.close()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
-        return False                       # nothing to release — see close()
+        self.close()
+        return False
 
 
 class _Sqlite:

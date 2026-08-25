@@ -35,6 +35,12 @@ def ask(q, timeout):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             d = json.load(r)
+        if isinstance(d, dict) and isinstance(d.get("messages"), list):
+            terminal = next((message.get("content") for message in reversed(d["messages"])
+                             if message.get("message_type") == "nlws"), None)
+            error = next((message.get("content") for message in reversed(d["messages"])
+                          if message.get("message_type") == "error"), None)
+            d = terminal if isinstance(terminal, dict) else {"error": error or "no answer"}
         return d, round(time.monotonic() - t0, 1), None
     except Exception as e:
         return None, round(time.monotonic() - t0, 1), str(e)[:120]
@@ -74,7 +80,7 @@ def main():
     ap.add_argument("--shape", help="only this shape")
     ap.add_argument("--expect", help="only cases with this expectation")
     ap.add_argument("--timeout", type=int, default=600)   # a complicated plan may fan out for minutes
-    ap.add_argument("--workers", type=int, default=4, help="concurrent queries (harness is threaded)")
+    ap.add_argument("--workers", type=int, default=4, help="concurrent client requests")
     ap.add_argument("--stop-on-fail", action="store_true")
     ap.add_argument("--coverage", action="store_true", help="one point/entity-list/topical query per source")
     a = ap.parse_args()

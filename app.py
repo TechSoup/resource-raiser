@@ -143,7 +143,7 @@ def _result_messages(stream, request, result):
     yield stream.message(nlweb.END, "", "system")
 
 
-async def run_nlweb_async(spec, *, clients, engine=harness.run_async, disconnect=None,
+async def run_nlweb_async(spec, *, clients, engine=harness.run, disconnect=None,
                           progress_size=128, heartbeat_seconds=15):
     """Yield NLWeb messages and ``None`` heartbeats from one owned root task."""
     stream = nlweb.Stream(spec.get("conversation_id"))
@@ -152,15 +152,10 @@ async def run_nlweb_async(spec, *, clients, engine=harness.run_async, disconnect
         float(os.getenv("QUERY_TIMEOUT_SECONDS", "180")),
         progress=asyncio.Queue(maxsize=progress_size)))
     async def invoke_engine():
-        # Catch inside the Task. Once SystemExit reaches Task._step, asyncio re-raises it into
-        # run_forever and terminates Uvicorn before an outer task waiter can handle the refusal.
-        try:
-            return await engine(
-                spec["query"], sites=spec.get("sites") or None,
-                assumptions=spec.get("assumptions") or None,
-                on_ambiguity=spec.get("on_ambiguity") or "answer", context=context)
-        except SystemExit as exc:
-            raise runtime.Refused(str(exc)) from exc
+        return await engine(
+            spec["query"], sites=spec.get("sites") or None,
+            assumptions=spec.get("assumptions") or None,
+            on_ambiguity=spec.get("on_ambiguity") or "answer", context=context)
 
     task = asyncio.create_task(invoke_engine(), name=f"query-{context.trace_id}")
     try:
@@ -207,7 +202,7 @@ async def run_nlweb_async(spec, *, clients, engine=harness.run_async, disconnect
         await asyncio.gather(task, return_exceptions=True)
 
 
-def create_app(engine=harness.run_async, clients_factory=AsyncSourceClients):
+def create_app(engine=harness.run, clients_factory=AsyncSourceClients):
     @asynccontextmanager
     async def lifespan(application):
         application.state.started = time.time()

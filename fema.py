@@ -5,6 +5,7 @@ Relevant to disaster-relief nonprofits (Red Cross, Habitat) and to community con
 grant applications. Keyed by US STATE; the place mention is normalized to a 2-letter code.
 """
 import re, json, urllib.request, urllib.parse
+import runtime
 import driver
 
 BASE = "https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries"
@@ -61,7 +62,7 @@ def fetch(place, n=50):
 async def fetch_async(place, n=50, *, context):
     st = to_state(place)
     if not st:
-        raise SystemExit(f"FEMA is by US state; could not map {place!r} to a state")
+        raise runtime.Refused(f"FEMA is by US state; could not map {place!r} to a state")
     data = await driver.accessor_async(
         "sources/fema/_access.md", "declarations", state=st, context=context)
     fields = ("state", "declarationTitle", "incidentType", "declarationDate",

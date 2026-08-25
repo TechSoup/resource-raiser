@@ -304,7 +304,8 @@ registry/index.py  the ARD index (build with: python3 registry/index.py build)
 tools/             generators (gen_*.py) and the grant-graph ETL (grants_download.py, bmf_ntee.py)
 catalog/           example ARD source/table descriptor dumps (~100 each)
 llm.py             provider-agnostic chat + embeddings (Azure OpenAI | OpenAI | Gemini)
-harness.py         the NL -> discover -> plan -> fetch -> check -> synthesize loop + web UI
+harness.py         the async NL -> discover -> plan -> fetch -> check -> synthesize engine
+app.py             the Starlette ASGI web UI/API, streaming, quotas, health, and telemetry
 agent_finder.py    the ARD discovery service
 planner.py         query-shape x capability planning
 grants.py          the IRS 990 grant-graph query engine
@@ -346,4 +347,4 @@ is the lightweight process-only version and does not contact Agent Finder.
 - **BigQuery sources dormant / population rankings refused** — set `GOOGLE_CLOUD_PROJECT` and run
   `gcloud auth application-default login`.
 - **Ports** — Agent Finder on `8088`, Web UI/API on `8099`. Stop with
-  `pkill -f agent_finder.py; pkill -f 'harness.py --serve'`.
+  `pkill -f agent_finder.py; pkill -f 'uvicorn app:app'`.

@@ -16,7 +16,7 @@ Live bugs, independent of everything below.
 |---|---|
 | `/healthz` spends credits | it calls `ard_client.search()`, which embeds the query (`registry/index.py`, `search()`) and increments the finder's 500/day quota. A 30s load-balancer probe exhausts it in hours, after which health checks 503 and restart loops follow. Add a finder endpoint that only verifies the loaded index. **Delete the comment above it claiming it makes no LLM call** — that comment is why the bug survived review. |
 | `BIND_HOST` exposes the finder | both processes read the same variable, so the documented "expose only the harness" configuration also publishes an unauthenticated, credit-spending `/search`. Split into `HARNESS_BIND_HOST` / `AGENT_FINDER_BIND_HOST`. |
-| Streaming does not stream | `run_nlweb()` collects `_say` events into `pending`, blocks through `run()`, and yields them afterwards. Measured: `begin` at t+0.01s, then all eight `intermediate_message` frames plus the answer at t+7.38s. Bridge `_say` to the SSE writer through a queue. |
+| Streaming did not stream (resolved) | The ASGI path now runs one owned async query task and drains its query-local bounded progress queue into SSE frames while provider calls are in flight. |
 | Finder input is unvalidated | `Content-Length`, JSON body, nested `query`, and `pageSize` are parsed without checks, and body size is unbounded. It is a public endpoint now. Return 400/413; clamp `pageSize`. |
 | The index is never refreshed | `run.sh` builds only when `vectors.npy` is absent, so a descriptor change never reaches discovery. |
 

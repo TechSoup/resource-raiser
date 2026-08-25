@@ -10,7 +10,7 @@
 
 Run:  source the Azure keys, then  python3 driver.py "how much did Apple spend on R&D in 2023?"
 """
-import asyncio, os, re, sys, json, time, threading, urllib.request, urllib.error
+import asyncio, os, re, sys, json, time, urllib.request, urllib.error
 from collections import OrderedDict
 import httpx
 import llm            # provider-agnostic chat/embeddings (Azure OpenAI | OpenAI | Gemini)
@@ -41,19 +41,16 @@ _METRIC_CACHE = {}          # whole fetch_metric result (or failure) per (metric
 _SEC_CONCEPT_META = None
 # This bounds one process. The deployed service intentionally runs one Python worker; a future
 # multi-worker or multi-VM deployment needs a shared limiter rather than silently relying on this.
-_SEC_REQUEST_LOCK = threading.Lock()
 _SEC_NEXT_REQUEST = 0.0
-_SEC_COMPANYFACTS_LOCK = threading.Lock()
 
 
 def _pace_sec_request():
     """Keep all SEC requests in this process below eight requests/second."""
     global _SEC_NEXT_REQUEST
-    with _SEC_REQUEST_LOCK:
-        now = time.monotonic()
-        if now < _SEC_NEXT_REQUEST:
-            time.sleep(_SEC_NEXT_REQUEST - now)
-        _SEC_NEXT_REQUEST = time.monotonic() + 0.125
+    now = time.monotonic()
+    if now < _SEC_NEXT_REQUEST:
+        time.sleep(_SEC_NEXT_REQUEST - now)
+    _SEC_NEXT_REQUEST = time.monotonic() + 0.125
 
 
 def _sec_companyfacts(cik):
@@ -61,49 +58,48 @@ def _sec_companyfacts(cik):
     key = str(int(cik))
     # Several ambiguity branches can ask about the same company concurrently. One lock makes the
     # first branch fetch while the others wait for its cache entry instead of issuing duplicates.
-    with _SEC_COMPANYFACTS_LOCK:
-        if key in _SEC_COMPANYFACTS_CACHE:
-            data = _SEC_COMPANYFACTS_CACHE.pop(key)
-            _SEC_COMPANYFACTS_CACHE[key] = data               # bounded LRU: this company is hot
-            return data
-        url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):0>10}.json"
-        data, absent, last_error = None, False, None
-        for attempt in range(5):
-            try:
-                _pace_sec_request()
-                with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
-                                            timeout=30) as response:
-                    data = json.load(response)
-                break
-            except urllib.error.HTTPError as error:
-                if error.code == 404:
-                    absent = True
-                    break
-                last_error = error
-                if error.code in (429, 500, 502, 503) and attempt < 4:
-                    retry_after = error.headers.get("Retry-After") if error.headers else None
-                    try:
-                        delay = float(retry_after)
-                    except (TypeError, ValueError):
-                        delay = min(8.0, 0.75 * (2 ** attempt))
-                    time.sleep(delay)
-                    continue
-                if error.code == 429:
-                    raise SourceRateLimitError(
-                        "SEC is temporarily rate limiting requests; please try again shortly") from error
-                raise
-            except Exception as error:
-                last_error = error
-                if attempt < 4:
-                    time.sleep(min(4.0, 0.5 * (2 ** attempt)))
-                    continue
-                raise
-        if data is None and not absent:
-            raise RuntimeError(f"SEC companyfacts request failed for CIK {key}: {last_error}")
-        _SEC_COMPANYFACTS_CACHE[key] = data
-        while len(_SEC_COMPANYFACTS_CACHE) > max(1, _SEC_COMPANYFACTS_CACHE_SIZE):
-            _SEC_COMPANYFACTS_CACHE.popitem(last=False)
+    if key in _SEC_COMPANYFACTS_CACHE:
+        data = _SEC_COMPANYFACTS_CACHE.pop(key)
+        _SEC_COMPANYFACTS_CACHE[key] = data               # bounded LRU: this company is hot
         return data
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):0>10}.json"
+    data, absent, last_error = None, False, None
+    for attempt in range(5):
+        try:
+            _pace_sec_request()
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
+                                        timeout=30) as response:
+                data = json.load(response)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                absent = True
+                break
+            last_error = error
+            if error.code in (429, 500, 502, 503) and attempt < 4:
+                retry_after = error.headers.get("Retry-After") if error.headers else None
+                try:
+                    delay = float(retry_after)
+                except (TypeError, ValueError):
+                    delay = min(8.0, 0.75 * (2 ** attempt))
+                time.sleep(delay)
+                continue
+            if error.code == 429:
+                raise SourceRateLimitError(
+                    "SEC is temporarily rate limiting requests; please try again shortly") from error
+            raise
+        except Exception as error:
+            last_error = error
+            if attempt < 4:
+                time.sleep(min(4.0, 0.5 * (2 ** attempt)))
+                continue
+            raise
+    if data is None and not absent:
+        raise RuntimeError(f"SEC companyfacts request failed for CIK {key}: {last_error}")
+    _SEC_COMPANYFACTS_CACHE[key] = data
+    while len(_SEC_COMPANYFACTS_CACHE) > max(1, _SEC_COMPANYFACTS_CACHE_SIZE):
+        _SEC_COMPANYFACTS_CACHE.popitem(last=False)
+    return data
 
 
 def _sec_concept(cik, concept):
@@ -240,7 +236,7 @@ def accessor(rel, op, **params):
     from accessor import okf_fetch
     try:
         return okf_fetch.fetch(os.path.join(ROOT, rel), op, params)
-    except SystemExit as exc:
+    except runtime.Refused as exc:
         message = str(exc)
         if "CREDENTIAL_ERROR:" in message:
             raise CredentialError(message.split("CREDENTIAL_ERROR:", 1)[1].strip().splitlines()[0])
@@ -253,7 +249,7 @@ async def accessor_async(rel, op, *, context, **params):
         return await okf_fetch.fetch_async(os.path.join(ROOT, rel), op, params, context=context)
     except okf_fetch.PublisherRateLimitError as exc:
         raise SourceRateLimitError(str(exc)) from exc
-    except SystemExit as exc:
+    except runtime.Refused as exc:
         message = str(exc)
         if "CREDENTIAL_ERROR:" in message:
             raise CredentialError(message.split("CREDENTIAL_ERROR:", 1)[1].strip().splitlines()[0])
@@ -438,7 +434,7 @@ async def fetch_metric_async(metric_query, ticker=None, period="latest", k=25, l
     else:
         cik, title = await sec.ticker_to_cik(ticker, context)
         if not cik:
-            raise SystemExit(f"no CIK for ticker {ticker}")
+            raise runtime.Refused(f"no CIK for ticker {ticker}")
     company = await sec.company_facts(cik, context)
 
     def try_hit(hit):
@@ -470,7 +466,7 @@ async def fetch_metric_async(metric_query, ticker=None, period="latest", k=25, l
         metadata = _concept_meta(forced)
         result = try_hit(metadata) if metadata else None
         if not result:
-            raise SystemExit(f"{title} does not report {forced} for {period or 'latest'}")
+            raise runtime.Refused(f"{title} does not report {forced} for {period or 'latest'}")
         return result
     pool = max(k, 50)
     hits = await ard_client.search_async(
@@ -482,7 +478,7 @@ async def fetch_metric_async(metric_query, ticker=None, period="latest", k=25, l
     reported = [(rank, result) for rank, result in
                 enumerate(try_hit(hit) for hit in hits) if result]
     if not reported:
-        raise SystemExit(f"no reportable data for {metric_query!r} / {title}")
+        raise runtime.Refused(f"no reportable data for {metric_query!r} / {title}")
     year = re.sub(r"\D", "", period or "")
     if len(year) == 4:
         reported = [item for item in reported if item[1]["period"][2:] == year] or reported

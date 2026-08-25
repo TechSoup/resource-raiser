@@ -6,6 +6,7 @@ org's filings, pick the year, read the field. HTTP access goes through the gener
 OKF accessor (driver.accessor) using sources/nonprofit-990/_access.md.
 """
 import re
+import runtime
 import driver
 
 ACCESS = "sources/nonprofit-990/_access.md"
@@ -36,7 +37,7 @@ async def resolve_async(org, *, context):
     data = await driver.accessor_async(ACCESS, "search", q=org, context=context)
     organizations = data.get("organizations", [])
     if not organizations:
-        raise SystemExit(f"no nonprofit found for {org!r}")
+        raise runtime.Refused(f"no nonprofit found for {org!r}")
     return {"ein": organizations[0]["ein"], "name": organizations[0]["name"]}
 
 
@@ -56,7 +57,7 @@ async def fetch_np_async(field, org, period="latest", *, context):
     data = await driver.accessor_async(ACCESS, "organization", ein=ein, context=context)
     filings = data.get("filings_with_data", [])
     if not filings:
-        raise SystemExit(f"no 990 financial data for {org!r}")
+        raise runtime.Refused(f"no 990 financial data for {org!r}")
     year = re.sub(r"\D", "", period or "")
     filing = (next((item for item in filings if str(item.get("tax_prd_yr")) == year), None)
               if len(year) == 4 else None)

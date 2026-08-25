@@ -13,13 +13,12 @@ Pick a provider with LLM_PROVIDER, or leave it unset and it auto-detects from wh
 
 See set_keys.example.sh for the full list.
 """
-import asyncio, inspect, os, time, threading
+import asyncio, inspect, os, time
 import runtime
 from query_context import QueryContext
 
 _client = None
 _async_client = None
-_async_client_lock = threading.Lock()  # only spans construction/clear; no provider I/O under it
 _provider = None
 
 # Gemini model ids change often; these are current working defaults (verify with client().models.list()).
@@ -45,9 +44,9 @@ def provider():
             elif os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
                 p = "gemini"
             else:
-                raise SystemExit("No LLM credentials found. Set one provider's keys — "
-                                 "AZURE_OPENAI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY "
-                                 "(see set_keys.example.sh).")
+                raise RuntimeError("No LLM credentials found. Set one provider's keys — "
+                                   "AZURE_OPENAI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY "
+                                   "(see set_keys.example.sh).")
         _provider = p
     return _provider
 
@@ -129,19 +128,17 @@ def _build_async():
 
 
 def async_client():
-    """Return the one shared async SDK client; the ASGI lifespan will own it after Stage 7."""
+    """Return the shared async SDK client; construction has no await and is loop-atomic."""
     global _async_client
-    with _async_client_lock:
-        if _async_client is None:
-            _async_client = _build_async()
+    if _async_client is None:
+        _async_client = _build_async()
     return _async_client
 
 
 async def close_async_client():
     """Close and clear the shared client at application shutdown (also useful to tests)."""
     global _async_client
-    with _async_client_lock:
-        c, _async_client = _async_client, None
+    c, _async_client = _async_client, None
     if c is not None:
         result = c.close()
         if inspect.isawaitable(result):
@@ -175,15 +172,13 @@ def embed_model():
 
 
 # --- usage accounting ---------------------------------------------------------------------------
-# Every question costs several chat calls plus an embedding, and on a metered provider that is real
-# money you cannot see. A Ledger is a per-question accumulator: the harness binds one for the
-# request, and every chat()/embed() below adds to it — including calls made on fan-out worker
-# threads, which is why the ledger is a SHARED object rather than a thread-local counter.
+# Every question costs several chat calls plus an embedding. A Ledger is a per-question accumulator
+# owned by QueryContext; event-loop tasks update it without yielding inside the mutation methods.
 #
 # Scope is THIS PROCESS only. The ARD Agent Finder is a separate service with its own lifecycle
 # (and its own ledger, if it ever wants one); its embedding and re-rank are not billed to the
 # caller's question.
-_LEDGER = threading.local()
+_LEGACY_LEDGER = None
 
 # USD per 1M tokens, (input, output). Matched by longest substring, so a provider-prefixed id like
 # "openai/gpt-4o-mini" resolves the same as a bare one. Override per-run with LLM_PRICE_IN /
@@ -216,7 +211,6 @@ class Ledger:
     """Counts LLM calls, tokens and cost for one unit of work (normally one question)."""
 
     def __init__(self):
-        self._lock = threading.Lock()
         self.chat_calls = 0
         self.embed_calls = 0
         self.prompt_tokens = 0
@@ -234,75 +228,74 @@ class Ledger:
         pin, pout = price_for(model)
         cost = (reported_cost if reported_cost is not None
                 else (prompt_tokens * pin + completion_tokens * pout) / 1e6)
-        with self._lock:
-            if kind == "chat":
-                self.chat_calls += 1
-                self.prompt_tokens += prompt_tokens
-                self.completion_tokens += completion_tokens
-            else:
-                self.embed_calls += 1
-                self.embed_tokens += prompt_tokens
-            self.cost_usd += cost
-            if reported_cost is not None:
-                self.cost_is_reported = True
-            for bucket, key in ((self.by_model, model), (self.by_stage, stage)):
-                b = bucket.setdefault(key, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
-                b["calls"] += 1
-                b["tokens"] += prompt_tokens + completion_tokens
-                b["cost_usd"] += cost
+        if kind == "chat":
+            self.chat_calls += 1
+            self.prompt_tokens += prompt_tokens
+            self.completion_tokens += completion_tokens
+        else:
+            self.embed_calls += 1
+            self.embed_tokens += prompt_tokens
+        self.cost_usd += cost
+        if reported_cost is not None:
+            self.cost_is_reported = True
+        for bucket, key in ((self.by_model, model), (self.by_stage, stage)):
+            b = bucket.setdefault(key, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+            b["calls"] += 1
+            b["tokens"] += prompt_tokens + completion_tokens
+            b["cost_usd"] += cost
 
     def event(self, target, model, stage, elapsed_ms, outcome, prompt_tokens=0,
               completion_tokens=0, cost_usd=0.0):
         """Per-provider-attempt telemetry; aggregate call counts above retain billing parity."""
-        with self._lock:
-            item = {
-                "target": target, "model": model, "stage": stage,
-                "elapsed_ms": round(elapsed_ms), "outcome": outcome,
-                "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
-                "tokens": prompt_tokens + completion_tokens,
-                "cost_usd": round(cost_usd, 6),
-            }
-            if len(self.call_events) < MAX_CALL_EVENTS:
-                self.call_events.append(item)
-            else:
-                # Stage 7's exporter will receive the unbounded operational stream. The usage
-                # snapshot rides in every user response, so keep it bounded and disclose loss.
-                self.call_events_dropped += 1
+        item = {
+            "target": target, "model": model, "stage": stage,
+            "elapsed_ms": round(elapsed_ms), "outcome": outcome,
+            "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "tokens": prompt_tokens + completion_tokens,
+            "cost_usd": round(cost_usd, 6),
+        }
+        if len(self.call_events) < MAX_CALL_EVENTS:
+            self.call_events.append(item)
+        else:
+            # Stage 7's exporter will receive the unbounded operational stream. The usage
+            # snapshot rides in every user response, so keep it bounded and disclose loss.
+            self.call_events_dropped += 1
 
     def snapshot(self):
-        with self._lock:
-            return {
-                "llm_calls": self.chat_calls + self.embed_calls,
-                "chat_calls": self.chat_calls,
-                "embed_calls": self.embed_calls,
-                "prompt_tokens": self.prompt_tokens,
-                "completion_tokens": self.completion_tokens,
-                "embed_tokens": self.embed_tokens,
-                "total_tokens": self.prompt_tokens + self.completion_tokens + self.embed_tokens,
-                "cost_usd": round(self.cost_usd, 6),
-                "cost_source": "provider" if self.cost_is_reported else "price-table",
-                "by_model": {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
-                             for k, v in self.by_model.items()},
-                "by_stage": {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
-                             for k, v in self.by_stage.items()},
-                "call_events": [dict(event) for event in self.call_events],
-                "call_events_dropped": self.call_events_dropped,
-            }
+        return {
+            "llm_calls": self.chat_calls + self.embed_calls,
+            "chat_calls": self.chat_calls,
+            "embed_calls": self.embed_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "embed_tokens": self.embed_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens + self.embed_tokens,
+            "cost_usd": round(self.cost_usd, 6),
+            "cost_source": "provider" if self.cost_is_reported else "price-table",
+            "by_model": {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
+                         for k, v in self.by_model.items()},
+            "by_stage": {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
+                         for k, v in self.by_stage.items()},
+            "call_events": [dict(event) for event in self.call_events],
+            "call_events_dropped": self.call_events_dropped,
+        }
 
 
 def start_ledger():
-    """Begin accounting on this thread; returns the Ledger to bind onto worker threads too."""
+    """Legacy offline accounting; serving passes its ledger in QueryContext."""
+    global _LEGACY_LEDGER
     led = Ledger()
-    _LEDGER.led = led
+    _LEGACY_LEDGER = led
     return led
 
 
 def bind_ledger(led):
-    _LEDGER.led = led                                  # always assign: pool threads are reused
+    global _LEGACY_LEDGER
+    _LEGACY_LEDGER = led
 
 
 def ledger():
-    return getattr(_LEDGER, "led", None)
+    return _LEGACY_LEDGER
 
 
 def _record(kind, model, usage, reported_cost=None, stage="other"):
@@ -338,7 +331,6 @@ def chat(system, user, json_mode=False, model=None, stage="other", max_tokens=No
     question's bill can be read by what it was spent on rather than as one lump. Output and
     reasoning limits are opt-in: short structural tasks such as reranking should not inherit the
     provider's unconstrained reasoning defaults."""
-    runtime.check()
     kw = {"response_format": {"type": "json_object"}} if json_mode else {}
     if max_tokens is not None:
         kw["max_tokens"] = int(max_tokens)
@@ -519,11 +511,9 @@ def embed(texts, batch=96, stage="other"):
         one call per string, which would burn a free-tier quota that's already exhausted);
       - a too-large batch (e.g. Gemini caps batch-embed at 100) is SPLIT and retried, not failed.
     Default batch 96 stays under Gemini's hard cap of 100."""
-    runtime.check()
     c, model = client(), embed_model()
 
     def _call(chunk, depth=0):
-        runtime.check()
         started = time.monotonic()
         try:
             r = c.embeddings.create(model=model, input=chunk)

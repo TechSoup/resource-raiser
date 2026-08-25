@@ -15,7 +15,8 @@ is only a convenience for local use. On a server, set these in the platform's ow
 | `CHAT_MODEL`, `EMBED_MODEL`, `RERANK_MODEL` | models; ranking is split out because it is the token-heavy stage |
 | `GRANTS_URL` | Postgres holding the IRS 990 grant graph |
 | `CENSUS_API_KEY` | Census ACS (free key) |
-| `BIND_HOST` | `0.0.0.0` for the harness on a server; leave the finder on loopback |
+| `HARNESS_BIND_HOST` | `0.0.0.0` for the public ASGI app on a server |
+| `AGENT_FINDER_BIND_HOST` | finder bind address; normally leave it on `127.0.0.1` |
 | `PORT` / `WEBSITES_PORT` | listening port (App Service sets this) |
 | `AGENT_FINDER_URL` | where the harness finds the finder (default `http://127.0.0.1:8088`) |
 | `ARD_PREFILTER`, `ARD_RERANK` | discovery cost/quality dials — see `registry/index.py` |
@@ -74,12 +75,24 @@ The population-scale answers read from precomputed `agg_*` rollups rather than s
 table; on the B1ms SKU the by-cause join takes ~280s live and ~6s from the rollup. Rebuild them
 with `python3 tools/grants_to_postgres.py --rollups-only` if the edge table is ever reloaded.
 
+## Process model
+
+The public service is the single event-loop-native ASGI application:
+
+```bash
+python3 -m uvicorn app:app --host 0.0.0.0 --port "${PORT:-8099}" --workers 1
+```
+
+One worker handles concurrent users with async tasks and shared async provider clients. Scale out
+with App Service instances; do not add Python query threads or multiple workers that independently
+duplicate the in-memory index, quota state, and provider pools. Keep the Agent Finder on loopback.
+
 ## Not production-hardened
 
 Worth being explicit, since it is easy to mistake this for more than it is:
 
-- Both services are Python's `http.server`. There is no TLS, no request limiting, and no graceful
-  restart. Put a reverse proxy in front for TLS.
+- Uvicorn serves plain HTTP. Terminate TLS and perform graceful instance rotation at the platform
+  or reverse proxy.
 - `POST /ask` is **unauthenticated**. A per-source daily cap (`ASK_LIMIT_PER_DAY`, default 200)
   limits the damage one runaway script can do, and returns `429` with `Retry-After` once hit. It
   counts failed and refused questions too, because those cost money as well.

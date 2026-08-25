@@ -9,12 +9,11 @@ university, company vs band) is delegated to a `pick` callback (the LLM).
 
 Results are cached to resolver_cache.json — resolutions are stable.
 """
-import asyncio, os, json, threading, urllib.request, urllib.parse
+import asyncio, os, json, urllib.request, urllib.parse
 
 import httpx
 
 import runtime
-_LOCK = threading.Lock()
 
 WD = "https://www.wikidata.org/w/api.php"
 CACHE = os.path.join(os.path.dirname(__file__), "resolver_cache.json")
@@ -230,9 +229,7 @@ def hierarchy(qid, max_depth=4):
                 cur = e["claims"]["P131"][0]["mainsnak"]["datavalue"]["value"]["id"]
             except Exception:
                 cur = None
-    with _LOCK:
-        _cache[ck] = out
-        json.dump(_cache, open(CACHE, "w"))
+    _cache[ck] = out
     return out
 
 
@@ -247,7 +244,5 @@ def resolve(mention, type_hint, pick):
     qid = pick(mention, type_hint, cands) or cands[0]["id"]
     label, keys = _claims(qid)
     out = {"qid": qid, "label": label, "keys": keys}
-    with _LOCK:
-        _cache[ck] = out
-        json.dump(_cache, open(CACHE, "w"))
+    _cache[ck] = out
     return out

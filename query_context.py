@@ -1,7 +1,6 @@
 """Explicit ownership for one asynchronous query.
 
-The synchronous production path still uses thread-local compatibility state. New async code takes
-one of these objects explicitly so simultaneous tasks cannot inherit or overwrite one another's
+Every operation takes one of these objects explicitly so simultaneous tasks cannot inherit or overwrite one another's
 deadline, progress stream, accounting, or clients.
 """
 from __future__ import annotations
@@ -154,15 +153,7 @@ class QueryContext:
                 await asyncio.gather(pending, return_exceptions=True)
             raise
 
-        async def normalize_refusal():
-            # SystemExit escaping a Task is re-raised into run_forever and terminates Uvicorn.
-            # Convert at the task boundary while the sync refusal idiom is still being migrated.
-            try:
-                return await awaitable
-            except SystemExit as exc:
-                raise runtime.Refused(str(exc)) from exc
-
-        work = asyncio.ensure_future(normalize_refusal())
+        work = asyncio.ensure_future(awaitable)
         cancellation = asyncio.create_task(self.cancelled.wait())
         try:
             done, _ = await asyncio.wait(

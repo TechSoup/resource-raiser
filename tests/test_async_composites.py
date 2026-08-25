@@ -71,11 +71,60 @@ class StructuredConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(runtime.QueryBudgetExceeded, "fan-out"):
             ctx.fork().budget.consume_fanout()
 
-    async def test_system_exit_inside_task_group_becomes_an_ordinary_refusal(self):
+    async def test_refusal_inside_task_group_remains_an_ordinary_refusal(self):
         async def refuses(_context):
-            raise SystemExit("fixture refusal")
+            raise runtime.Refused("fixture refusal")
         with self.assertRaisesRegex(runtime.Refused, "fixture refusal"):
             await harness._ordered(context(), [refuses])
+
+    async def test_task_group_surfaces_real_failure_not_exception_group(self):
+        async def fails(_context):
+            raise RuntimeError("accessor blew up")
+        with self.assertRaisesRegex(RuntimeError, "accessor blew up") as raised:
+            await harness._ordered(context(), [fails])
+        self.assertNotIn("TaskGroup", str(raised.exception))
+
+    async def test_task_group_preserves_refusal_subclasses(self):
+        async def exhausted(_context):
+            raise runtime.QueryBudgetExceeded("budget exhausted")
+        with self.assertRaises(runtime.QueryBudgetExceeded):
+            await harness._ordered(context(), [exhausted])
+
+    async def test_refusal_outranks_sibling_cancellation(self):
+        sibling_started = asyncio.Event()
+
+        async def cancelled(_context):
+            sibling_started.set()
+            await asyncio.Event().wait()
+
+        async def refuses(_context):
+            await sibling_started.wait()
+            raise runtime.Refused("real refusal")
+
+        with self.assertRaisesRegex(runtime.Refused, "real refusal"):
+            await harness._ordered(context(), [cancelled, refuses])
+
+    async def test_real_failure_outranks_explicit_query_cancellation(self):
+        both_started = asyncio.Event()
+        started = 0
+
+        async def rendezvous():
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
+
+        async def deadline(_context):
+            await rendezvous()
+            raise runtime.QueryCancelled("query deadline exceeded")
+
+        async def fails(_context):
+            await rendezvous()
+            raise RuntimeError("accessor blew up")
+
+        with self.assertRaisesRegex(RuntimeError, "accessor blew up"):
+            await harness._ordered(context(), [deadline, fails])
 
     async def test_correlation_refuses_high_blowup_before_materializing(self):
         ctx = context()
@@ -111,7 +160,7 @@ class StructuredConcurrencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_async_fanout_creates_no_worker_threads(self):
         before = {thread.ident for thread in threading.enumerate()}
         ctx = context()
-        with mock.patch.object(harness, "retrieve_for_async", mock.AsyncMock(
+        with mock.patch.object(harness, "retrieve_for", mock.AsyncMock(
                 side_effect=[{"value": 1, "source": "s"}, {"value": 3, "source": "s"}])):
             result = await harness._run_fanout_async("compare", {
                 "attribute": "value", "entities": ["A", "B"]}, "comparison", context=ctx)

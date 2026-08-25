@@ -61,7 +61,7 @@ class AsyncAccessorTests(unittest.IsolatedAsyncioTestCase):
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
                 path = os.path.join(directory, "source.md")
                 descriptor(path, "https://publisher.test/search", "POST", '{"query":"$q"}')
-                with self.assertRaisesRegex(SystemExit, "CREDENTIAL_ERROR"):
+                with self.assertRaisesRegex(runtime.Refused, "CREDENTIAL_ERROR"):
                     await okf_fetch.fetch_async(path, "get", {"q": "Stanford"},
                                                 context=QueryContext(http_client=client))
         self.assertEqual(seen, {"method": "POST", "body": b'{"query":"Stanford"}',

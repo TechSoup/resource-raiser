@@ -2,7 +2,6 @@
 import asyncio
 import os
 import sys
-import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -214,36 +213,6 @@ class AsyncLlmTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(built.closed)
             self.assertIsNone(llm._async_client)
 
-    async def test_shared_client_construction_is_safe_during_threaded_migration(self):
-        built = FakeClient()
-        callers = 8
-        rendezvous = threading.Barrier(callers)
-        results = [None] * callers
-        builds = 0
-        count_lock = threading.Lock()
-
-        def build():
-            nonlocal builds
-            with count_lock:
-                builds += 1
-            time.sleep(0.02)  # widen the old check-then-assign race
-            return built
-
-        def get(index):
-            rendezvous.wait(timeout=2)
-            results[index] = llm.async_client()
-
-        with mock.patch.object(llm, "_async_client", None), \
-             mock.patch.object(llm, "_build_async", side_effect=build):
-            threads = [threading.Thread(target=get, args=(index,)) for index in range(callers)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=2)
-            self.assertTrue(all(not thread.is_alive() for thread in threads))
-            self.assertEqual(builds, 1)
-            self.assertTrue(all(result is built for result in results))
-            await llm.close_async_client()
 
 
 class QueryContextTests(unittest.IsolatedAsyncioTestCase):
@@ -273,36 +242,6 @@ class QueryContextTests(unittest.IsolatedAsyncioTestCase):
                 coroutine.close()
 
 
-class SyncCompatibilityTelemetryTests(unittest.TestCase):
-    def test_sync_accounting_parity_gains_additive_call_telemetry(self):
-        seen = {}
-
-        def create(**kwargs):
-            seen.update(kwargs)
-            return response("sync", prompt=5, completion=2)
-
-        client = FakeClient(chat_create=create)
-        ledger = llm.start_ledger()
-        try:
-            with mock.patch.object(llm, "client", return_value=client), \
-                 mock.patch.object(llm, "provider", return_value="openai"), \
-                 mock.patch.object(llm, "_openrouter", return_value=False):
-                self.assertEqual(llm.chat("s", "u", model="fixture", stage="check"), "sync")
-        finally:
-            llm.bind_ledger(None)
-        snapshot = ledger.snapshot()
-        self.assertEqual(snapshot["llm_calls"], 1)
-        self.assertEqual(snapshot["total_tokens"], 7)
-        self.assertEqual(snapshot["call_events"][0]["outcome"], "success")
-        self.assertEqual(snapshot["call_events"][0]["stage"], "check")
-
-    def test_response_call_events_are_bounded_and_report_drops(self):
-        ledger = llm.Ledger()
-        for index in range(llm.MAX_CALL_EVENTS + 5):
-            ledger.event("openai", "fixture", "check", index, "success")
-        snapshot = ledger.snapshot()
-        self.assertEqual(len(snapshot["call_events"]), llm.MAX_CALL_EVENTS)
-        self.assertEqual(snapshot["call_events_dropped"], 5)
 
 
 class _PatchStack:

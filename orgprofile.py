@@ -7,6 +7,7 @@ plain-English overview. Keyed by the entity's Wikidata QID, which the harness ha
 already resolved on the cross-source spine (see resolver.py), so no extra lookup.
 """
 import re, urllib.request, urllib.parse, json
+import runtime
 
 import resolver
 
@@ -95,17 +96,17 @@ async def fetch_async(attr, qid, orgname=None, *, context):
     if attr == "overview":
         title = (entity.get("sitelinks", {}).get("enwiki") or {}).get("title")
         if not title:
-            raise SystemExit(f"no Wikipedia article for {orgname}")
+            raise runtime.Refused(f"no Wikipedia article for {orgname}")
         summary = await resolver._get_async(
             WP + urllib.parse.quote(title.replace(" ", "_")), context=context)
         if not summary.get("extract"):
-            raise SystemExit(f"no Wikipedia overview for {orgname}")
+            raise runtime.Refused(f"no Wikipedia overview for {orgname}")
         return {**base, "field": "Overview", "value": summary["extract"]}
     prop, human, kind = PROPS[attr]
     claims = [claim for claim in entity.get("claims", {}).get(prop, [])
               if claim["mainsnak"].get("datavalue")]
     if not claims:
-        raise SystemExit(f"no {human} on Wikidata for {orgname}")
+        raise runtime.Refused(f"no {human} on Wikidata for {orgname}")
     record = {**base, "field": human}
     value = claims[0]["mainsnak"]["datavalue"]["value"]
     if kind == "date":
@@ -125,6 +126,6 @@ async def fetch_async(attr, qid, orgname=None, *, context):
         labels = await resolver.class_labels_async(ids, context=context)
         names = [labels[qid] for qid in ids if labels.get(qid)]
         if not names:
-            raise SystemExit(f"no resolvable {human} for {orgname}")
+            raise runtime.Refused(f"no resolvable {human} for {orgname}")
         record["value"] = ", ".join(names)
     return record

@@ -43,18 +43,20 @@ fi
 
 # --- serve --------------------------------------------------------------------------
 pkill -f "agent_finder.py" 2>/dev/null || true
-pkill -f "harness.py --serve" 2>/dev/null || true
+pkill -f "uvicorn app:app" 2>/dev/null || true
 sleep 1
 # The two services have separate bind controls. Exposing the harness must never implicitly expose
 # the unauthenticated, credit-spending finder.
 export AGENT_FINDER_BIND_HOST="${AGENT_FINDER_BIND_HOST:-127.0.0.1}"
 export HARNESS_BIND_HOST="${HARNESS_BIND_HOST:-127.0.0.1}"
+HARNESS_PORT="${PORT:-${WEBSITES_PORT:-8099}}"
 nohup "$PYTHON" agent_finder.py    > /tmp/ard_agent_finder.log 2>&1 &
-nohup "$PYTHON" harness.py --serve > /tmp/ard_harness.log      2>&1 &
+nohup "$PYTHON" -m uvicorn app:app --host "$HARNESS_BIND_HOST" \
+  --port "$HARNESS_PORT" --workers 1 > /tmp/ard_harness.log 2>&1 &
 
 up=""
 for i in $(seq 1 30); do
-  if curl -s -m2 http://127.0.0.1:8088/ >/dev/null 2>&1 && curl -s -m2 http://127.0.0.1:8099/ >/dev/null 2>&1; then
+  if curl -s -m2 http://127.0.0.1:8088/ >/dev/null 2>&1 && curl -s -m2 "http://127.0.0.1:$HARNESS_PORT/health" >/dev/null 2>&1; then
     up=1; break
   fi
   sleep 1
@@ -67,9 +69,9 @@ if [ -z "$up" ]; then
 fi
 
 echo "Agent Finder  : http://127.0.0.1:8088/  (POST /search)"
-echo "Harness/Web UI: http://127.0.0.1:8099/  (web UI + POST /ask)"
+echo "Harness/Web UI: http://127.0.0.1:$HARNESS_PORT/  (web UI + POST /ask)"
 echo "Logs: /tmp/ard_agent_finder.log  /tmp/ard_harness.log"
-echo "Stop: pkill -f agent_finder.py; pkill -f 'harness.py --serve'"
+echo "Stop: pkill -f agent_finder.py; pkill -f 'uvicorn app:app'"
 echo
 echo "Note: the IRS 990 grant-graph queries need a one-time data extraction:"
 echo "      python3 tools/grants_download.py   (downloads ~13GB over ~1-2h, builds data/990/grants.sqlite)"

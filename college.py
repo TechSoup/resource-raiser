@@ -7,6 +7,7 @@ its own fuzzy matching), so no spine resolution is needed. Fields come back as f
 keys (e.g. "latest.cost.tuition.out_of_state"), which is what the leaf pins.
 """
 import os, json, urllib.request, urllib.parse
+import runtime
 import driver
 
 BASE = "https://api.data.gov/ed/collegescorecard/v1/schools"
@@ -39,10 +40,10 @@ async def fetch_async(field, name, *, context):
             "sources/college-scorecard/_access.md", "school", name=name, fields=field,
             key=KEY, context=context)
     except driver.SourceRateLimitError as exc:
-        raise SystemExit("College Scorecard rate-limited — set DATA_GOV_API_KEY for higher limits") from exc
+        raise runtime.Refused("College Scorecard rate-limited — set DATA_GOV_API_KEY for higher limits") from exc
     results = data.get("results") or []
     if not results:
-        raise SystemExit(f"no College Scorecard match for {name!r}")
+        raise runtime.Refused(f"no College Scorecard match for {name!r}")
     row = results[0]
     return {"school": row.get("school.name", name), "field": field, "value": row.get(field),
             "source": "US Dept. of Education — College Scorecard (did:web:ed.gov)"}

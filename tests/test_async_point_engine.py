@@ -47,7 +47,6 @@ class AsyncPointEngineTests(unittest.IsolatedAsyncioTestCase):
                                mock.AsyncMock(return_value=json.dumps(classification))) as chat, \
              mock.patch.object(ard_client, "search_many_async",
                                mock.AsyncMock(return_value=[hit])) as search, \
-             mock.patch.object(harness.TK, "llm", side_effect=AssertionError("sync LLM called")), \
              mock.patch.object(ard_client, "search_many",
                                side_effect=AssertionError("sync Finder called")):
             actual, hits = await harness.discover_async(
@@ -80,7 +79,7 @@ class AsyncPointEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chat.await_args.args[0], harness._entity_selection_system(
             "Stanford", "org", "How much NIH funding does Stanford get?", listing))
 
-    async def test_named_point_contracts_all_pass_through_run_async_concurrently(self):
+    async def test_named_point_contracts_all_pass_through_run_concurrently(self):
         by_question = {}
         for case in NAMED_CASES:
             by_question.setdefault(case["question"], []).append(case)
@@ -130,7 +129,6 @@ class AsyncPointEngineTests(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(harness, "_answers_async", mock.AsyncMock(return_value=(True, ""))), \
              mock.patch.object(harness.TK, "synthesize_async",
                                mock.AsyncMock(return_value="fixture answer")), \
-             mock.patch.object(harness.TK, "llm", side_effect=AssertionError("sync LLM called")), \
              mock.patch.object(ard_client, "search_many",
                                side_effect=AssertionError("sync Finder called")), \
              mock.patch.object(driver, "accessor", side_effect=AssertionError("sync fetch called")), \
@@ -138,7 +136,7 @@ class AsyncPointEngineTests(unittest.IsolatedAsyncioTestCase):
                                side_effect=AssertionError("sync connector called")):
             inputs = [(case, context()) for case in NAMED_CASES]
             results = await asyncio.gather(*(
-                harness.run_async(case["question"], assumptions=case.get("assumptions"), context=ctx)
+                harness.run(case["question"], assumptions=case.get("assumptions"), context=ctx)
                 for case, ctx in inputs))
 
         self.assertEqual(len(results), len(NAMED_CASES))

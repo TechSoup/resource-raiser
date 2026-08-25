@@ -428,11 +428,10 @@ chosen.
 employees / net income. The classifier flags these and lists the distinct interpretations;
 the engine answers EACH and presents them side by side rather than choosing one.
 
-- The interpretations run **in parallel** (ThreadPoolExecutor) with a hard ~55s deadline,
+- The interpretations run concurrently as owned `asyncio` tasks under the query deadline,
   because some interpretations are genuinely unavailable for the entity (a company has no
   clean employee-count or EBITDA concept) and backtrack for a long time — one slow branch
   must not block the answerable ones. Verified: "How big is Microsoft?" → revenue $281.7B,
   assets $619B, net income $101.8B, employees honestly "unavailable".
-- Both HTTP servers are now ThreadingHTTPServer and resolver cache writes are lock-guarded,
-  so the parallel fan-out is real rather than serialized at discovery.
-- `_say` is lock-guarded so worker threads streaming progress don't interleave SSE frames.
+- The Resource Raiser HTTP boundary is ASGI/Uvicorn. Progress is carried by each query's bounded
+  async queue, so concurrent requests cannot cross streams and no worker thread is created.

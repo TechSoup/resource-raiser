@@ -5,7 +5,7 @@ This is the discovery seam: everything that needs to find a table goes through
 here, so the registry can be a separate process (or remote) rather than an
 in-process call. Configure the finder with AGENT_FINDER_URL.
 """
-import asyncio, os, json, socket, urllib.parse, urllib.request, urllib.error, threading
+import asyncio, os, json, socket, urllib.parse, urllib.request, urllib.error
 
 import httpx
 
@@ -32,14 +32,12 @@ class NoRelevantTablesError(DiscoveryError):
 # --- discovery usage ----------------------------------------------------------------------------
 # The finder reports what each search cost it. Those calls belong to the finder, not to the caller's
 # question, so they are accumulated SEPARATELY here and never folded into the caller's own ledger —
-# a question makes several searches, and fan-out stages search from worker threads, so like the
-# harness ledger this is one shared object rather than a per-thread counter.
-_TALLY = threading.local()
+# Serving attaches this accumulator to QueryContext. This fallback exists only for offline clients.
+_LEGACY_USAGE = None
 
 
 class DiscoveryUsage:
     def __init__(self):
-        self._lock = threading.Lock()
         self.searches = 0
         self.chat_calls = 0
         self.embed_calls = 0
@@ -53,53 +51,53 @@ class DiscoveryUsage:
     def add(self, snap):
         if not isinstance(snap, dict):
             return
-        with self._lock:
-            self.searches += 1
-            self.chat_calls += int(snap.get("chat_calls") or 0)
-            self.embed_calls += int(snap.get("embed_calls") or 0)
-            self.prompt_tokens += int(snap.get("prompt_tokens") or 0)
-            self.completion_tokens += int(snap.get("completion_tokens") or 0)
-            self.embed_tokens += int(snap.get("embed_tokens") or 0)
-            self.cost_usd += float(snap.get("cost_usd") or 0.0)
-            if snap.get("cost_source") == "provider":
-                self.cost_is_reported = True
-            for k, v in (snap.get("by_model") or {}).items():
-                m = self.by_model.setdefault(k, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
-                m["calls"] += int(v.get("calls") or 0)
-                m["tokens"] += int(v.get("tokens") or 0)
-                m["cost_usd"] += float(v.get("cost_usd") or 0.0)
+        self.searches += 1
+        self.chat_calls += int(snap.get("chat_calls") or 0)
+        self.embed_calls += int(snap.get("embed_calls") or 0)
+        self.prompt_tokens += int(snap.get("prompt_tokens") or 0)
+        self.completion_tokens += int(snap.get("completion_tokens") or 0)
+        self.embed_tokens += int(snap.get("embed_tokens") or 0)
+        self.cost_usd += float(snap.get("cost_usd") or 0.0)
+        if snap.get("cost_source") == "provider":
+            self.cost_is_reported = True
+        for k, v in (snap.get("by_model") or {}).items():
+            m = self.by_model.setdefault(k, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+            m["calls"] += int(v.get("calls") or 0)
+            m["tokens"] += int(v.get("tokens") or 0)
+            m["cost_usd"] += float(v.get("cost_usd") or 0.0)
 
     def snapshot(self):
-        with self._lock:
-            return {
-                "searches": self.searches,
-                "llm_calls": self.chat_calls + self.embed_calls,
-                "chat_calls": self.chat_calls,
-                "embed_calls": self.embed_calls,
-                "prompt_tokens": self.prompt_tokens,
-                "completion_tokens": self.completion_tokens,
-                "embed_tokens": self.embed_tokens,
-                "total_tokens": self.prompt_tokens + self.completion_tokens + self.embed_tokens,
-                "cost_usd": round(self.cost_usd, 6),
-                "cost_source": "provider" if self.cost_is_reported else "price-table",
-                "by_model": {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
-                             for k, v in self.by_model.items()},
-                "billed_to": "agent-finder",        # a separate service: NOT part of the caller's total
-            }
+        return {
+            "searches": self.searches,
+            "llm_calls": self.chat_calls + self.embed_calls,
+            "chat_calls": self.chat_calls,
+            "embed_calls": self.embed_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "embed_tokens": self.embed_tokens,
+            "total_tokens": self.prompt_tokens + self.completion_tokens + self.embed_tokens,
+            "cost_usd": round(self.cost_usd, 6),
+            "cost_source": "provider" if self.cost_is_reported else "price-table",
+            "by_model": {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
+                         for k, v in self.by_model.items()},
+            "billed_to": "agent-finder",        # a separate service: NOT part of the caller's total
+        }
 
 
 def start_usage():
+    global _LEGACY_USAGE
     u = DiscoveryUsage()
-    _TALLY.u = u
+    _LEGACY_USAGE = u
     return u
 
 
 def bind_usage(u):
-    _TALLY.u = u                                    # always assign: pool threads are reused
+    global _LEGACY_USAGE
+    _LEGACY_USAGE = u
 
 
 def usage():
-    return getattr(_TALLY, "u", None)
+    return _LEGACY_USAGE
 
 
 def create_async_http_client(**kwargs):
@@ -136,9 +134,9 @@ async def _arequest(context, method, path, *, params=None, json_body=None):
     except (asyncio.CancelledError, runtime.QueryCancelled):
         raise
     except httpx.TimeoutException as exc:
-        raise SystemExit(f"agent finder unreachable or too slow at {BASE} ({exc})") from exc
+        raise runtime.Refused(f"agent finder unreachable or too slow at {BASE} ({exc})") from exc
     except httpx.RequestError as exc:
-        raise SystemExit(f"agent finder unreachable at {BASE} ({exc})") from exc
+        raise runtime.Refused(f"agent finder unreachable at {BASE} ({exc})") from exc
     try:
         payload = response.json()
     except ValueError:
@@ -152,7 +150,7 @@ async def _aget_async(path, *, context, params=None):
     if response.status_code == 404:
         return None
     if response.is_error:
-        raise SystemExit(f"agent finder error {response.status_code} for {path}")
+        raise runtime.Refused(f"agent finder error {response.status_code} for {path}")
     return payload
 
 
@@ -239,7 +237,7 @@ async def explore_async(field="publisher", limit=100, *, context):
         return payload if not response.is_error else {"facets": {}}
     except (asyncio.CancelledError, runtime.QueryCancelled):
         raise
-    except SystemExit:
+    except runtime.Refused:
         return {"facets": {}}
 
 
@@ -321,7 +319,7 @@ async def search_many_async(texts, k=10, sources=None, rerank=True, rerank_query
         if payload.get("code") == "query_cancelled":
             context.cancel()
             raise runtime.QueryCancelled(payload.get("error") or "Agent Finder query cancelled")
-        raise SystemExit(f"agent finder error {response.status_code}: "
+        raise runtime.Refused(f"agent finder error {response.status_code}: "
                          f"{payload.get('error') or response.reason_phrase}")
     return _search_results(payload)
 

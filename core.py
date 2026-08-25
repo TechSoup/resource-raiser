@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
-"""Shared toolkit used by every join executor.
-
-The pipeline is: discover (ARD) -> resolve (entity) -> fetch (OKF accessor) ->
-JOIN/COMPUTE -> synthesize. Only the JOIN/COMPUTE step varies between executors;
-everything else lives here so executors differ *only* in how they combine data.
-"""
+"""Shared answer-synthesis prompt for the canonical async query engine."""
 import json
-import driver       # reuse: ask_llm, ticker_to_cik, fetch_metric
-import ard_client   # discovery via the ARD Agent Finder (POST /search)
 
 
 _SYNTHESIS_SYSTEM = (
@@ -68,53 +61,8 @@ _SYNTHESIS_SYSTEM = (
 
 
 class Toolkit:
-    # --- discovery (via the ARD agent finder) ---
-    def search(self, query, k=8):
-        return ard_client.search(query, k)
-
-    # --- LLM (also usable as the inline "SLM" for resolution) ---
-    def llm(self, system, user, json_mode=False, stage="other"):
-        return driver.ask_llm(system, user, json_mode, stage=stage)
-
-    # --- entity resolution (SLM-assisted name -> ids) ---
-    def resolve_entity(self, name):
-        info = json.loads(self.llm(
-            'Return JSON {"ticker":"<US stock ticker>"} for the company the user names.',
-            name, json_mode=True))
-        cik, title = driver.ticker_to_cik(info.get("ticker", "")) if info.get("ticker") else (None, None)
-        return {"name": name, "ticker": info.get("ticker", ""), "cik": cik, "title": title}
-
-    # --- fetch one figure (discover concept + resolve + accessor) ---
-    def fetch(self, metric, ticker, period="latest"):
-        t = ticker if (ticker and ticker.isupper() and len(ticker) <= 5) else self.resolve_entity(ticker)["ticker"]
-        return driver.fetch_metric(metric, t, period, log=False)
-
-    # --- nonprofit join primitives (EIN spine) ---
-    def resolve_ein(self, name):
-        import nonprofit
-        return nonprofit.resolve(name)                       # {ein, name}
-
-    def np_field(self, field, org, period="latest"):
-        import nonprofit
-        return nonprofit.fetch_np(field, org, period)        # one 990 field for a nonprofit
-
-    def federal_funding(self, org):
-        import nonprofit
-        return nonprofit.federal_funding(org)                # USAspending awards total
-
-    # --- universal cross-domain primitive: discover+retrieve any single fact ---
-    def lookup(self, subquestion):
-        import harness
-        return harness.retrieve_for(subquestion)             # {source, data} for ANY domain
-
-    # --- final NL synthesis ---
-    def synthesize(self, question, data):
-        return self.llm(
-            _SYNTHESIS_SYSTEM,
-            json.dumps({"question": question, "data": data}), stage="synthesize")
-
     async def synthesize_async(self, question, data, *, context):
-        """Async equivalent of synthesis using the same canonical prompt."""
+        """Synthesize an answer through the query-owned async LLM client."""
         import llm
         return await llm.chat_async(
             _SYNTHESIS_SYSTEM, json.dumps({"question": question, "data": data}),

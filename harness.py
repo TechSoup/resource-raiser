@@ -6,12 +6,13 @@
     -> retrieve from that source (live)                : SEC concept, or any OKF source
     -> synthesize a cited answer
 
-Run as a CLI or as a server the connectors skill calls:
+Run as a CLI; the ASGI application in app.py owns HTTP serving:
   set -a; source ./set_keys.sh; set +a
   python3 harness.py "How much did Apple spend on R&D in 2023?"     # one-shot (prints JSON)
-  python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
+  python3 -m uvicorn app:app --host 127.0.0.1 --port 8099
 """
-import asyncio, os, sys, json, time, math, re, signal, traceback, urllib.parse, queue, uuid
+import asyncio, os, sys, json, math, re
+import runtime
 import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime, docpage
 from domain import Attempt, Clarification, ClarificationOption, Evidence, QueryIntent
 from core import Toolkit
@@ -19,53 +20,6 @@ from query_context import QueryContext
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TK = Toolkit()
-
-# Live-progress channel. When a request is streaming (/ask_stream), the handler installs a writer
-# that pushes each event to THAT browser; otherwise _say is a no-op.
-#
-# PER-THREAD, not module-global. The server is ThreadingHTTPServer (see serve()), so requests run
-# concurrently: with one global writer a second request overwrote the first's channel (its browser
-# went silent), and worse, whichever request finished first cleared the global and silenced any
-# request still running — which hung the UI (the client's reader loop only ends on a clean close)
-# and cascaded, one stuck request killing every retry. Thread-local gives each request its own.
-import threading
-_EMIT = threading.local()
-_EMIT_LOCK = threading.Lock()          # parallel executors emit from worker threads; serialize the writes
-
-
-def _say(kind, **data):
-    runtime.check()
-    cb = getattr(_EMIT, "cb", None)
-    if cb:
-        try:
-            with _EMIT_LOCK:
-                cb({"kind": kind, **data})
-        except Exception:
-            pass
-
-
-def _with_emitter(fn):
-    """Bind the CALLING thread's stream writer onto a callable run on a worker thread. The fan-out
-    helpers hand work to a ThreadPoolExecutor, and a fresh pool thread has no thread-local writer —
-    so without this every event from a parallel stage is dropped. Always assign (even None): pool
-    threads are reused, so a stale writer would otherwise publish into an already-closed socket.
-
-    The question's usage ledger rides along for the same reason: a fan-out stage can issue most of
-    the LLM calls, and they would go uncounted on a pool thread that never had the ledger bound."""
-    cb = getattr(_EMIT, "cb", None)
-    led = llm.ledger()
-    disc = ard_client.usage()
-    cancel, deadline = runtime.capture()
-
-    def wrapped(*a, **k):
-        _EMIT.cb = cb
-        llm.bind_ledger(led)
-        ard_client.bind_usage(disc)
-        runtime.bind(cancel, deadline)
-        return fn(*a, **k)
-
-    return wrapped
-
 
 import glob as _glob
 
@@ -384,105 +338,6 @@ def _discovery_system(src_list):
             "SOURCES:\n" + src_list)
 
 
-def discover(question, sites=None, assumptions=None):
-    """Pass 1: extract the ENTITY, the entity-expunged ATTRIBUTE, and (via the entity's
-    TYPE) which SOURCE(s) apply. Pass 2: match the attribute to fields within those sources."""
-    _say("status", icon="🔍", msg="Reading your question…")
-    src_list = "\n".join(f"- {d}: covers {t}" for d, t in SOURCE_TYPES.items())
-    ctx = json.loads(TK.llm(
-        _discovery_system(src_list), question, json_mode=True, stage="classify"))
-    ctx = _normalize_shape(ctx)
-    ctx["question"] = question
-    if assumptions:
-        allowed = {"entity", "type", "attribute", "period", "shape", "concept", "entity_qid"}
-        applied = {k: v for k, v in assumptions.items() if k in allowed and v not in (None, "")}
-        ctx.update(applied)
-        # A measure supplied on a follow-up is the user's answer to our clarification. Retaining
-        # the classifier's original interpretations would immediately ask the same question again.
-        if "attribute" in applied:
-            ctx["interpretations"] = []
-        # An entity supplied on a follow-up is the caller's answer to our entity clarification.
-        # Without this the classifier still reports "ambiguous" and we ask the same question again.
-        if applied.get("entity"):
-            ctx["entity_status"] = "resolved"
-            ctx["canonical_entity"] = applied["entity"]
-            ctx["entity_candidates"] = []
-        # An entity supplied on a follow-up is the caller's answer to our entity clarification.
-        # Without this the classifier still reports "ambiguous" and we ask the same question again.
-        if applied.get("entity"):
-            ctx["entity_status"] = "resolved"
-            ctx["canonical_entity"] = applied["entity"]
-            ctx["entity_candidates"] = []
-        ctx = _normalize_shape(ctx)
-    # Robustness: the classifier sometimes drops the place from a "<measure> in <Place>" question
-    # (leaving an empty entity). Recover it from the question so a place lookup doesn't fail with no geo.
-    if ctx.get("type") == "place" and not (ctx.get("entity") or "").strip():
-        # "in" was the only preposition here, so "the population OF Colorado" had no safety net:
-        # the classifier dropped the entity, nothing recovered it, and every candidate then failed
-        # with "no geo" until the attempt budget ran out.
-        recovered = _recover_place(question)
-        if recovered:
-            ctx["entity"] = recovered
-    sources = [s for s in (ctx.get("sources") or []) if s in SOURCE_TYPES] or list(SOURCE_TYPES)
-    sources = _ensure_grant_graph(question, sources)
-    if sites:
-        # An explicit NLWeb `site=` is the caller stating the corpus. That outranks the
-        # classifier's guess — the point of the parameter is to constrain, not to suggest.
-        wanted = [s for s in sites if s in SOURCE_TYPES]
-        if wanted:
-            sources = wanted
-    # A per-entity question (about ONE named entity) must never be confined to population-only sources
-    # (the BigQuery *-bq sources answer rankings/aggregates, not a single point lookup). If the
-    # classifier picked only those, widen to all sources so the per-entity source is discoverable.
-    if (ctx.get("shape") in ("point", "status", "entity-list", "comparison", "timeseries")
-            and ctx.get("entity") and all(s.endswith("-bq") for s in sources)):
-        sources = list(SOURCE_TYPES)
-    _say("plan", entity=ctx.get("entity") or "", type=ctx.get("type") or "none",
-         attribute=ctx.get("attribute") or "", period=ctx.get("period") or "latest", sources=sources)
-    # Choose the routing text by whether the entity is a KEY or a DIMENSION. A company/place/nonprofit
-    # is resolved to a fetch key (CIK/FIPS/EIN), so it's expunged and the ATTRIBUTE ranks the metric
-    # cleanly ("total revenue", not "Apple total revenue"). A currency, security type, etc. (type
-    # 'none'/'org') is NOT a key — it's the leaf's own discriminator, so the FULL question must rank it
-    # (otherwise 'euro' is lost among ~30 identical exchange-rate leaves). The other search is appended
-    # as a fallback; backtracking + the answer check settle the rest.
-    resolvable = ctx.get("type") in ("company", "nonprofit", "place")
-    # An ambiguous measure has no single attribute - the classifier returns the readings
-    # instead ("how big" -> total revenue, total assets, employees, net income). Retrieving on
-    # the raw question then matches nothing and the whole query fails before the per-reading
-    # fan-out can run, so retrieve on the readings themselves.
-    attribute = ctx.get("attribute") or ""
-    readings = [i for i in (ctx.get("interpretations") or []) if i]
-    if not attribute and readings:
-        attribute = readings[0]
-    primary = (attribute or question) if resolvable else question
-    secondary = question if resolvable else (attribute or question)
-    # the finder accepts at most four phrasings per request
-    extra = readings[1:3] if (not (ctx.get("attribute") or "") and readings) else []
-    _say("status", icon="📚", msg="Asking the ARD Agent Finder which data tables can answer this…")
-    seen, hits = set(), []
-    # Attribute-only and full-question retrieval are complementary views, not two separately billed
-    # ranking tasks. The finder embeds both in one provider call, unions by max similarity, and runs
-    # one rerank over the shared candidate pool.
-    try:
-        # The reranker must see the SUBJECT, not just the measure. Sending only the attribute
-        # ("total revenue") leaves the choice between SEC company revenue and IRS 990 revenue
-        # underdetermined, and repeated calls alternate between them - which is why "Harvard
-        # University total revenue" answered from a different card run to run. The embedding
-        # stage already sees both phrasings; the ranking stage was the one flying blind.
-        found = ard_client.search_many([primary, secondary] + extra, k=12, sources=sources,
-                                       rerank_query=question)
-    except ard_client.DiscoveryError as e:
-        raise SystemExit(str(e)) from e
-    for h in found:
-        if h["identifier"] not in seen:
-            seen.add(h["identifier"])
-            hits.append(h)
-    _say("candidates", items=[{"title": h["title"], "score": h["score"], "publisher": h.get("publisher")}
-                              for h in hits[:6]])
-    # The finder has already had the LLM score each table's declared subject and scope. Its
-    # score floor is the eligibility decision; asking a second LLM here made valid queries
-    # intermittently disappear (notably the four interpretations of "How big is Microsoft?").
-    return ctx, hits
 
 
 # The philanthropic grant graph (IRS 990: who funds whom) and the FEDERAL grant sources
@@ -511,47 +366,10 @@ def _ensure_grant_graph(question, sources):
 # case that reached around the very interface being demonstrated.
 
 
-def _ard_list(source, page=1, per=50, q=""):
-    """One page of catalog entries. ARD paginates by opaque pageToken; the UI wants page numbers,
-    so walk tokens forward to the requested page — cheap at these sizes, and it keeps the client
-    honest about the cursor being opaque."""
-    per = max(1, min(per, 100))                       # the spec caps pageSize at 100
-    token, page = "", max(1, page)
-    for _ in range(page - 1):
-        d = ard_client.agents(publisher=source, q=q, page_size=per, page_token=token)
-        token = d.get("pageToken")
-        if not token:
-            break
-    d = ard_client.agents(publisher=source, q=q, page_size=per, page_token=token or "")
-    total = d.get("totalSize", 0)
-    return {"source": source, "total": total, "page": page,
-            "pages": max(1, (total + per - 1) // per), "per": per, "query": q,
-            "pageToken": d.get("pageToken"),
-            "entries": [{"identifier": e["identifier"], "title": e.get("displayName", ""),
-                         "description": e.get("description", ""), "scope": e.get("scope", ""),
-                         "queries": (e.get("representativeQueries") or [])[:4]}
-                        for e in d.get("entries", [])]}
 
 
-def _ard_entry(identifier):
-    """The ARD catalog entry, passed through UNCHANGED under `ard_entry`.
-
-    The browser shows the actual JSON the registry serves rather than a summary of it — for a demo
-    about a discovery protocol, a hand-picked subset of the fields is the least interesting thing
-    to look at."""
-    e = ard_client.entry(identifier)
-    if not e:
-        return None
-    return {"identifier": e["identifier"], "source": e.get("publisher", ""),
-            "ard_entry": e,                                   # verbatim, every field
-            "raw": (e.get("data") or {}).get("content", ""),
-            "access_doc": e.get("accessDescriptor", "")}
 
 
-def _ard_publishers():
-    """Facet counts from POST /explore — what the source picker is built from."""
-    f = (ard_client.explore("publisher").get("facets") or {}).get("publisher") or {}
-    return [{"dir": b["value"], "count": b["count"]} for b in f.get("buckets", [])]
 
 
 def _recover_place(question):
@@ -583,15 +401,6 @@ def _geo_from_fips(keys):
     return None
 
 
-def _place_levels(canon):
-    """Ordered granularity alternatives for a place (most specific first) to backtrack through."""
-    if not canon:
-        return []
-    import resolver
-    try:
-        return resolver.hierarchy(canon["qid"])
-    except Exception:
-        return [{"label": canon.get("label"), "keys": canon.get("keys", {})}]
 
 
 _STATE_FIPS = {
@@ -608,16 +417,6 @@ _STATE_FIPS = {
     "washington": "53", "west virginia": "54", "wisconsin": "55", "wyoming": "56"}
 
 
-def _resolve_geo(place):
-    # US states resolve DETERMINISTICALLY (a fixed 50-value lookup) — no LLM/Wikidata, so a bare
-    # state ("median household income in Michigan") never fails under concurrent load.
-    fips = _STATE_FIPS.get((place or "").strip().lower().lstrip("the ").strip())
-    if fips:
-        return f"state:{fips}"
-    return json.loads(TK.llm(
-        "Convert this US place to a Census geography clause. State FIPS e.g. CA=06, NY=36, TX=48, "
-        "FL=12, IL=17, WA=53, MA=25, PA=42, OH=39, GA=13, NC=37, AZ=04. A state -> 'state:NN'; a "
-        'county -> "county:CCC&in=state:NN". JSON {"geo":"..."}.', place, json_mode=True)).get("geo")
 
 
 class Backtrack(Exception):
@@ -641,27 +440,6 @@ class Prune(Backtrack):
 MAX_SEARCH_ATTEMPTS = 40
 
 
-def _solve(steps, goal, state, i=0):
-    """General depth-first backtracking search. `steps` = [(name, options_fn), ...] where
-    options_fn(state) yields the ranked candidate values for that choice; `goal(state)` attempts
-    the result and raises Backtrack on failure. Any dead-end backtracks to the next option of the
-    deepest still-open choice. This is the ONE mechanism for every choice point."""
-    if i == len(steps):
-        return goal(state)
-    name, options_fn = steps[i]
-    last = None
-    for opt in options_fn(state):
-        try:
-            return _solve(steps, goal, {**state, name: opt}, i + 1)
-        except Prune as e:
-            # Only the choice the verdict was about consumes it; deeper levels pass it up
-            # rather than trying their remaining options against a settled dead end.
-            if e.step != name:
-                raise
-            last = e
-        except Backtrack as e:
-            last = e
-    raise Backtrack(f"no viable {name} ({last})")
 
 
 # Per-process memo caches for values that are IDENTICAL across every backtrack attempt of one
@@ -671,56 +449,6 @@ _TICKER_CACHE = {}
 _ENTITY_CACHE = {}
 
 
-def _link_entity(ctx):
-    """Map the entity the CLASSIFIER determined to Wikidata identifiers.
-
-    The classifier reads the whole question and decides which real-world entity is meant;
-    "St. Jude" in an NIH-funding question is the hospital, and only the question says so. This
-    function never revisits that decision - it links a settled identity to source keys. A
-    failed data lookup downstream must not be able to change the subject of the question,
-    which is what backtracking over ranked search results allowed.
-
-    It returns ONE identity when the classifier resolved the entity. It returns several only
-    when the classifier reported genuine ambiguity and named the candidates itself - an
-    unqualified "Springfield" - and the caller must turn those into a question, not pick one.
-
-    The trailing None is the native-name key, not a second identity: name-matched sources
-    (IRS BMF, College Scorecard) key on the mention itself.
-    """
-    status = (ctx.get("entity_status") or "").strip().lower()
-    canonical = (ctx.get("canonical_entity") or "").strip()
-    mention = (ctx.get("entity") or "").strip()
-    if status == "none":
-        return [None]
-    if status == "ambiguous":
-        # The question does not distinguish which Springfield. That is settled by the caller
-        # choosing one, not by looking anything up - Wikidata is not consulted until an entity
-        # is fixed, because it has no way to know which one was meant either.
-        return [None]
-
-    # A caller who answered an entity clarification chose a RECORD, not a name. Re-searching the
-    # name finds the same several records and asks again - the clarification loop Codex found on
-    # "Is the Sierra Club a 501(c)(3)?", where picking Sierra Club re-offered Sierra Club and
-    # Sierra Club Foundation indefinitely.
-    qid = (ctx.get("entity_qid") or "").strip()
-    if qid:
-        import resolver
-        try:
-            label, keys = resolver._claims(qid)
-        except Exception:
-            label, keys = None, {}
-        if label or keys:
-            _say("resolve", mention=mention or canonical or qid, label=label or canonical, keys=keys or {})
-            return [{"qid": qid, "label": label or canonical or qid,
-                     "name": canonical or label or qid, "keys": keys}, None]
-    if not (canonical or mention):
-        return [None]
-    found = _link_records(canonical or mention, ctx.get("question") or "", ctx.get("type") or "")
-    if len(found) > 1:
-        # Several records could be this entity. That is the same question as an ambiguous
-        # mention and belongs to the caller, not to whichever one happened to rank first.
-        return found
-    return [found[0], None] if found else [None]
 
 
 def _entity_selection_system(name, kind, question, listing):
@@ -742,99 +470,8 @@ def _entity_selection_system(name, kind, question, listing):
     )
 
 
-def _link_records(name, question="", kind=""):
-    """The Wikidata records that ARE the named entity: none, one, or several.
-
-    The classifier has already decided WHICH entity this is. What is left is record linkage,
-    and it is a semantic question rather than a string one: "Stanford" the census place and
-    "Stanford University", "St. Jude" the album and the children's hospital. An earlier version
-    compared normalized names for containment and accepted every one of those wrong records,
-    because a shorter name is always a substring of a longer one.
-
-    So the candidates go back to the model with the original question for context, and it may
-    answer with several - two records can both plausibly be the entity, and that is a question
-    for the caller rather than something to resolve by picking the first. Judgement that is
-    unavailable or names nothing fails the link; it never guesses.
-    """
-    name = (name or "").strip()
-    if not name:
-        return []
-    ck = (name, question)
-    if ck in _ENTITY_CACHE:
-        return _ENTITY_CACHE[ck]
-    import resolver
-    try:
-        cands = resolver._search(name)
-    except Exception:
-        cands = []
-    if not cands:
-        _say("status", icon="🚫", msg=f"No identifier record for “{name}”")
-        _ENTITY_CACHE[ck] = []
-        return []
-
-    listing = "\n".join(f"{i}. {c.get('label','')} — {c.get('description','')}"
-                         for i, c in enumerate(cands))
-    try:
-        out = json.loads(TK.llm(
-            _entity_selection_system(name, kind, question, listing),
-            name, json_mode=True, stage="resolve-entity")).get("indices")
-    except Exception:
-        out = None
-    if not isinstance(out, list):
-        _say("status", icon="🚫", msg=f"Could not judge which record is “{name}”")
-        _ENTITY_CACHE[ck] = []
-        return []
-    picks = [i for i in out if isinstance(i, int) and 0 <= i < len(cands)]
-    if not picks:
-        _say("status", icon="🚫", msg=f"No record was judged to be “{name}”")
-        _ENTITY_CACHE[ck] = []
-        return []
-
-    found = []
-    for i in picks:
-        try:
-            qid = cands[i]["id"]
-            label, keys = resolver._claims(qid)
-        except Exception:
-            continue
-        found.append({"qid": qid, "label": label or cands[i].get("label") or name,
-                      "name": cands[i].get("label") or name,
-                      "description": cands[i].get("description") or "", "keys": keys})
-    if len(found) == 1:
-        _say("resolve", mention=name, label=found[0]["label"], keys=found[0]["keys"] or {})
-    _ENTITY_CACHE[ck] = found
-    return found
 
 
-def _key_options(state, ctx):
-    """CHOICE: which key/granularity for the chosen (field, entity), by source shape.
-    (Place granularity place->county->state is just one instance of this general choice.)"""
-    fm = driver.frontmatter(state["hit"]["identifier"])
-    keys = (state["entity"] or {}).get("keys", {})
-    mention = ctx.get("entity") or ""
-    if fm.get("concept"):
-        return ([str(int(keys["cik"]))] if keys.get("cik") else []) + [None]        # CIK, then native ticker
-    if fm.get("field") or fm.get("classification") or fm.get("bmf"):
-        return ([keys["ein"].replace("-", "")] if keys.get("ein") else []) + ([mention] if mention else []) or [None]
-    if fm.get("profile"):                                                        # Wikidata QID keyed
-        return ([(state["entity"] or {}).get("qid")] if (state["entity"] or {}).get("qid") else []) or [None]
-    if fm.get("scorecard"):                                                       # school name (API self-matches)
-        return ([mention] if mention else []) or [None]
-    if fm.get("fema"):                                                            # US state (from place resolution)
-        st = [l["keys"].get("fips_state") for l in _place_levels(state["entity"]) if l["keys"].get("fips_state")]
-        return (st + ([mention] if mention else [])) or [None]
-    if fm.get("variable"):
-        opts = [g for g in (_geo_from_fips(l["keys"]) for l in _place_levels(state["entity"])) if g]
-        return opts + (["__native__"] if mention else []) or [None]                 # place -> county -> state
-    if fm.get("measureid"):
-        opts = [l["label"].replace(" County", "").strip() for l in _place_levels(state["entity"]) if l.get("label")]
-        return opts or ([mention.replace(" County", "").strip()] if mention else [None])
-    if fm.get("search", {}).get("want") == "organization":
-        # Name-matched source: try the CANONICAL resolved name first ("Caltech" -> "California
-        # Institute of Technology"), then the raw mention. Backtracking walks them in order.
-        label = (state["entity"] or {}).get("label")
-        return list(dict.fromkeys([n for n in (label, mention) if n])) or [None]
-    return [None]                                                                   # treasury / keyword search
 
 
 _AMOUNT_KEYS = ("fundsObligatedAmt", "estimatedTotalAmt", "Award Amount", "award_amount",
@@ -894,62 +531,28 @@ from collections import namedtuple
 _F = namedtuple("_F", "fm ident key period attribute mention state ctx")
 
 
-def _s_concept(f):
-    """SEC EDGAR — an XBRL us-gaap concept per company. Resolves ticker->CIK once per mention."""
-    if f.key:
-        return driver.fetch_metric(f.attribute, cik=f.key, period=f.period, log=False,
-                                   concept=f.ctx.get("concept"))
-    if f.mention not in _TICKER_CACHE:                   # same mention on every backtrack — resolve once
-        _TICKER_CACHE[f.mention] = json.loads(TK.llm(
-            'JSON {"ticker":"<US stock ticker or empty>"}.', f.mention, json_mode=True, stage="resolve-entity")).get("ticker")
-    ticker = _TICKER_CACHE[f.mention]
-    if not ticker:
-        raise Backtrack("no ticker")
-    return driver.fetch_metric(f.attribute, ticker, f.period, log=False,
-                               concept=f.ctx.get("concept"))
-
-
-# Nonprofit sources resolve names authoritatively via ProPublica (EIN spine), so fall back to the NAME
-# when the Wikidata candidate carries no EIN. Otherwise a candidate with no EIN (the real "Sierra Club",
-# a c4) backtracks to a sibling that does (the c3 "Sierra Club Foundation"), and the answer flips.
-# `key or mention` keeps a real EIN when present, else uses the name.
-def _np_org(f):
-    org = f.key or f.mention
-    if not org:
+def _np_org(fetch):
+    """Use an authoritative EIN when available, otherwise the question's nonprofit name."""
+    organization = fetch.key or fetch.mention
+    if not organization:
         raise Backtrack("no nonprofit key")
-    return org
+    return organization
 
 
-def _s_classification(f):
-    import nonprofit
-    return nonprofit.classify(_np_org(f))
 
 
-def _s_field(f):
-    import nonprofit
-    return nonprofit.fetch_np(f.fm["field"], _np_org(f), f.period)
 
 
-def _s_bmf(f):
-    import nonprofit
-    return nonprofit.bmf(f.fm["bmf"], _np_org(f))
 
 
-def _s_profile(f):
-    import orgprofile as profile
-    if not f.key:
-        raise Backtrack("no wikidata qid")
-    return profile.fetch(f.fm["profile"], f.key, (f.state.get("entity") or {}).get("label"))
 
 
-def _s_scorecard(f):
-    import college
-    return college.fetch(f.fm["scorecard"], f.key or f.mention)
 
 
-def _s_fema(f):
-    import fema
-    return fema.fetch(f.key or f.mention)
+
+
+
+
 
 
 # --- generic point-lookup REST fetch, driven entirely by the source's OKF `fetch:` descriptor -------
@@ -978,21 +581,17 @@ def _fetch_spec(f):
     return _FETCH_SPEC_CACHE[path]
 
 
-def _bind_param(b, f):
-    """Resolve an accessor-param binding. `$geo` = the entity's Census geography (native names resolved),
-    `$key` = the resolved entity key, `~field` = a value pinned in the leaf frontmatter, else literal."""
-    if b == "$geo":
-        geo = _resolve_geo(f.mention) if f.key == "__native__" else f.key
-        if not geo:
-            raise Backtrack("no geo")
-        return geo
-    if b == "$key":
+def _bind_param(binding, f):
+    """Resolve the non-geographic descriptor parameter bindings shared by async fetches."""
+    if binding == "$key":
         if not f.key:
             raise Backtrack("no key")
         return f.key
-    if isinstance(b, str) and b.startswith("~"):
-        return f.fm.get(b[1:], "")
-    return b
+    if isinstance(binding, str) and binding.startswith("~"):
+        return f.fm.get(binding[1:], "")
+    return binding
+
+
 
 
 def _rows_of_resp(resp, rows_spec):
@@ -1043,141 +642,6 @@ def _bind_field(b, f, resp, row):
     return b
 
 
-def _quirk_acs_pe(f, resp, rec):
-    """ACS Data Profile quirk: for a PERCENT row the value lives in the *PE* column while the *E* column
-    is -888888888 ("not applicable"). Read the percent sibling when the estimate is that sentinel — else
-    a poverty/unemployment RATE looks like missing data and the search backtracks forever over a value
-    that is simply in the other column. Also enforce the jam-sentinel = missing rule."""
-    if not (isinstance(resp, list) and len(resp) >= 2):
-        raise Backtrack("no census row")
-    def jam(x):
-        try:
-            return float(x) <= -100000000                    # ACS jam sentinels are large negatives
-        except (TypeError, ValueError):
-            return False
-    val, var = rec.get("value"), rec.get("variable")
-    if str(val).strip() == "-888888888" and var.endswith("E") and not var.endswith("PE"):
-        pe = var[:-1] + "PE"
-        geo = _resolve_geo(f.mention) if f.key == "__native__" else f.key
-        a2 = driver.accessor(f.ident, "acs", geo=geo, get=pe)
-        if isinstance(a2, list) and len(a2) >= 2 and not jam(a2[1][1]):
-            val, var = a2[1][1], pe
-    if jam(val):
-        raise Backtrack("jam null")
-    rec["value"], rec["variable"] = val, var
-    return rec
-
-
-_QUIRKS = {"acs_pe": _quirk_acs_pe}
-
-
-def _s_rest(f):
-    """Execute a source's declarative `fetch:` spec — the ONE handler for every point-lookup REST
-    source (census, CDC, treasury, and any future one). No source-specific code lives here."""
-    spec = _fetch_spec(f)
-    if not spec:
-        raise Backtrack("no fetch spec for this source")
-    params = {k: _bind_param(v, f) for k, v in (spec.get("params") or {}).items()}
-    if spec.get("query"):                                    # build a query-string param (Treasury)
-        q = re.sub(r"~(\w+)", lambda m: str(f.fm.get(m.group(1), "")), spec["query"])
-        ff = spec.get("filter_field")
-        if ff and f.fm.get(ff):
-            q += f"&filter={f.fm[ff]}"
-        params["query"] = q
-    resp = driver.accessor(f.ident, spec.get("op", "get"), **params)
-    rows = _rows_of_resp(resp, spec.get("rows"))
-    row = _pick_row(rows, spec["pick"]) if spec.get("pick") else None
-    if spec.get("pick") and row is None:
-        raise Backtrack("no matching row")
-    rec = {}
-    for outkey, b in (spec.get("fields") or {}).items():
-        v = _bind_field(b, f, resp, row)
-        if v is not None:
-            rec[outkey] = v
-    if spec.get("quirk"):
-        rec = _QUIRKS[spec["quirk"]](f, resp, rec)
-    rec["source"] = spec.get("source")
-    return rec
-
-
-def _s_search(f):
-    """Federal award/opportunity search (NSF/NIH/USAspending/grants.gov) — a keyword or org query,
-    paged to completion when the source declares entity-scoped completeness."""
-    s = f.fm["search"]
-    val = (f.key or f.mention) if s["want"] == "organization" else f.attribute
-    if not val:
-        raise Backtrack("no search term")
-    cap = (planner.capabilities(f.ident) or {}).get(s["operation"], {})
-    page = cap.get("page") or {}
-
-    def _pull(**extra):
-        r = driver.accessor(f.ident, s["operation"], **{s["arg"]: val, **extra})
-        for part in s["extract"].split("."):
-            r = r[int(part)] if isinstance(r, list) else r.get(part, [])
-        return r if isinstance(r, list) else []
-
-    if page.get("complete_for") == "entity" and page.get("offset_param"):
-        # ENTITY-scoped completeness: this org's own records fit under the offset ceiling, so page them
-        # all. Without this the "total" is just the largest N projects — Johns Hopkins reads $208M
-        # instead of $969M, and every threshold comparison is wrong.
-        step, off, res = int(page.get("max") or 500), 0, []
-        _say("status", icon="📄", msg=f"Paging every record for this organization…")
-        while off < int((cap.get("population") or {}).get("ceiling") or 15000):
-            chunk = _pull(**{page["offset_param"]: off})
-            res.extend(chunk)
-            if len(chunk) < step:
-                break
-            off += step
-        _say("status", icon="📄", msg=f"{len(res)} records retrieved (complete for this organization)")
-    else:
-        res = _pull()
-    out = {"query": val, "source": f.fm.get("title")}
-    if isinstance(res, list):
-        rows = [r for r in res if isinstance(r, dict)]
-        total = sum(_amount(r) for r in rows)            # compute totals HERE, not in the LLM
-        out["record_count"] = len(rows)
-        if total:
-            out["total_usd"] = round(total, 2)
-            out["total_usd_display"] = "${:,.0f}".format(total)
-        # Completeness is DECLARED, not guessed: a capped page is a partial total. Propagating it
-        # matters most for joins — dividing a truncated numerator by a complete denominator is the
-        # characteristic way a cross-source join produces a confident wrong number.
-        out["complete"] = bool(page.get("complete")) or page.get("complete_for") == "entity"
-        if not out["complete"]:
-            out["coverage"] = (f"total is across the {len(rows)} award records returned by this "
-                               f"query, not every award the organization has received")
-        out.update(_identity_scope(rows, f.fm.get("identity") or {}))   # scope a name-matched result
-        res = [{k: v for k, v in r.items() if not (isinstance(v, str) and len(v) > 240)}
-               for r in rows][:8]                        # drop bulky prose (abstracts etc.)
-    out["results"] = res
-    return out
-
-
-# The dispatch table: OKF marker key -> strategy. First marker the frontmatter declares wins, so the
-# order here is only a tie-break (a leaf declares exactly one). To add a shape, append one pair — or,
-# for a point-lookup REST source, add no code at all: give it a `fetch:` block and one of the markers
-# routed to the generic _s_rest (variable/measureid/tfield are just its routing tags today).
-_STRATEGIES = [
-    ("concept", _s_concept), ("classification", _s_classification), ("field", _s_field),
-    ("bmf", _s_bmf), ("profile", _s_profile), ("scorecard", _s_scorecard), ("fema", _s_fema),
-    ("variable", _s_rest), ("measureid", _s_rest), ("tfield", _s_rest), ("search", _s_search),
-]
-
-
-def _fetch(state, ctx):
-    """Attempt one complete (field, entity, key, period) assignment. Raise Backtrack on any failure.
-    Dispatches to the strategy the source's OKF frontmatter declares — see _STRATEGIES."""
-    identifier = state["hit"]["identifier"]
-    fm = driver.frontmatter(identifier)
-    f = _F(fm, identifier, state.get("key"), state.get("period") or "latest",
-           ctx.get("attribute") or "", ctx.get("entity") or "", state, ctx)
-    try:
-        for marker, handler in _STRATEGIES:
-            if fm.get(marker):
-                return handler(f)
-    except SystemExit as e:
-        raise Backtrack(str(e))
-    raise Backtrack("no structured retrieval for this source")
 
 
 _ADJUDICATION_SYSTEM = (
@@ -1202,35 +666,6 @@ _ADJUDICATION_SYSTEM = (
 )
 
 
-def _answers(question, data, structural=None):
-    """Acceptance test at the goal of the search: is this record ABOUT the right thing for the question?
-    This is a ROUTING check, not a fact-check — it turns backtracking from 'no data' into 'no WRONG
-    data' by matching the record's qualifiers (measure, unit, currency, place/entity) to the question.
-
-    It must NOT judge the value itself: the model's own world-knowledge is wrong about magnitudes,
-    exchange-rate direction, and 'future' dates (its training cutoff makes recent data look fake), so
-    letting it fact-check the number causes false rejections of correct answers. Fail-open on error."""
-    if structural is not None:
-        if not structural.accepted:
-            return False, structural.reason
-        if not structural.residual_semantic_check:
-            return True, ""
-    try:
-        v = json.loads(TK.llm(  # acceptance check
-            _ADJUDICATION_SYSTEM,
-            json.dumps({"question": question, "data": data}), json_mode=True, stage="check"))
-        ok, why = bool(v.get("ok", True)), v.get("why", "")
-        # BACKSTOP: never reject on a DATE/PERIOD mismatch. The period is handled by the fetch's own
-        # backtracking (requested -> latest), and a period NEWER than the latest published data can
-        # never be fetched — so rejecting here sends the search backtracking forever over an
-        # unsatisfiable requirement (the FY2024-not-yet-filed loop). The prompt already forbids
-        # date-judging; enforce it deterministically since the model sometimes does it anyway.
-        if not ok and re.search(r"\b(fy\d*|fiscal|period|years?|dates?|20\d\d|recent|latest|current)\b",
-                                why or "", re.I):
-            return True, ""
-        return ok, why
-    except Exception:
-        return True, ""
 
 
 def _rows_of(res, cap):
@@ -1264,21 +699,6 @@ def _rows_of(res, cap):
     return out
 
 
-def _run_bq(question, ctx, p):
-    """Population query answered by the BigQuery IRS-990 source (SQL over the whole population).
-    Reached only when the planner selected a `bq:` leaf, which happens only when GOOGLE_CLOUD_PROJECT
-    is set (see the credential gate in planner.capabilities)."""
-    import bq
-    fm = driver.frontmatter(p["hit"]["identifier"]) or {}
-    cfg = fm["bq"]                                    # {table, field, entity_field, name_*, source}
-    shape = ctx.get("shape")
-    measure = cfg.get("field") or cfg.get("value_field") or "value"
-    _say("status", icon="🗄️", msg=f"Running SQL over the whole population (BigQuery) by {measure}…")
-    if shape == "aggregate":
-        return bq.aggregate(cfg, "count")
-    asc = any(w in question.lower() for w in ("lowest", "least", "smallest", "fewest", "bottom"))
-    thr = ctx.get("threshold") if shape == "filtered-subset" else None
-    return bq.rank(cfg, n=10, ascending=asc, threshold=thr)
 
 
 # named-org lookup patterns — reverse (X is the RECIPIENT) vs forward (X is the FUNDER). These read
@@ -1351,293 +771,14 @@ def _grant_direction(question, ctx, grants):
     return "ranking"                                              # biggest grantmakers
 
 
-def _run_grants(question, ctx, p):
-    """The IRS 990 GRANT GRAPH — who funds whom. Discovery routes grant-graph questions here; the
-    TRAVERSAL is chosen deterministically from the question: named-entity lookups (forward/reverse),
-    or EXPLORATORY queries over the whole graph — rankings of funders/recipients, graph patterns
-    (shared grantees), geographic flows, aggregates, and threshold subsets. Local edge table."""
-    import grants
-    direction = _grant_direction(question, ctx, grants)
-    ql = question.lower()
-    asc = any(w in ql for w in ("lowest", "least", "smallest", "fewest", "bottom"))
-    entity = (ctx.get("entity") or "").strip()
-
-    if direction == "ranking":                                    # biggest grantmakers (funders)
-        thr = ctx.get("threshold") if ctx.get("threshold") else None
-        if thr and thr.get("value") is not None:
-            _say("status", icon="🕸️", msg="Filtering grantmakers by total granted (grant graph)…")
-            return grants.funders_above(thr["value"], ascending=str(thr.get("op", ">")).startswith("<"))
-        _say("status", icon="🕸️", msg="Ranking grantmakers over the IRS 990 grant graph…")
-        return grants.top_grantmakers(n=10, ascending=asc)
-    if direction == "biggest_recipients":                         # ranking of recipients (in-degree)
-        by = "funders" if any(w in ql for w in ("most funders", "most foundations", "most donors",
-             "different funders", "different foundations", "how many funder")) else "dollars"
-        _say("status", icon="🕸️", msg="Ranking grant recipients over the IRS 990 grant graph…")
-        return grants.biggest_recipients(n=10, by=by, ascending=asc)
-    if direction == "geo":                                        # money by place
-        states = grants.find_states(question)
-        if len(states) >= 2:
-            _say("status", icon="🕸️", msg=f"Grant flow {states[0]} → {states[1]} (grant graph)…")
-            return grants.geo("flow", from_state=states[0], to_state=states[1])
-        mode = "funders" if any(w in ql for w in ("send", "sent", "sending", "give the most",
-               "gives the most", "from which state", "which states give")) else "recipients"
-        _say("status", icon="🕸️", msg="Ranking states by grant dollars (grant graph)…")
-        return grants.geo(mode, ascending=asc)
-    if direction == "overview":                                   # headline aggregates
-        m = re.search(r"20(2[0-4])", question)
-        _say("status", icon="🕸️", msg="Summarizing the IRS 990 grant graph…")
-        return grants.overview(year=int(m.group(0)) if m else None)
-    if direction == "theme":                                      # grants by cause (NTEE join)
-        major, word = grants.cause_of(ql)
-        grouped = any(w in ql for w in ("what cause", "which cause", "by cause", "kinds of", "breakdown"))
-        _say("status", icon="🕸️", msg="Grouping grants by cause (IRS 990 grant graph × NTEE)…")
-        return grants.grants_by_cause(None if grouped or not word else word)
-    if direction == "shared":                                     # graph intersection (two funders)
-        ents = [e for e in (ctx.get("entities") or []) if e] or ([entity] if entity else [])
-        if len(ents) < 2:
-            raise SystemExit("comparing shared grantees needs TWO named funders.")
-        _say("status", icon="🕸️", msg=f"Finding organizations funded by both {ents[0]} and {ents[1]}…")
-        return grants.shared_grantees(ents[0], ents[1])
-
-    org = _grant_entity(question, ctx)                            # forward/reverse need one named org
-    if not org:
-        raise SystemExit("this grant question needs a named organization (a funder or a recipient).")
-    if direction == "reverse":
-        _say("status", icon="🕸️", msg=f"Tracing who funds {org} (IRS 990 grant graph)…")
-        return grants.reverse(org)
-    _say("status", icon="🕸️", msg=f"Tracing grants made by {org} (IRS 990 grant graph)…")
-    return grants.forward(org)
 
 
-def _run_ranking(question, ctx, p, top_n=10):
-    """RANKING / AGGREGATE: one call to an operation the source DECLARED can see the whole
-    population (server-side order, or a complete enumeration we order ourselves)."""
-    hit, cap, op = p["hit"], p["capability"], p["operation"]
-    fm = driver.frontmatter(hit["identifier"]) or {}
-    acc_path = planner.access_path(hit["identifier"])
-    url = (((driver.frontmatter(acc_path) or {}).get("access") or {}).get("operations") or {}).get(op, {})
-    needed = {f for _, f, _, _ in __import__("string").Formatter().parse(url.get("url", "")) if f}
-    params = {k: fm[k] for k in needed if k in fm}       # the leaf pins its own params (measureid, get…)
-    thr = ctx.get("threshold") or {}
-    if "n" in needed:                                   # a threshold needs a deeper slice to filter from
-        params["n"] = 500 if thr.get("value") is not None else max(top_n, 25)
-    for k in needed - set(params):                       # geography/partition placeholders
-        if k in ("level", "fips", "geo"):
-            params[k] = (ctx.get("partition") or {}).get(k) or ""
-    _say("status", icon="📥", msg=f"Ranking the whole population via “{hit['title']}”…")
-    rows = _rows_of(driver.accessor(hit["identifier"], op, **params), cap)
-    if not rows:
-        raise SystemExit(f"ranking returned no usable rows from {hit['title']}")
-    if not (cap.get("order") or {}).get("server"):       # complete enumeration -> order it here
-        rows.sort(key=lambda r: r["value"], reverse=True)
-    asc = any(w in question.lower() for w in ("lowest", "least", "smallest", "fewest", "bottom"))
-    if asc:
-        rows = sorted(rows, key=lambda r: r["value"])
-    scanned = len(rows)
-    out = {"question": question, "source": fm.get("title") or hit["title"],
-           "measure": (fm.get("title") or "").split(" — ")[0], "scanned": scanned, "complete": True}
-    if thr.get("value") is not None:                    # FILTERED-SUBSET: apply the stated cut-off
-        import operator
-        cmp = {">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le}.get(thr.get("op"), operator.gt)
-        kept = [r for r in rows if cmp(r["value"], float(thr["value"]))]
-        out.update({"threshold": f"{thr.get('op', '>')} {thr['value']}", "matches": len(kept),
-                    "ranking": kept[:50]})
-        # The scan is ordered by value, so a filter that does NOT fill the scan window has provably
-        # found every match. If it saturates, more may lie beyond the window — a lower bound, say so.
-        if kept and len(kept) >= scanned:
-            out["complete"] = False
-            out["note"] = (f"at least {len(kept)} — the {scanned}-row scan window filled up, so there "
-                           f"may be more beyond it")
-        elif not kept:
-            out["note"] = f"no member of the population is {thr.get('op', '>')} {thr['value']}"
-        return out
-    rows = rows[:top_n]
-    out.update({"ranking": rows, "top": rows[0]})
-    return out
 
 
-def _materialize(hit, grain="county", scope="06", say=None):
-    """Fetch one measure at population grain and normalise it to spine-addressed observations.
-    Driven entirely by the capability declaration (grain / entity_kind / enumerate), so a new
-    source that declares the same things needs no code here."""
-    ident = hit["identifier"]
-    fm = driver.frontmatter(ident) or {}
-    caps = planner.capabilities(ident)
-    op, cap = next(((o, c) for o, c in caps.items() if c.get("grain") == grain), (None, None))
-    if not op:
-        raise SystemExit(f"{hit['title']} does not serve data at {grain} grain")
-    vintage = str(fm.get("year") or fm.get("fy") or "latest")
-
-    def build():
-        if fm.get("get") or fm.get("variable"):                 # Census: fetch the DP variable for the whole
-            def rows_for(get=None):                             # level in one geo=<grain>:* call
-                kw = {"geo": f"{grain}:*&in=state:{scope}"}
-                if get:
-                    kw["get"] = get
-                arr = driver.accessor(ident, op, **kw)
-                out = []
-                for row in (arr[1:] if isinstance(arr, list) and len(arr) > 1 else []):
-                    try:
-                        v = float(row[1])
-                    except (TypeError, ValueError, IndexError):
-                        continue
-                    if v <= -100000000:                          # ACS jam value = missing, not a number
-                        continue
-                    out.append({"entity": store.eid("fips", row[-2] + row[-1]), "entity_name": row[0],
-                                "value": v, "source": fm.get("title")})
-                return out
-            obs, var = rows_for(), fm.get("get", "")
-            if not obs and var.endswith("E") and not var.endswith("PE"):     # percent-row E is all jam -> PE
-                obs = rows_for(var[:-1] + "PE")
-            return obs, {"op": op, "grain": grain}
-        res = driver.accessor(ident, op, **{k: fm[k] for k in ("measureid", "get", "key") if k in fm},
-                              n=5000)                            # CDC: ordered scan of every place
-        ef = cap.get("entity_field") or "locationid"
-        ret = cap.get("returns") or {}
-        obs = []
-        for r in (res if isinstance(res, list) else []):
-            try:
-                v = float(r.get(ret.get("value") or "data_value"))
-            except (TypeError, ValueError):
-                continue
-            if not r.get(ef):
-                continue
-            obs.append({"entity": store.eid("fips", r[ef]),
-                        "entity_name": r.get(ret.get("label") or "locationname"),
-                        "value": v, "source": fm.get("title")})
-        return obs, {"op": op, "grain": grain}
-
-    return store.ensure(ident, grain, vintage, build, say=say)
 
 
-def _run_correlate(question, ctx, p):
-    """CORRELATION: materialize both measures into the commons, align them on the spine, and
-    compute the statistic LOCALLY. Materialization is cached, so the second question that touches
-    either measure pays nothing — the commons accretes."""
-    # A correlation has TWO independent measures, so each is discovered on its own. Ranking one
-    # list for the whole question tends to return two variants of the same measure (or only one
-    # side at all), which is what made a rephrasing fail.
-    spec = json.loads(TK.llm(
-        'Identify the TWO measures being related, and the population. Return JSON '
-        '{"measure_a":"<measure only, no place>","measure_b":"<measure only, no place>",'
-        '"grain":"county|state","state_fips":"<2-digit FIPS of the state mentioned, or empty for all>"}. '
-        'e.g. "do richer counties have lower diabetes" -> measure_a "median household income", '
-        'measure_b "diagnosed diabetes among adults".', question, json_mode=True))
-    scope = re.sub(r"\D", "", str(spec.get("state_fips") or "")) or "06"
-    picked, seen = [], set()
-    for m in (spec.get("measure_a"), spec.get("measure_b")):
-        if not m:
-            continue
-        for h in ard_client.search(m, k=6):
-            if h["identifier"] in seen:
-                continue
-            if any(c.get("grain") == "county" for c in planner.capabilities(h["identifier"]).values()):
-                seen.add(h["identifier"])
-                picked.append(h)
-                break
-    if len(picked) < 2:
-        raise SystemExit("a correlation needs two measures that are both available at county grain; "
-                         f"found {len(picked)} for {spec.get('measure_a')!r} / {spec.get('measure_b')!r}")
-
-    say = lambda m: _say("status", icon="🗃️", msg=m)
-    series, meta = {}, []
-    for h in picked:
-        cap = next((c for c in planner.capabilities(h["identifier"]).values() if c.get("grain")), {})
-        est = store.estimate(cap, "county", 3000)
-        if est.get("known") and est["blowup"] and est["blowup"] > 50:
-            raise SystemExit(f"materializing {h['title']} would transfer ~{est['rows']:,} rows for "
-                             f"~3,000 counties (blowup {est['blowup']}x) — too expensive for one "
-                             f"question; it should be materialized once per vintage instead")
-        obs, cached = _materialize(h, scope=scope, say=say)
-        if not obs:
-            # a measure can exist yet be unusable at this grain (ACS suppresses many variables at
-            # county level and returns jam values). Say WHICH measure failed, not just "0 matched".
-            raise SystemExit(f"'{h['title']}' has no usable {'county'}-level values (all suppressed "
-                             f"or missing), so it cannot be correlated at this grain")
-        series[h["title"].split(" — ")[0][:40]] = obs
-        meta.append({"measure": h["title"], "n": len(obs), "cached": cached})
-
-    rows, report = store.align(series)
-    labels = list(series)
-    if len(rows) < 3:
-        raise SystemExit(f"only {len(rows)} units had both measures — too few to correlate")
-    xs = [r[labels[0]] for r in rows]
-    ys = [r[labels[1]] for r in rows]
-    n = len(xs)
-    mx, my = sum(xs) / n, sum(ys) / n
-    sx = math.sqrt(sum((a - mx) ** 2 for a in xs))
-    sy = math.sqrt(sum((b - my) ** 2 for b in ys))
-    r = (sum((a - mx) * (b - my) for a, b in zip(xs, ys)) / (sx * sy)) if sx and sy else 0.0
-    return {"question": question, "correlation_r": round(r, 3), "n": n,
-            "measures": labels, "series_meta": meta, "join": report,
-            "source": " + ".join(dict.fromkeys(h["title"] for h in picked)),
-            "caveats": [
-                "correlation is not causation, and no confounders are controlled for",
-                "this is an ECOLOGICAL correlation across counties — it says nothing about individuals",
-                "county estimates are not independent samples (spatial autocorrelation), so the "
-                "effective sample size is smaller than n",
-            ]}
 
 
-def _run_ambiguous(question, ctx):
-    """The MEASURE is genuinely ambiguous ('earnings' = net income vs EBITDA vs EPS). Rather than
-    silently pick one interpretation, answer EACH separately and let the reader choose — a wrong
-    disambiguation is worse than several honest ones."""
-    interps = [i for i in (ctx.get("interpretations") or []) if i][:4]
-    ent = ctx.get("entity") or ""
-    per = ctx.get("period") or "latest"
-    yr = "" if per == "latest" else f" in {per}"
-    _say("status", icon="🍃", msg=f"“{ctx.get('attribute')}” is ambiguous — answering "
-                                 f"{len(interps)} interpretations in parallel: {', '.join(interps)}")
-
-    def one(interp):
-        sub = f"{interp} for {ent}{yr}" if ent else f"{interp}{yr}"
-        try:
-            r = retrieve_for(sub)
-            d = r.get("data") or {}
-            return {"interpretation": interp, "value": r.get("value"),
-                    "label": d.get("metric") or d.get("measure") or interp,
-                    "unit": d.get("unit"), "period": d.get("period"), "source": r.get("source"),
-                    "concept": d.get("concept"), "source_identifier": r.get("source_identifier"),
-                    "attempts": r.get("attempts") or []}
-        except driver.SourceRateLimitError as e:
-            return {"interpretation": interp, "value": None, "temporary_error": str(e)}
-        except (SystemExit, Backtrack) as e:
-            return {"interpretation": interp, "value": None, "error": str(e)}
-        except Exception as e:
-            return {"interpretation": interp, "value": None, "error": str(e)[:80]}
-
-    # Run interpretations concurrently with a hard deadline. Some measures are genuinely
-    # unavailable for the entity (a company has no clean employee-count concept) and backtrack
-    # for a long time — the deadline stops one slow interpretation from blocking the rest.
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    ex = ThreadPoolExecutor(max_workers=min(4, len(interps)))
-    futs = {ex.submit(_with_emitter(one), i): i for i in interps}
-    answers, done = [], set()
-    try:
-        for fut in as_completed(futs, timeout=55):
-            a = fut.result()
-            answers.append(a)
-            done.add(a["interpretation"])
-            _say("status", icon="✅" if a.get("value") is not None else "↩️",
-                 msg=f"{a['interpretation']}: {a.get('value') if a.get('value') is not None else 'no data'}")
-    except Exception:                                        # as_completed timeout: take what finished
-        pass
-    for i in interps:
-        if i not in done:
-            answers.append({"interpretation": i, "value": None, "error": "timed out (measure likely unavailable)"})
-    ex.shutdown(wait=False)                                   # abandon stragglers; don't block the response
-    answers.sort(key=lambda a: interps.index(a["interpretation"]))
-    temporary = next((a["temporary_error"] for a in answers if a.get("temporary_error")), None)
-    if temporary:
-        raise driver.SourceRateLimitError(temporary)
-    got = [a for a in answers if isinstance(a.get("value"), (int, float))]
-    if not got:
-        raise SystemExit(f"'{ctx.get('attribute')}' is ambiguous and none of its interpretations "
-                         f"({', '.join(interps)}) could be answered")
-    return {"question": question, "ambiguous": True, "attribute": ctx.get("attribute"),
-            "entity": ent, "interpretations": answers,
-            "source": " · ".join(dict.fromkeys(a.get("source") or "?" for a in got))}
 
 
 def _entity_clarification(question, ctx, candidates, ledger, discovery):
@@ -1782,311 +923,17 @@ def _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
             "plan": f"material ambiguity → answer the preferred interpretation and expose {len(public_options) - 1} alternatives"}
 
 
-def _run_derive(question, ctx, p):
-    """CROSS-SOURCE JOIN (`ratio` / derived): decompose into independent sub-facts, fetch each
-    through the full discover->resolve->fetch path, then COMPUTE IN THE ENGINE.
-
-    Two properties matter here. (1) The arithmetic is done in code, never by the model — an LLM
-    asked to total these got $10,000,000 against an actual $8,404,737 earlier in this project.
-    (2) Joining figures that are not comparable is the characteristic way a join goes silently
-    wrong, so periods and completeness are checked and reported rather than assumed."""
-    spec = json.loads(TK.llm(
-        "Decompose this into the INDEPENDENT figures needed, each a self-contained sub-question "
-        "naming its entity and measure explicitly (they are answered separately, so they cannot "
-        "refer to each other). Return JSON {\"parts\":[{\"label\":\"<short name>\",\"question\":\"<sub-question>\"}], "
-        "\"compute\":\"share|ratio|difference|sum\", \"of\":\"<label of the numerator/left>\", "
-        "\"per\":\"<label of the denominator/right>\"}. Use 'share' for 'what fraction/percent of X is Y'.",
-        question, json_mode=True))
-    parts = [p_ for p_ in (spec.get("parts") or []) if p_.get("question")][:4]
-    if len(parts) < 2:
-        raise SystemExit("could not decompose this into two or more figures to join")
-    _say("status", icon="🔗", msg=f"Join: {len(parts)} independent figures — "
-                                 + ", ".join(p_["label"] for p_ in parts))
-    got = {}
-    for part in parts:
-        try:
-            r = retrieve_for(part["question"])
-            d = r.get("data") or {}
-            got[part["label"]] = {"label": part["label"], "question": part["question"],
-                                  "value": r.get("value"), "source": r.get("source"),
-                                  "period": d.get("period") or d.get("as_of") or d.get("fiscal_year"),
-                                  "complete": d.get("complete", True),
-                                  "matched_entities": d.get("matched_entities"),
-                                  "coverage": d.get("coverage")}
-            _say("status", icon="✅", msg=f"{part['label']}: {r.get('value')} ({r.get('source')})")
-        except SystemExit as e:
-            got[part["label"]] = {"label": part["label"], "value": None, "error": str(e)}
-            _say("status", icon="↩️", msg=f"{part['label']}: no data ({e})")
-    vals = [g for g in got.values() if isinstance(g.get("value"), (int, float))]
-    if len(vals) < 2:
-        raise SystemExit("could not retrieve two comparable figures for this join")
-
-    a, b = got.get(spec.get("of")), got.get(spec.get("per"))
-    if not (a and b and isinstance(a.get("value"), (int, float)) and isinstance(b.get("value"), (int, float))):
-        a, b = vals[0], vals[1]
-    op, out = (spec.get("compute") or "ratio"), {}
-    if op in ("share", "ratio") and b["value"]:
-        r = a["value"] / b["value"]
-        out = {"computed": round(r * 100, 2) if op == "share" else round(r, 4),
-               "unit": "percent" if op == "share" else "ratio",
-               "formula": f"{a['label']} / {b['label']} = {a['value']:,.0f} / {b['value']:,.0f}"}
-    elif op == "difference":
-        out = {"computed": round(a["value"] - b["value"], 2), "unit": "difference",
-               "formula": f"{a['label']} - {b['label']} = {a['value']:,.0f} - {b['value']:,.0f}"}
-    else:
-        out = {"computed": round(sum(v["value"] for v in vals), 2), "unit": "sum",
-               "formula": " + ".join(f"{v['label']}" for v in vals)}
-
-    # JOIN ALIGNMENT: figures from different sources are routinely on different periods or
-    # completeness footings. Combining them anyway is how a join produces a confident wrong number.
-    warns = []
-    periods = {v["label"]: v.get("period") for v in vals if v.get("period")}
-    if len(set(periods.values())) > 1:
-        warns.append("the figures cover different periods (" +
-                     ", ".join(f"{k}: {v}" for k, v in periods.items()) + ")")
-    for v in vals:
-        if v.get("complete") is False:
-            warns.append(f"'{v['label']}' is a PARTIAL total ({v.get('coverage') or 'capped result'}), "
-                         f"so the result understates the true figure")
-        if (v.get("matched_entities") or 1) > 1:
-            warns.append(f"'{v['label']}' was matched by NAME across {v['matched_entities']} separately "
-                         f"registered entities, so it is not the same legal entity as the other figure")
-    if len({v.get("source") for v in vals}) < 2:
-        warns.append("both figures came from the same source — this is not a cross-source join")
-    return {"question": question, "join": [got[k] for k in got], "compute": op,
-            "source": " + ".join(dict.fromkeys(v.get("source") or "?" for v in vals)),
-            **out, **({"alignment_warnings": warns} if warns else {})}
 
 
-def _run_generate_test(question, ctx, p, want=6):
-    """EXISTENTIAL filtered-subset ("give me SOME universities over $1B"): the model PROPOSES
-    candidates, the data VERIFIES each. This is the one plan where part of the answer originates
-    outside the sources, so provenance is split explicitly and the result never claims completeness:
-    membership is model-proposed, every reported VALUE is fetched and checked."""
-    thr = ctx.get("threshold") or {}
-    attr = ctx.get("attribute") or ""
-    pop = ctx.get("population_type") or "organizations"
-    cands = json.loads(TK.llm(
-        f'Name up to {want + 4} real US {pop} MOST LIKELY to satisfy: "{attr} {thr.get("op", ">")} '
-        f'{thr.get("value")}". Use each one\'s full official name (not an abbreviation). '
-        'Return JSON {"candidates": ["...", ...]}.', question, json_mode=True)).get("candidates", [])
-    cands = [c for c in cands if isinstance(c, str)][:want + 4]
-    if not cands:
-        raise SystemExit("could not propose candidates to test")
-    _say("status", icon="🎯", msg=f"Proposing {len(cands)} candidates, then verifying each against the data")
-    import operator
-    cmp = {">": operator.gt, ">=": operator.ge, "<": operator.lt,
-           "<=": operator.le}.get(thr.get("op"), operator.gt)
-    tested, passing = [], []
-    for c in cands:
-        if len(passing) >= want:
-            break
-        try:
-            r = retrieve_for(f"{attr} for {c}")
-            v = r.get("value")
-            ok = isinstance(v, (int, float)) and thr.get("value") is not None and cmp(v, float(thr["value"]))
-            tested.append({"label": c, "value": v, "passes": bool(ok)})
-            _say("status", icon="✅" if ok else "↩️",
-                 msg=f"{c}: {v}{' — qualifies' if ok else ' — does not qualify'}")
-            if ok:
-                passing.append({"label": c, "value": v})
-        except SystemExit as e:
-            tested.append({"label": c, "value": None, "error": str(e)})
-            _say("status", icon="↩️", msg=f"{c}: no data ({e})")
-    return {"question": question, "ranking": passing, "matches": len(passing),
-            "tested": tested, "threshold": f"{thr.get('op', '>')} {thr.get('value')}",
-            "complete": False, "candidate_source": "model-proposed, then verified against the source",
-            "note": ("these are EXAMPLES that were checked against the data, not the complete set — "
-                     "candidates were proposed by the model, so qualifying members it did not think "
-                     "of are missing"),
-            "source": (tested[0].get("source") if tested else None) or p["hit"]["title"]}
 
 
-def _run_fanout(question, ctx, shape):
-    """COMPARISON / TIMESERIES: the answer is K ordinary lookups plus a comparison. Needs no
-    population capability at all — which is why a keyed source can compare but cannot rank.
-    Each sub-question goes through the full discover->resolve->fetch path via retrieve_for."""
-    attr = ctx.get("attribute") or ""
-    if shape == "timeseries":
-        # Resolve the leaf + entity + key ONCE, then re-fetch per period. Re-running full
-        # discovery for every year is what made this exceed ten minutes: each cycle re-ranks
-        # and, for SEC, probes up to 25 candidate concepts.
-        yrs = [y for y in (ctx.get("periods") or []) if y][:20]
-        ent = ctx.get("entity") or ""
-        if len(yrs) < 2:
-            raise SystemExit("timeseries needs at least two periods")
-        _say("status", icon="🧮", msg=f"Plan: resolve once, then read {len(yrs)} periods in parallel "
-                                     f"({', '.join(str(y) for y in yrs)})")
-        _c, _h, hit0, _t, _d, state0 = _search(f"{attr} for {ent}")
-
-        def one_year(y):
-            # per-YEAR fetch (not one concept for all): a filer legitimately reports different concepts
-            # in different years (Apple: Revenues -> ASC-606), so each year picks the concept it used.
-            try:
-                d = _fetch({**state0, "period": str(y)}, ctx)
-                return {"label": str(y), "value": d.get("value", d.get("value_usd", d.get("total_usd"))),
-                        "source": hit0["title"]}
-            except (Backtrack, SystemExit) as e:
-                return {"label": str(y), "value": None, "error": str(e)}
-
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=min(6, len(yrs))) as ex:
-            series = list(ex.map(_with_emitter(one_year), yrs))  # ex.map preserves input order
-        for s in series:
-            _say("status", icon="✅" if s.get("value") is not None else "↩️",
-                 msg=f"{s['label']}: {s.get('value') if s.get('value') is not None else 'no data'}")
-        got = [s for s in series if isinstance(s.get("value"), (int, float))]
-        if len(got) < 2:
-            raise SystemExit("could not retrieve at least two periods for a timeseries")
-        out = {"question": question, "shape": shape, "attribute": attr, "series": series,
-               "source": hit0["title"]}
-        first, last = got[0], got[-1]
-        out["change"] = round(last["value"] - first["value"], 2)
-        if first["value"]:
-            out["change_pct"] = round((last["value"] - first["value"]) / abs(first["value"]) * 100, 1)
-        return out
-
-    if shape == "comparison":
-        items = [e for e in (ctx.get("entities") or []) if e][:8]
-        subs = [(e, f"{attr} for {e}") for e in items]
-    else:
-        yrs = [y for y in (ctx.get("periods") or []) if y][:20]
-        ent = ctx.get("entity") or ""
-        subs = [(y, f"{attr} for {ent} in {y}") for y in yrs]
-    if len(subs) < 2:
-        raise SystemExit(f"{shape} needs at least two {'entities' if shape == 'comparison' else 'periods'}")
-    _say("status", icon="🧮", msg=f"Plan: {len(subs)} separate lookups in parallel, then compare "
-                                 f"({', '.join(str(s[0]) for s in subs)})")
-
-    def one_sub(item):
-        label, sub = item
-        try:
-            r = retrieve_for(sub)
-            return {"label": str(label), "value": r.get("value"), "source": r.get("source")}
-        except SystemExit as e:
-            return {"label": str(label), "value": None, "error": str(e)}
-
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=min(6, len(subs))) as ex:
-        series = list(ex.map(_with_emitter(one_sub), subs))    # preserves order
-    for s in series:
-        _say("status", icon="✅" if s.get("value") is not None else "↩️",
-             msg=f"{s['label']}: {s.get('value') if s.get('value') is not None else 'no data'}")
-    got = [s for s in series if isinstance(s.get("value"), (int, float))]
-    if len(got) < 2:
-        raise SystemExit(f"could not retrieve comparable values for {shape}")
-    out = {"question": question, "shape": shape, "attribute": attr, "series": series,
-           "source": got[0].get("source")}
-    if shape == "comparison":
-        best = max(got, key=lambda s: s["value"])
-        out["highest"] = best["label"]
-        out["difference"] = round(best["value"] - min(s["value"] for s in got), 2)
-    else:
-        first, last = got[0], got[-1]
-        out["change"] = round(last["value"] - first["value"], 2)
-        if first["value"]:
-            out["change_pct"] = round((last["value"] - first["value"]) / abs(first["value"]) * 100, 1)
-    return out
 
 
-def _search(question, ctx=None, hits=None):
-    """ONE backtracking search over every choice point: field -> entity -> key/granularity -> period,
-    accepted only when the retrieved record actually answers the question (unit/currency/place check).
-    `ctx`/`hits` may be passed in when the planner already ran discovery, to avoid repeating it."""
-    if ctx is None or hits is None:
-        ctx, hits = discover(question)
-    if not hits:
-        raise SystemExit("agent finder returned no sources")
-    p = ctx.get("period") or "latest"
-    intent = QueryIntent.from_context(question, ctx)
-    trace = []
-    steps = [
-        ("hit", lambda s: hits),
-        ("entity", lambda s: _link_entity(ctx)),
-        ("key", lambda s: _key_options(s, ctx)),
-        ("period", lambda s: ([p, "latest"] if p != "latest" else ["latest"])),
-    ]
-
-    attempts = [0]
-    tried_tables = set()                    # distinct tables actually reached, for the failure message
-    done = {}                               # complete fetch identity -> outcome, within this question
-    # This counter is deliberately local to one _search call. Fan-out branches are independent
-    # questions and must not consume one another's budget merely because they overlap in time.
-    # 3 entities x 2 periods x a couple keys is the honest ceiling; beyond it the search is
-    # looping, not exploring — stop cleanly.
-
-    def goal(s):
-        if attempts[0] >= MAX_SEARCH_ATTEMPTS:
-            raise SystemExit(
-                f"no source could answer this. {len(tried_tables)} of {len(hits)} candidate tables "
-                f"were tried in {attempts[0]} attempts before the search budget ran out"
-                + ("" if len(tried_tables) >= len(hits) else
-                   " — the remaining candidates were never reached, so this is not proof the data is absent")
-                + ".")
-        ent = (s.get("entity") or {}).get("label")
-        # Identity of the actual request, not its display name: the same table can be fetched
-        # for several entities, keys and periods, and only the whole tuple distinguishes them.
-        identity = (s["hit"]["identifier"], (s.get("entity") or {}).get("qid"), ent,
-                    json.dumps(s.get("key"), sort_keys=True, default=str), s.get("period"))
-        if identity in done:
-            raise Backtrack(f"already attempted ({done[identity]})")
-        attempts[0] += 1
-        tried_tables.add(s["hit"]["identifier"])
-        _say("status", icon="📥", msg=f"Fetching live from “{s['hit']['title']}”"
-             + (f" for {ent}…" if ent else "…"))
-        attempt = Attempt(source=s["hit"].get("publisher") or s["hit"]["title"],
-                          identifier=s["hit"]["identifier"], entity=s.get("entity"),
-                          period=s.get("period") or "latest")
-        connector = connectors.for_hit(s["hit"])
-        _say("status", icon="🔎", msg="Checking the result actually answers your question…")
-        try:
-            evidence = connector.execute(
-                intent, attempt, s["hit"], lambda: _fetch(s, ctx),
-                adjudicator=lambda data, verdict: _answers(question, data, verdict))
-        except connectors.Rejected as e:
-            # The adjudicator judged the TABLE, not this particular entity/key/period, so
-            # every remaining combination beneath it would be rejected for the same reason.
-            done[identity] = "wrong table"
-            trace.append(e.attempt)
-            _say("status", icon="↩️", msg=f"Wrong table ({e}) — skipping it and trying the next candidate…")
-            raise Prune("hit", f"answer rejected: {e}")
-        except Backtrack as e:
-            # A usable table with nothing for this key or period: the next key or period is
-            # genuinely worth trying, so this stays an ordinary leaf failure.
-            done[identity] = str(e)
-            trace.append(attempt)
-            _say("status", icon="↩️", msg=f"No usable data ({e}) — backtracking…")
-            raise
-        trace.append(attempt)
-        _say("status", icon="✅", msg="Result checks out — composing the grounded answer…")
-        return {**s, "_data": evidence.payload, "_evidence": evidence, "_attempts": trace}
-
-    try:
-        state = _solve(steps, goal, {})
-    except Backtrack as e:
-        raise SystemExit(f"no source could answer: {e}")
-    return ctx, hits, state["hit"], hits.index(state["hit"]) + 1, state["_data"], state
 
 
-def retrieve_for(question):
-    """Discover + retrieve for one sub-question, ANY domain (no synthesis). Universal join
-    primitive; returns a NORMALIZED numeric `value`. Backtracks across every choice point."""
-    _ctx, _hits, hit, _tried, data, state = _search(question)
-    # list-returning sources (NSF/NIH/USAspending awards) carry their number as the engine-computed
-    # total, not a scalar `value` — without this a comparison over those sources finds nothing to compare
-    val = data.get("value", data.get("value_usd", data.get("total_usd")))
-    try:
-        val = float(val)
-    except (TypeError, ValueError):
-        pass
-    return {"source": hit["title"], "source_identifier": hit.get("identifier"),
-            "value": val, "data": data,
-            "attempts": [a.to_dict() for a in (state.get("_attempts") or [])]}
 
 
-# --- temporary async point path ---------------------------------------------------------------
-# This path deliberately sits beside the synchronous engine until the ASGI cutover. Stage 6 adds
-# composite fan-out; Stage 8 removes the sync copy and makes these names canonical.
+# --- event-loop-native query engine ---------------------------------------------------------------
 
 async def _asay(context, kind, **data):
     await context.emit(kind, **data)
@@ -2103,7 +950,7 @@ async def discover_async(question, sites=None, assumptions=None, *, context):
             system, question, context=context, json_mode=True, stage="classify")
         ctx = _normalize_shape(json.loads(classified))
     except (ValueError, TypeError) as exc:
-        raise SystemExit(f"question classification returned invalid JSON: {exc}") from exc
+        raise runtime.Refused(f"question classification returned invalid JSON: {exc}") from exc
     ctx["question"] = question
     if isinstance(assumptions, dict):
         allowed = {"entity", "type", "attribute", "period", "shape", "concept", "entity_qid"}
@@ -2147,7 +994,7 @@ async def discover_async(question, sites=None, assumptions=None, *, context):
             [primary, secondary] + extra, k=12, sources=sources,
             rerank_query=question, context=context)
     except ard_client.DiscoveryError as exc:
-        raise SystemExit(str(exc)) from exc
+        raise runtime.Refused(str(exc)) from exc
     seen, hits = set(), []
     for hit in found:
         if hit["identifier"] not in seen:
@@ -2455,7 +1302,7 @@ async def _fetch_async(state, ctx, *, context):
             return await _s_rest_async(f, context=context)
         if fm.get("search"):
             return await _s_search_async(f, context=context)
-    except SystemExit as exc:
+    except runtime.Refused as exc:
         raise Backtrack(str(exc)) from exc
     raise Backtrack("no structured retrieval for this source")
 
@@ -2487,7 +1334,7 @@ async def _search_async(question, ctx=None, hits=None, *, context):
     if ctx is None or hits is None:
         ctx, hits = await discover_async(question, context=context)
     if not hits:
-        raise SystemExit("agent finder returned no sources")
+        raise runtime.Refused("agent finder returned no sources")
     period = ctx.get("period") or "latest"
     intent, trace = QueryIntent.from_context(question, ctx), []
     context.memo["attempts"] = trace
@@ -2502,7 +1349,7 @@ async def _search_async(question, ctx=None, hits=None, *, context):
     async def goal(state):
         nonlocal attempts
         if attempts >= MAX_SEARCH_ATTEMPTS:
-            raise SystemExit(
+            raise runtime.Refused(
                 f"no source could answer this. {len(tried_tables)} of {len(hits)} candidate tables "
                 f"were tried in {attempts} attempts before the search budget ran out.")
         entity = (state.get("entity") or {}).get("label")
@@ -2545,7 +1392,7 @@ async def _search_async(question, ctx=None, hits=None, *, context):
     try:
         state = await _solve_async(steps, goal, {})
     except Backtrack as exc:
-        raise SystemExit(f"no source could answer: {exc}") from exc
+        raise runtime.Refused(f"no source could answer: {exc}") from exc
     return ctx, hits, state["hit"], hits.index(state["hit"]) + 1, state["_data"], state
 
 
@@ -2556,7 +1403,7 @@ async def _present_async(question, evidence, *, context):
     return await TK.synthesize_async(question, evidence.payload, context=context), "llm-fallback"
 
 
-async def retrieve_for_async(question, *, context):
+async def retrieve_for(question, *, context):
     """Async universal join primitive; concurrent callers use forked scratch state."""
     _ctx, _hits, hit, _tried, data, state = await _search_async(question, context=context)
     val = data.get("value", data.get("value_usd", data.get("total_usd")))
@@ -2574,22 +1421,31 @@ async def _ordered(context, factories):
     context.budget.consume_fanout(len(factories))
     values = [None] * len(factories)
     async def one(index, factory):
-        try:
-            values[index] = await factory(context.fork())
-        except SystemExit as exc:
-            raise runtime.Refused(str(exc)) from exc
+        values[index] = await factory(context.fork())
     try:
         async with asyncio.TaskGroup() as group:
             for index, factory in enumerate(factories):
                 group.create_task(one(index, factory))
     except BaseExceptionGroup as group:
-        pending = list(group.exceptions)
+        leaves, pending = [], list(group.exceptions)
         while pending:
             exc = pending.pop(0)
             if isinstance(exc, BaseExceptionGroup):
-                pending[0:0] = exc.exceptions
-            elif isinstance(exc, runtime.Refused):
-                raise exc
+                pending[0:0] = list(exc.exceptions)
+            else:
+                leaves.append(exc)
+        # A sibling cancellation is normally TaskGroup cleanup, not the cause. Preserve an
+        # intentional refusal (including QueryBudgetExceeded subclasses), then the first real
+        # failure, and use cancellation only when nothing more informative exists.
+        refused = next((exc for exc in leaves if isinstance(exc, runtime.Refused)), None)
+        if refused is not None:
+            raise refused
+        real = next((exc for exc in leaves if not isinstance(
+            exc, (asyncio.CancelledError, runtime.QueryCancelled))), None)
+        if real is not None:
+            raise real
+        if leaves:
+            raise leaves[0]
         raise
     return values
 
@@ -2655,11 +1511,11 @@ async def _run_grants_async(question, ctx, *, context):
     if direction == "shared":
         entities = [item for item in (ctx.get("entities") or []) if item] or ([entity] if entity else [])
         if len(entities) < 2:
-            raise SystemExit("comparing shared grantees needs TWO named funders.")
+            raise runtime.Refused("comparing shared grantees needs TWO named funders.")
         return await grants.shared_grantees_async(entities[0], entities[1], context=context)
     org = _grant_entity(question, ctx)
     if not org:
-        raise SystemExit("this grant question needs a named organization (a funder or a recipient).")
+        raise runtime.Refused("this grant question needs a named organization (a funder or a recipient).")
     if direction == "reverse":
         return await grants.reverse_async(org, context=context)
     return await grants.forward_async(org, context=context)
@@ -2682,7 +1538,7 @@ async def _run_ranking_async(question, ctx, p, top_n=10, *, context):
     rows = _rows_of(await driver.accessor_async(
         hit["identifier"], operation, context=context, **params), cap)
     if not rows:
-        raise SystemExit(f"ranking returned no usable rows from {hit['title']}")
+        raise runtime.Refused(f"ranking returned no usable rows from {hit['title']}")
     if not (cap.get("order") or {}).get("server"):
         rows.sort(key=lambda row: row["value"], reverse=True)
     if any(word in question.lower() for word in ("lowest", "least", "smallest", "fewest", "bottom")):
@@ -2716,7 +1572,7 @@ async def _run_ambiguous_async(question, ctx, *, context):
     async def branch(interp, branch_context):
         subquestion = f"{interp} for {entity}{year}" if entity else f"{interp}{year}"
         try:
-            result = await retrieve_for_async(subquestion, context=branch_context)
+            result = await retrieve_for(subquestion, context=branch_context)
             data = result.get("data") or {}
             return {"interpretation": interp, "value": result.get("value"),
                     "label": data.get("metric") or data.get("measure") or interp,
@@ -2726,7 +1582,7 @@ async def _run_ambiguous_async(question, ctx, *, context):
                     "attempts": result.get("attempts") or []}
         except driver.SourceRateLimitError as exc:
             return {"interpretation": interp, "value": None, "temporary_error": str(exc)}
-        except (SystemExit, runtime.Refused, Backtrack) as exc:
+        except (runtime.Refused, runtime.Refused, Backtrack) as exc:
             return {"interpretation": interp, "value": None, "error": str(exc)}
     answers = await _ordered(context, [
         lambda branch_context, interp=interp: branch(interp, branch_context)
@@ -2736,7 +1592,7 @@ async def _run_ambiguous_async(question, ctx, *, context):
         raise driver.SourceRateLimitError(temporary)
     got = [item for item in answers if isinstance(item.get("value"), (int, float))]
     if not got:
-        raise SystemExit(f"'{ctx.get('attribute')}' is ambiguous and none of its interpretations could be answered")
+        raise runtime.Refused(f"'{ctx.get('attribute')}' is ambiguous and none of its interpretations could be answered")
     return {"question": question, "ambiguous": True, "attribute": ctx.get("attribute"),
             "entity": entity, "interpretations": answers,
             "source": " · ".join(dict.fromkeys(item.get("source") or "?" for item in got))}
@@ -2747,7 +1603,7 @@ async def _run_fanout_async(question, ctx, shape, *, context):
     if shape == "timeseries":
         years = [year for year in (ctx.get("periods") or []) if year][:20]
         if len(years) < 2:
-            raise SystemExit("timeseries needs at least two periods")
+            raise runtime.Refused("timeseries needs at least two periods")
         _c, _h, hit, _t, _d, state = await _search_async(
             f"{attribute} for {ctx.get('entity') or ''}", context=context.fork())
         async def year_branch(year, branch_context):
@@ -2757,7 +1613,7 @@ async def _run_fanout_async(question, ctx, shape, *, context):
                 return {"label": str(year),
                         "value": data.get("value", data.get("value_usd", data.get("total_usd"))),
                         "source": hit["title"]}
-            except (Backtrack, SystemExit, runtime.Refused) as exc:
+            except (Backtrack, runtime.Refused, runtime.Refused) as exc:
                 return {"label": str(year), "value": None, "error": str(exc)}
         series = await _ordered(context, [
             lambda branch_context, year=year: year_branch(year, branch_context) for year in years])
@@ -2769,13 +1625,13 @@ async def _run_fanout_async(question, ctx, shape, *, context):
             subquestions = [(year, f"{attribute} for {ctx.get('entity') or ''} in {year}")
                             for year in (ctx.get("periods") or []) if year][:20]
         if len(subquestions) < 2:
-            raise SystemExit(f"{shape} needs at least two values")
+            raise runtime.Refused(f"{shape} needs at least two values")
         async def sub_branch(label, subquestion, branch_context):
             try:
-                result = await retrieve_for_async(subquestion, context=branch_context)
+                result = await retrieve_for(subquestion, context=branch_context)
                 return {"label": str(label), "value": result.get("value"),
                         "source": result.get("source")}
-            except (SystemExit, runtime.Refused) as exc:
+            except (runtime.Refused, runtime.Refused) as exc:
                 return {"label": str(label), "value": None, "error": str(exc)}
         series = await _ordered(context, [
             lambda branch_context, label=label, subquestion=subquestion:
@@ -2784,7 +1640,7 @@ async def _run_fanout_async(question, ctx, shape, *, context):
         hit = None
     got = [item for item in series if isinstance(item.get("value"), (int, float))]
     if len(got) < 2:
-        raise SystemExit(f"could not retrieve comparable values for {shape}")
+        raise runtime.Refused(f"could not retrieve comparable values for {shape}")
     out = {"question": question, "shape": shape, "attribute": attribute, "series": series,
            "source": hit["title"] if hit else got[0].get("source")}
     if shape == "comparison":
@@ -2809,10 +1665,10 @@ async def _run_derive_async(question, ctx, *, context):
         question, context=context, json_mode=True, stage="classify"))
     parts = [part for part in (spec.get("parts") or []) if part.get("question")][:4]
     if len(parts) < 2:
-        raise SystemExit("could not decompose this into two or more figures to join")
+        raise runtime.Refused("could not decompose this into two or more figures to join")
     async def branch(part, branch_context):
         try:
-            result = await retrieve_for_async(part["question"], context=branch_context)
+            result = await retrieve_for(part["question"], context=branch_context)
             data = result.get("data") or {}
             return {"label": part["label"], "question": part["question"],
                     "value": result.get("value"), "source": result.get("source"),
@@ -2820,14 +1676,14 @@ async def _run_derive_async(question, ctx, *, context):
                     "complete": data.get("complete", True),
                     "matched_entities": data.get("matched_entities"),
                     "coverage": data.get("coverage")}
-        except (SystemExit, runtime.Refused) as exc:
+        except (runtime.Refused, runtime.Refused) as exc:
             return {"label": part["label"], "value": None, "error": str(exc)}
     values = await _ordered(context, [
         lambda branch_context, part=part: branch(part, branch_context) for part in parts])
     got = {item["label"]: item for item in values}
     numeric = [item for item in values if isinstance(item.get("value"), (int, float))]
     if len(numeric) < 2:
-        raise SystemExit("could not retrieve two comparable figures for this join")
+        raise runtime.Refused("could not retrieve two comparable figures for this join")
     left, right = got.get(spec.get("of")), got.get(spec.get("per"))
     if not (left and right and isinstance(left.get("value"), (int, float))
             and isinstance(right.get("value"), (int, float))):
@@ -2871,19 +1727,19 @@ async def _run_generate_test_async(question, ctx, p, want=6, *, context):
         question, context=context, json_mode=True, stage="classify"))
     candidates = [item for item in (proposed.get("candidates") or []) if isinstance(item, str)][:want + 4]
     if not candidates:
-        raise SystemExit("could not propose candidates to test")
+        raise runtime.Refused("could not propose candidates to test")
     import operator
     compare = {">": operator.gt, ">=": operator.ge, "<": operator.lt,
                "<=": operator.le}.get(threshold.get("op"), operator.gt)
     async def branch(candidate, branch_context):
         try:
-            result = await retrieve_for_async(f"{attribute} for {candidate}", context=branch_context)
+            result = await retrieve_for(f"{attribute} for {candidate}", context=branch_context)
             value = result.get("value")
             passes = (isinstance(value, (int, float)) and threshold.get("value") is not None
                       and compare(value, float(threshold["value"])))
             return {"label": candidate, "value": value, "passes": bool(passes),
                     "source": result.get("source")}
-        except (SystemExit, runtime.Refused) as exc:
+        except (runtime.Refused, runtime.Refused) as exc:
             return {"label": candidate, "value": None, "error": str(exc)}
     tested = await _ordered(context, [
         lambda branch_context, candidate=candidate: branch(candidate, branch_context)
@@ -2904,7 +1760,7 @@ async def _materialize_async(hit, grain="county", scope="06", *, context):
     operation, capability = next(((name, cap) for name, cap in
         planner.capabilities(identifier).items() if cap.get("grain") == grain), (None, None))
     if not operation:
-        raise SystemExit(f"{hit['title']} does not serve data at {grain} grain")
+        raise runtime.Refused(f"{hit['title']} does not serve data at {grain} grain")
     if fm.get("get") or fm.get("variable"):
         async def rows_for(variable=None):
             kwargs = {"geo": f"{grain}:*&in=state:{scope}"}
@@ -2980,14 +1836,14 @@ async def _run_correlate_async(question, ctx, *, context):
     series, metadata = {}, []
     for hit, (observations, cached) in zip(picked, materialized):
         if not observations:
-            raise SystemExit(f"'{hit['title']}' has no usable county-level values")
+            raise runtime.Refused(f"'{hit['title']}' has no usable county-level values")
         label = hit["title"].split(" — ")[0][:40]
         series[label] = observations
         metadata.append({"measure": hit["title"], "n": len(observations), "cached": cached})
     rows, report = store.align(series)
     labels = list(series)
     if len(rows) < 3:
-        raise SystemExit(f"only {len(rows)} units had both measures — too few to correlate")
+        raise runtime.Refused(f"only {len(rows)} units had both measures — too few to correlate")
     xs, ys = [row[labels[0]] for row in rows], [row[labels[1]] for row in rows]
     count = len(xs); mx, my = sum(xs) / count, sum(ys) / count
     sx = math.sqrt(sum((value - mx) ** 2 for value in xs))
@@ -2999,7 +1855,7 @@ async def _run_correlate_async(question, ctx, *, context):
             "caveats": ["correlation is not causation", "this is an ecological correlation"]}
 
 
-async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer", *, context=None):
+async def run(question, sites=None, assumptions=None, on_ambiguity="answer", *, context=None):
     """Complete event-loop-native engine, including every composite plan."""
     owned_clients = None
     if context is None:
@@ -3014,7 +1870,7 @@ async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer
         ctx, hits = await discover_async(
             question, sites=sites, assumptions=assumptions, context=context)
         if not hits:
-            raise SystemExit("agent finder returned no sources")
+            raise runtime.Refused("agent finder returned no sources")
         candidates = ctx.get("entity_candidates") or []
         if (ctx.get("entity_status") or "").lower() == "ambiguous" and len(candidates) > 1:
             return _entity_clarification(
@@ -3077,7 +1933,7 @@ async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer
             need = ("a source that can see a whole population"
                     if shape in ("ranking", "aggregate", "filtered-subset")
                     else "a capability none of the matching sources declare")
-            raise SystemExit(f"this is a '{shape}' question, which needs {need}; {plan['why']}.")
+            raise runtime.Refused(f"this is a '{shape}' question, which needs {need}; {plan['why']}.")
         elif plan["verdict"] == "compose:materialize-and-correlate":
             data = await _run_correlate_async(question, ctx, context=context); hit = plan["hit"]
         elif plan["verdict"] == "compose:derive":
@@ -3137,16 +1993,8 @@ async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer
             await owned_clients.close()
 
 
-def _spent():
-    """This thread's usage so far — a refused or failed question still burned calls, and hiding
-    that would make the cheap failures look free."""
-    led = llm.ledger()
-    return led.snapshot() if led is not None else None
 
 
-def _spent_discovery():
-    u = ard_client.usage()
-    return u.snapshot() if u is not None else None
 
 
 def _leaf_for_concept(concept):
@@ -3172,193 +2020,10 @@ def _cite_concept_actually_used(hit, data):
             "publisher": hit.get("publisher") or "sec-edgar"}
 
 
-def _admit(intent, hit, data):
-    """Normalize a non-backtracking execution path through the same connector/validation boundary."""
-    attempt = Attempt(source=hit.get("publisher") or hit.get("title") or "",
-                      identifier=hit.get("identifier") or "", period=intent.period)
-    evidence = connectors.for_hit(hit).execute(
-        intent, attempt, hit, lambda: data,
-        adjudicator=lambda payload, verdict: _answers(intent.question, payload, verdict))
-    return evidence, [attempt]
 
 
-def _present(question, evidence):
-    """Validated evidence chooses the deterministic renderer. Complex evidence explicitly falls
-    back to synthesis; classifier shape never selects authoritative prose."""
-    rendered = renderers.render(evidence)
-    if rendered:
-        return rendered.text, rendered.renderer
-    return TK.synthesize(question, evidence.payload), "llm-fallback"
 
 
-def run(question, sites=None, assumptions=None, on_ambiguity="answer"):
-    # Account for the LLM calls this question makes IN THIS PROCESS. The ARD Agent Finder runs as
-    # a separate service and bills its own discovery work — reported alongside as `discovery_usage`,
-    # deliberately a SIBLING of `usage` rather than nested in it, so nothing reads as part of the
-    # question's own total.
-    _ledger = llm.start_ledger()
-    _disc = ard_client.start_usage()
-    if on_ambiguity not in ("answer", "ask", "all"):
-        on_ambiguity = "answer"
-    # PLAN BEFORE FETCH. The shape of the question and the DECLARED capability of the candidate
-    # sources decide whether this is one call, several, or impossible — and an impossible question
-    # is refused here, without issuing a single request.
-    ctx, hits = discover(question, sites, assumptions)
-    if not hits:
-        raise SystemExit("agent finder returned no sources")
-    # An entity the question does not pin down is a question for the caller, not a guess. Ask
-    # before fetching: unlike an ambiguous measure, every candidate here would return a
-    # perfectly valid number for the wrong place.
-    candidates = ctx.get("entity_candidates") or []
-    if (ctx.get("entity_status") or "").lower() == "ambiguous" and len(candidates) > 1:
-        return _entity_clarification(question, ctx, candidates, _ledger, _disc)
-
-    # A crosswalk that matched several records asks the same question as an ambiguous mention,
-    # but only once the measure is settled: an ambiguous measure is answered per reading
-    # downstream and must not be preempted by an entity question.
-    if len(ctx.get("interpretations") or []) < 2:
-        linked = _link_entity(ctx)
-        if len([e for e in linked if e]) > 1:
-            return _entity_clarification(question, ctx, [e for e in linked if e], _ledger, _disc)
-    shape = ctx.get("shape") if ctx.get("shape") in planner.SHAPES else "point"
-    intent = QueryIntent.from_context(question, ctx, sites)
-    # A genuinely ambiguous measure over a single entity gets SEPARATE answers per interpretation
-    # (earnings -> net income, EBITDA, EPS…) instead of a silently-chosen one.
-    if len(ctx.get("interpretations") or []) >= 2 and shape in ("point", "status", "entity-list"):
-        data = _run_ambiguous(question, ctx)
-        clarification = _clarification(ctx.get("attribute") or "the requested measure",
-                                       ctx.get("entity") or "", data.get("interpretations") or [])
-        if clarification:
-            trace = [attempt for option in (data.get("interpretations") or [])
-                     for attempt in (option.get("attempts") or [])]
-            return _ambiguity_result(question, ctx, hits, intent, clarification, on_ambiguity,
-                                     _ledger, _disc, trace)
-        # Distinct taxonomy labels that returned the same value are aliases, not a useful question
-        # for a human. Preserve the old combined answer rather than interrupting the caller.
-        evidence, attempts = _admit(intent, hits[0], data)
-        _answer, renderer = _present(question, evidence)
-        return {"question": question, "answer": _answer, "shape": shape, "usage": _ledger.snapshot(),
-                "discovery_usage": _disc.snapshot(),
-                "intent": intent.to_dict(), "attempts": [a.to_dict() for a in attempts],
-                "evidence": evidence.to_dict(), "answer_renderer": renderer,
-                "plan": f"ambiguous measure → {len(data['interpretations'])} interpretations answered separately",
-                "source": {"identifier": hits[0]["identifier"], "title": hits[0]["title"],
-                           "publisher": hits[0].get("publisher")},
-                "candidates": [{"identifier": h.get("identifier"), "title": h["title"],
-                                "score": h["score"], "publisher": h.get("publisher")}
-                               for h in hits],
-                "data": data}
-    p = planner.plan(shape, hits, ctx.get("quantifier") or "exhaustive")
-    _say("plan_chosen", shape=shape, verdict=p["verdict"], why=p.get("why", ""),
-         summary=planner.describe(shape, p))
-
-    # Grant-graph leaves (IRS 990 who-funds-whom) traverse a local edge table in a direction their
-    # marker declares, so they route before the generic shape gating rather than through it. The
-    # classifier already gated whether the philanthropic grant graph is even in the pool; once a grant
-    # leaf is among the candidates, prefer it over keyword-adjacent siblings (federal awards, a
-    # nonprofit's own contributions) — so scan all hits, not just the top, and never wrongly refuse it.
-    # Only when a grant leaf is the planner's pick OR near the TOP of discovery — otherwise a stray
-    # low-ranked grant leaf would hijack a non-grant question (e.g. "what does Feeding America do").
-    grant_hit = next((h for h in ([p["hit"]] if p.get("hit") else []) + hits[:2]
-                      if (driver.frontmatter(h["identifier"]) or {}).get("irsgrants")), None)
-    if grant_hit:
-        data = _run_grants(question, ctx, {"hit": grant_hit})
-        # Cite the leaf matching the traversal actually run, not just whichever grant leaf discovery
-        # surfaced first (the direction is picked in code, so the two can differ).
-        _GRANT_LEAF = {"forward": "grants-made", "reverse": "grants-received", "ranking": "top-grantmakers",
-                       "biggest_recipients": "biggest-recipients", "geo": "geographic",
-                       "overview": "grant-overview", "shared": "shared-grantees", "theme": "grants-by-cause"}
-        import grants as _g
-        leaf_id = f"sources/irs-grants/{_GRANT_LEAF.get(_grant_direction(question, ctx, _g), 'grants-made')}.md"
-        hit = next((h for h in hits if h["identifier"] == leaf_id), None)
-        if not hit:
-            fm = driver.frontmatter(leaf_id) or {}
-            hit = {"identifier": leaf_id, "title": fm.get("title", grant_hit["title"]),
-                   "publisher": grant_hit.get("publisher")}
-        evidence, attempts = _admit(intent, hit, data)
-        _answer, renderer = _present(question, evidence)
-        return {"question": question, "answer": _answer, "shape": shape, "usage": _ledger.snapshot(),
-                "discovery_usage": _disc.snapshot(),
-                "intent": intent.to_dict(), "attempts": [a.to_dict() for a in attempts],
-                "evidence": evidence.to_dict(), "answer_renderer": renderer,
-                "plan": planner.describe(shape, p),
-                "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
-                "candidates": [{"identifier": h.get("identifier"), "title": h["title"],
-                                "score": h["score"], "publisher": h.get("publisher")} for h in hits],
-                "data": data}
-
-    if p["verdict"] == "infeasible":
-        need = ("a source that can see a whole population" if shape in ("ranking", "aggregate", "filtered-subset")
-                else "a capability none of the matching sources declare")
-        raise SystemExit(f"this is a '{shape}' question, which needs {need}; {p['why']}.")
-
-    state = None
-    if p["verdict"] == "compose:materialize-and-correlate":
-        data = _run_correlate(question, ctx, p)
-        hit = p["hit"]
-    elif p["verdict"] == "compose:derive":
-        data = _run_derive(question, ctx, p)
-        hit = p["hit"]
-    elif p["verdict"] == "compose:generate-and-test":
-        data = _run_generate_test(question, ctx, p)
-        hit = p["hit"]
-    elif p["verdict"].startswith("compose:fan-out"):
-        data = _run_fanout(question, ctx, shape)
-        hit = p["hit"]
-    elif p["verdict"].startswith("compose:scan-and") or shape in ("ranking", "aggregate", "filtered-subset"):
-        # a BigQuery-backed population leaf runs SQL, not the REST accessor
-        if (driver.frontmatter(p["hit"]["identifier"]) or {}).get("bq"):
-            data = _run_bq(question, ctx, p)
-        else:
-            data = _run_ranking(question, ctx, p)
-        hit = p["hit"]
-    else:
-        _ctx, hits, hit, _tried, data, _state = _search(question, ctx=ctx, hits=hits)
-        state = _state
-
-    # SEC concept resolution already fetches a pool of reported sibling measures. If more than one
-    # remains plausible and their returned values materially differ, expose that empirical ambiguity
-    # here. `ask` and `all` become terminal outcomes; `answer` continues with the selected value but
-    # carries every alternative in the response.
-    resolution = data.pop("_ambiguity", None) if isinstance(data, dict) else None
-    if resolution:
-        clarification = _clarification(resolution.get("attribute") or intent.measure,
-                                       intent.entity or "", resolution.get("options") or [])
-        if clarification and on_ambiguity in ("ask", "all"):
-            ordered_hits = [hit] + [h for h in hits if h.get("identifier") != hit.get("identifier")]
-            trace = [a.to_dict() for a in ((state or {}).get("_attempts") or [])]
-            return _ambiguity_result(question, ctx, ordered_hits, intent, clarification, on_ambiguity,
-                                     _ledger, _disc, trace)
-        if clarification:
-            data["ambiguity"] = {"attribute": clarification.attribute,
-                                 "reason": resolution.get("reason"),
-                                 "options": clarification.to_dict()["options"]}
-    hit = _cite_concept_actually_used(hit, data)
-    if state and state.get("_evidence"):
-        evidence, attempts = state["_evidence"], state.get("_attempts") or []
-        evidence.identifier = hit["identifier"]
-        evidence.provenance["source_document"] = hit["identifier"]
-        if data.get("ambiguity"):
-            evidence.warnings.append("other materially different interpretations are included in data.ambiguity")
-    else:
-        evidence, attempts = _admit(intent, hit, data)
-    answer, renderer = _present(question, evidence)
-    return {
-        "question": question,
-        "answer": answer,
-        "usage": _ledger.snapshot(),
-        "discovery_usage": _disc.snapshot(),
-        "shape": shape,
-        "intent": intent.to_dict(),
-        "attempts": [a.to_dict() for a in attempts],
-        "evidence": evidence.to_dict(),
-        "answer_renderer": renderer,
-        "plan": planner.describe(shape, p),
-        "source": {"identifier": hit["identifier"], "title": hit["title"], "publisher": hit.get("publisher")},
-        "candidates": [{"identifier": h.get("identifier"), "title": h["title"],
-                        "score": h["score"], "publisher": h.get("publisher")} for h in hits],
-        "data": data,
-    }
 
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -3714,198 +2379,6 @@ TECHSOUP_PAGE = (PAGE
              '<h2 class="sh">Sources behind this view</h2>'))
 
 
-# --- per-source daily request cap ---------------------------------------------------------
-# /ask is unauthenticated and every call spends model credits, so one loop can run up a bill.
-# This caps how many questions a single source may ask per UTC day.
-#
-# Counts are per PROCESS and in memory: a restart clears them. That is a deliberate limit rather
-# than an oversight — the cap exists to stop a runaway script, not a determined attacker, and
-# persisting it would mean a write on every request. If it ever needs to survive restarts or span
-# instances, this is the seam to put Redis behind.
-# Running totals since process start, for GET /costs. Per-question numbers answer "what did that
-# cost"; this answers "what has this instance spent", which is the one that shows up on a bill.
-_TOTALS = {"questions": 0, "llm_calls": 0, "total_tokens": 0, "cost_usd": 0.0,
-           "discovery_calls": 0, "discovery_tokens": 0, "discovery_cost_usd": 0.0,
-           "by_stage": {}, "by_model": {}}
-_TOTALS_LOCK = threading.Lock()
-_TELEMETRY_LOCK = threading.Lock()
-TELEMETRY_PATH = os.getenv("TELEMETRY_PATH", os.path.join(ROOT, "cache", "telemetry.jsonl"))
-OPERATIONAL_TELEMETRY_PATH = os.getenv(
-    "OPERATIONAL_TELEMETRY_PATH", os.path.join(ROOT, "cache", "operations.jsonl"))
-TELEMETRY_STDOUT = os.getenv("TELEMETRY_STDOUT", "1").lower() in ("1", "true", "yes")
-_SERVER_STARTED_AT = time.time()
-_INSTANCE_ID = os.getenv("WEBSITE_INSTANCE_ID") or os.getenv("HOSTNAME") or "local"
-
-# A public endpoint that fans out into several provider calls needs a hard concurrency ceiling in
-# addition to the daily quota. Rejecting quickly is safer than allowing an unbounded ThreadingHTTPServer
-# queue to turn a traffic spike into provider spend and memory pressure.
-MAX_CONCURRENT_QUERIES = max(1, int(os.getenv("MAX_CONCURRENT_QUERIES", "4")))
-_QUERY_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_QUERIES)
-_ACTIVE_QUERIES = 0
-_ACTIVE_QUERIES_LOCK = threading.Lock()
-
-
-def _question_hash(question):
-    import hashlib
-    return hashlib.sha256(str(question or "").encode()).hexdigest()[:16]
-
-
-def _active_queries(delta=0):
-    """Atomically adjust and return the number of admitted, unfinished queries."""
-    global _ACTIVE_QUERIES
-    with _ACTIVE_QUERIES_LOCK:
-        _ACTIVE_QUERIES = max(0, _ACTIVE_QUERIES + delta)
-        return _ACTIVE_QUERIES
-
-
-def _operational_event(trace_id, event, started_at, question_hash="", **fields):
-    """Write a query lifecycle event immediately, including while a request is stalled.
-
-    The completed-query telemetry below is intentionally retained as a stable summary. These
-    events live in a separate JSONL stream and stdout so a VM journal or an autoscaled service's
-    log collector can see the last stage without depending on instance-local durable storage.
-    """
-    row = {
-        "at": time.time(),
-        "trace_id": trace_id,
-        "event": event,
-        "elapsed_ms": round((time.monotonic() - started_at) * 1000),
-        "question": question_hash,
-        "instance_id": _INSTANCE_ID,
-        "pid": os.getpid(),
-        "active_queries": _active_queries(),
-        "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
-        **fields,
-    }
-    line = json.dumps(row, separators=(",", ":"), default=str)
-    try:
-        os.makedirs(os.path.dirname(OPERATIONAL_TELEMETRY_PATH), exist_ok=True)
-        with _TELEMETRY_LOCK, open(OPERATIONAL_TELEMETRY_PATH, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError:
-        pass
-    if TELEMETRY_STDOUT:
-        try:
-            print(json.dumps({"log_type": "query_telemetry", **row}, separators=(",", ":"),
-                             default=str), flush=True)
-        except OSError:
-            pass
-
-
-def _record_progress(trace_id, started_at, question_hash, message):
-    """Record protocol progress at the moment it is produced, not only at query completion."""
-    message_type = message.get("message_type")
-    if message_type not in (nlweb.INTERMEDIATE, nlweb.ERROR, nlweb.NLWS):
-        return
-    content = message.get("content")
-    fields = {"message_type": message_type, "sequence": message.get("sequence")}
-    if message_type == nlweb.INTERMEDIATE:
-        fields["stage"] = str(content or "")[:500]
-    elif message_type == nlweb.ERROR:
-        fields["error"] = str(content or "")[:500]
-    elif isinstance(content, dict):
-        fields["status"] = content.get("status")
-        fields["shape"] = content.get("shape")
-        fields["source"] = (content.get("evidence") or {}).get("source")
-    _operational_event(trace_id, "progress", started_at, question_hash, **fields)
-
-
-def _usage_from_messages(messages):
-    """Usage is carried by the NLWS GeneratedAnswer frame. Query execution now runs on a worker so
-    the handler thread cannot read its thread-local ledgers directly."""
-    for m in reversed(messages or []):
-        if m.get("message_type") == nlweb.NLWS and isinstance(m.get("content"), dict):
-            return m["content"].get("usage"), m["content"].get("discovery_usage")
-    return None, None
-
-
-def _record_telemetry(ip, req, content, elapsed_ms, status="complete", trace_id=""):
-    """Durable JSONL request telemetry. Questions are represented by a hash by default so the
-    operational record is useful without silently retaining user text."""
-    content = content or {}
-    question = req.get("query") or ""
-    row = {"at": time.time(), "trace_id": trace_id, "instance_id": _INSTANCE_ID,
-           "status": status, "latency_ms": round(elapsed_ms),
-           "client": _question_hash(ip)[:12],
-           "question": _question_hash(question),
-           "intent": content.get("intent"), "attempts": content.get("attempts") or [],
-           "evidence_kind": (content.get("evidence") or {}).get("kind"),
-           "answer_renderer": content.get("answer_renderer"),
-           "usage": content.get("usage"), "discovery_usage": content.get("discovery_usage")}
-    try:
-        os.makedirs(os.path.dirname(TELEMETRY_PATH), exist_ok=True)
-        with _TELEMETRY_LOCK, open(TELEMETRY_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
-    except OSError:
-        pass
-
-
-def _accumulate(usage, discovery):
-    with _TOTALS_LOCK:
-        _TOTALS["questions"] += 1
-        for k in ("llm_calls", "total_tokens"):
-            _TOTALS[k] += (usage or {}).get(k, 0)
-        _TOTALS["cost_usd"] += (usage or {}).get("cost_usd", 0.0)
-        _TOTALS["discovery_calls"] += (discovery or {}).get("llm_calls", 0)
-        _TOTALS["discovery_tokens"] += (discovery or {}).get("total_tokens", 0)
-        _TOTALS["discovery_cost_usd"] += (discovery or {}).get("cost_usd", 0.0)
-        for field in ("by_stage", "by_model"):
-            for k, v in ((usage or {}).get(field) or {}).items():
-                b = _TOTALS[field].setdefault(k, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
-                b["calls"] += v.get("calls", 0)
-                b["tokens"] += v.get("tokens", 0)
-                b["cost_usd"] += v.get("cost_usd", 0.0)
-
-
-ASK_LIMIT_PER_DAY = int(os.getenv("ASK_LIMIT_PER_DAY", "200"))     # 0 disables the cap
-TRUST_PROXY = os.getenv("TRUST_PROXY", "0").lower() in ("1", "true", "yes")
-_QUOTA = {}                                     # ip -> [utc_day, count]
-_QUOTA_LOCK = threading.Lock()
-
-
-def _client_ip(handler):
-    """The address to bill a request to.
-
-    X-Forwarded-For is only consulted when TRUST_PROXY says something in front of us sets it.
-    Trusting it unconditionally would make the cap trivially bypassable: the header is
-    client-supplied, so anyone could send a fresh value per request and get a fresh quota. When a
-    proxy IS trusted, the LAST entry is the one it appended (the peer that actually connected to
-    it); earlier entries came from the client and are spoofable."""
-    if TRUST_PROXY:
-        xff = handler.headers.get("X-Forwarded-For", "")
-        if xff:
-            ip = xff.split(",")[-1].strip()
-            if ip.count(":") == 1:              # strip a :port that some proxies append
-                ip = ip.split(":")[0]
-            if ip:
-                return ip
-    return handler.client_address[0]
-
-
-def _quota_check(ip):
-    """(allowed, used, seconds_until_reset). Counts every ask, including ones that fail — a
-    refused question still paid for its classification and re-rank."""
-    if ASK_LIMIT_PER_DAY <= 0:
-        return True, 0, 0
-    now = time.time()
-    day = int(now // 86400)
-    reset_in = int((day + 1) * 86400 - now)
-    with _QUOTA_LOCK:
-        rec = _QUOTA.get(ip)
-        if rec is None or rec[0] != day:
-            if len(_QUOTA) > 50_000:            # bound the table; stale days are dead weight
-                for k in [k for k, v in _QUOTA.items() if v[0] != day]:
-                    _QUOTA.pop(k, None)
-            rec = [day, 0]
-            _QUOTA[ip] = rec
-        if rec[1] >= ASK_LIMIT_PER_DAY:
-            return False, rec[1], reset_in
-        rec[1] += 1
-        return True, rec[1], reset_in
-
-
-
-
 ARD_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ARD entries</title>
@@ -4048,117 +2521,6 @@ def _nlweb_text(ev):
     return ""
 
 
-def run_nlweb(req):
-    """Generator of NLWeb messages for one query. The engine already narrates itself through
-    `_say`; those events become intermediate_message frames, so the protocol carries the same
-    play-by-play the native UI always showed rather than going quiet until the answer lands."""
-    st = nlweb.Stream(req.get("conversation_id"))
-    yield st.message(nlweb.BEGIN, "", "system")
-
-    events = queue.Queue()
-    cancelled = threading.Event()
-    deadline = time.monotonic() + int(os.getenv("QUERY_TIMEOUT_SECONDS", "180"))
-
-    def work():
-        runtime.bind(cancelled, deadline)
-        _EMIT.cb = lambda ev: events.put(("event", ev))
-        try:
-            events.put(("done", run(req["query"], sites=req.get("sites") or None,
-                                    assumptions=req.get("assumptions") or None,
-                                    on_ambiguity=req.get("on_ambiguity") or "answer")))
-        except SystemExit as e:                        # an honest refusal, not a crash
-            events.put(("error", str(e)))
-        except driver.SourceRateLimitError as e:       # temporary publisher condition, shown verbatim
-            events.put(("error", str(e)))
-        except Exception as e:
-            # A refusal above is expected and needs no stack. Reaching HERE is a bug, and the
-            # client only ever sees "AttributeError: 'str' object has no attribute 'items'",
-            # which names neither the file nor the line. Two such crashes have now been
-            # reported from the deployment and could not be located from the outside because
-            # the traceback was discarded here. Log it; keep sending the client the summary.
-            print(f"[query failed] {req.get('query', '')[:200]!r}", file=sys.stderr)
-            traceback.print_exc()
-            events.put(("error", f"{type(e).__name__}: {e}"))
-        finally:
-            _EMIT.cb = None
-
-    worker = threading.Thread(target=work, name="resource-raiser-query", daemon=True)
-    worker.start()
-    result, error = None, None
-    try:
-        while result is None and error is None:
-            try:
-                kind, payload = events.get(timeout=max(0.01, deadline - time.monotonic()))
-            except queue.Empty:
-                cancelled.set()
-                error = "query deadline exceeded"
-                break
-            if kind == "event":
-                line = _nlweb_text(payload)
-                if line:
-                    yield st.message(nlweb.INTERMEDIATE, line, "system")
-            elif kind == "done":
-                result = payload
-            else:
-                error = payload
-    finally:
-        if result is None:
-            cancelled.set()
-
-    if error or not result:
-        yield st.message(nlweb.ERROR, error or "no answer", "system")
-        yield st.message(nlweb.END, "", "system")
-        return
-
-    site_of = {c["title"]: c.get("publisher") for c in (result.get("candidates") or [])}
-    items = [nlweb.item(c) for c in (result.get("candidates") or [])
-             if (c.get("score") or 0) >= req.get("min_score", 0)][:req.get("max_results", 10)]
-    # the table that actually answered belongs at the head of the list, whatever discovery ranked
-    src = result.get("source") or {}
-    if src.get("identifier"):
-        chosen = nlweb.item({"identifier": src["identifier"], "title": src.get("title"),
-                             "publisher": src.get("publisher"), "score": 100,
-                             "description": result.get("plan", ""),
-                             "schema_object": driver.frontmatter(src["identifier"]) or {}})
-        items = [chosen] + [i for i in items if i["url"] != chosen["url"]]
-        items = items[:max(1, req.get("max_results", 10))]
-    if items:
-        yield st.message(nlweb.RESULT, items)
-
-    if req.get("mode") != "list":
-        # `answer` and `items` are the GeneratedAnswer contract; the rest are additive fields a
-        # strict NLWeb client ignores and this engine's own UI uses to render rankings, record
-        # lists and the cost report. One protocol, no second endpoint.
-        clarification = result.get("clarification") if result.get("status") == "needs_clarification" else None
-        content = {
-            "@type": "ClarificationRequest" if clarification else "GeneratedAnswer",
-            "items": items,
-            "status": result.get("status") or "answered",
-            "shape": result.get("shape"),
-            "plan": result.get("plan"),
-            "data": result.get("data"),
-            "usage": result.get("usage"),
-            "discovery_usage": result.get("discovery_usage"),
-            "intent": result.get("intent"),
-            "attempts": result.get("attempts") or [],
-            "evidence": result.get("evidence"),
-            "answer_renderer": result.get("answer_renderer"),
-        }
-        if clarification:
-            content.update({"question": clarification.get("question"),
-                            "original_query": result.get("question"),
-                            "options": clarification.get("options") or []})
-        else:
-            content["answer"] = result.get("answer") or ""
-        yield st.message(nlweb.NLWS, content)
-    if req.get("debug"):
-        yield st.message(nlweb.INTERMEDIATE,
-                         json.dumps({"shape": result.get("shape"), "plan": result.get("plan"),
-                                     "usage": result.get("usage"),
-                                     "discovery_usage": result.get("discovery_usage"),
-                                     "data": result.get("data")})[:20000], "system")
-    yield st.message(nlweb.COMPLETE, "", "system")
-    yield st.message(nlweb.END, "", "system")
 
 
 HOW_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -4247,278 +2609,6 @@ of what can be asked actually falls.</p>
 </body></html>"""
 
 
-def serve(port, ready=None):
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
-
-    class H(BaseHTTPRequestHandler):
-        def _cors(self):
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Expose-Headers", "X-Request-ID, Retry-After")
-
-        def do_OPTIONS(self):
-            self.send_response(204)
-            self._cors()
-            self.send_header("Access-Control-Max-Age", "86400")
-            self.end_headers()
-
-        def _json(self, code, obj, headers=None):
-            b = json.dumps(obj).encode()
-            self.send_response(code)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(b)))
-            for key, value in (headers or {}).items():
-                self.send_header(key, str(value))
-            self.end_headers()
-            self.wfile.write(b)
-
-        def _html(self, page):
-            body = page.encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_GET(self):
-            # split the query string off before routing — /ard/list?source=… must still match
-            # "/ard/list", which a raw self.path comparison never does
-            p = urllib.parse.urlparse(self.path).path.rstrip("/")
-            if p in ("", "/"):
-                return self._html(PAGE)
-            if p == "/techsoup":
-                return self._html(TECHSOUP_PAGE)
-            if p == "/healthz":
-                # Liveness for a load balancer / App Service health check: is the index loaded and
-                # is the finder reachable? Deliberately does NOT call the LLM — a health probe that
-                # costs money per poll is a bill, not a health check.
-                health = {}
-                try:
-                    health = ard_client.health()
-                except Exception:
-                    pass
-                finder = bool(health.get("ok"))
-                n = int(health.get("entries") or 0)
-                code = 200 if (n and finder) else 503
-                active = _active_queries()
-                return self._json(code, {
-                    "ok": code == 200,
-                    "tables": n,
-                    "agent_finder": finder,
-                    "uptime_seconds": round(time.time() - _SERVER_STARTED_AT),
-                    "instance_id": _INSTANCE_ID,
-                    "active_queries": active,
-                    "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
-                    "saturated": active >= MAX_CONCURRENT_QUERIES,
-                })
-            if p == "/costs":
-                with _TOTALS_LOCK:
-                    t = json.loads(json.dumps(_TOTALS))     # snapshot under the lock
-                n = max(1, t["questions"])
-                t["avg_cost_per_question_usd"] = round((t["cost_usd"] + t["discovery_cost_usd"]) / n, 6)
-                t["combined_cost_usd"] = round(t["cost_usd"] + t["discovery_cost_usd"], 6)
-                t["cost_usd"] = round(t["cost_usd"], 6)
-                t["discovery_cost_usd"] = round(t["discovery_cost_usd"], 6)
-                for field in ("by_stage", "by_model"):
-                    t[field] = {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
-                                for k, v in sorted(t[field].items(),
-                                                   key=lambda kv: -kv[1]["cost_usd"])}
-                t["note"] = ("since process start; discovery_* is the ARD Agent Finder, a separate "
-                             "service, and is not included in cost_usd")
-                return self._json(200, t)
-            if p == "/ask":
-                return self._ask(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
-            if p == "/sites":
-                # an OKF source IS an NLWeb site: the corpus a result came from
-                return self._json(200, {"message_type": "sites",
-                                        "sites": [s["dir"] for s in _sources_catalog()]})
-            if p == "/health":
-                active = _active_queries()
-                return self._json(200, {"status": "ok",
-                                        "uptime_seconds": round(time.time() - _SERVER_STARTED_AT),
-                                        "instance_id": _INSTANCE_ID,
-                                        "active_queries": active,
-                                        "max_concurrent_queries": MAX_CONCURRENT_QUERIES,
-                                        "saturated": active >= MAX_CONCURRENT_QUERIES})
-            if p in ("/how-it-works", "/how"):
-                return self._html(HOW_PAGE)
-            if p in ("/life-of-a-query", "/loq"):
-                # Rendered from the repository Markdown on each request, so the page cannot drift
-                # from the document in the tree. Absent in a deployment that did not ship it.
-                doc = docpage.markdown_page(
-                    "LIFE_OF_A_QUERY.md", "The life of a query",
-                    "How one question becomes an answer, a clarification, or a refusal \u2014 and "
-                    "where the boundary of what can be asked actually falls.")
-                if doc is None:
-                    return self._json(404, {"error": "LIFE_OF_A_QUERY.md is not deployed"})
-                return self._html(doc)
-            if p in ("/ard", "/ard/"):
-                return self._html(ARD_PAGE)
-            if p == "/ard/publishers":
-                return self._json(200, {"publishers": _ard_publishers()})
-            if p == "/ard/manifest":
-                return self._json(200, ard_client.manifest())
-            if p == "/ard/list":
-                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                try:
-                    page = max(1, int((qs.get("page") or ["1"])[0] or 1))
-                    per = max(1, min(int((qs.get("per") or ["50"])[0] or 50), 100))
-                except (TypeError, ValueError):
-                    return self._json(400, {"error": "page and per must be integers"})
-                return self._json(200, _ard_list(
-                    (qs.get("source") or [""])[0],
-                    page, per,
-                    (qs.get("q") or [""])[0]))
-            if p == "/ard/entry":
-                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                e = _ard_entry((qs.get("id") or [""])[0])
-                return self._json(200, e) if e else self._json(404, {"error": "no such entry"})
-            if p == "/sources":
-                return self._json(200, {"sources": _sources_catalog(), "tabs": EXAMPLE_TABS})
-            if p == "/techsoup-sources":
-                # only the sources this curated view uses, plus the TechSoup-organized tabs
-                dirs = {d for t in TECHSOUP_TABS for d in t["dirs"]}
-                srcs = [s for s in _sources_catalog() if s["dir"] in dirs]
-                return self._json(200, {"sources": srcs, "tabs": TECHSOUP_TABS})
-            self._json(404, {"error": "not found"})
-
-        def _ask(self, params):
-            """The one query contract: NLWeb. Streams by default; `streaming=false` returns the
-            same messages as a single JSON document, which is what NLWeb clients expect."""
-            req = nlweb.parse_request(params)
-            request_started = time.monotonic()
-            trace_id = uuid.uuid4().hex
-            question_hash = _question_hash(req.get("query"))
-            if not req["query"]:
-                return self._json(400, {"error": "missing 'query'"})
-            # An unreadable binding must not be ignored. Answering anyway would resolve a
-            # clarification to the wrong interpretation and state it with full confidence.
-            if req.get("assumptions_error"):
-                return self._json(400, {"error": req["assumptions_error"]})
-            ip = _client_ip(self)
-            _operational_event(trace_id, "received", request_started, question_hash,
-                               streaming=bool(req["streaming"]))
-            allowed, used, reset_in = _quota_check(ip)
-            if not allowed:
-                _operational_event(trace_id, "rejected_quota", request_started, question_hash,
-                                   retry_after_seconds=reset_in)
-                self.send_response(429)
-                self._cors()
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Retry-After", str(reset_in))
-                self.send_header("X-Request-ID", trace_id)
-                body = json.dumps({"error": f"daily limit reached: {ASK_LIMIT_PER_DAY} queries per "
-                                            f"day per source", "retry_after_seconds": reset_in}).encode()
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
-            if not _QUERY_SLOTS.acquire(blocking=False):
-                _operational_event(trace_id, "rejected_concurrency", request_started, question_hash)
-                return self._json(503, {"error": "server is at its concurrent query limit"},
-                                  {"X-Request-ID": trace_id, "Retry-After": "1"})
-
-            _active_queries(1)
-            _operational_event(trace_id, "admitted", request_started, question_hash)
-
-            if not req["streaming"]:
-                terminal_status = "error"
-                try:
-                    msgs = []
-                    for message in run_nlweb(req):
-                        _record_progress(trace_id, request_started, question_hash, message)
-                        msgs.append(message)
-                    usage, discovery = _usage_from_messages(msgs)
-                    _accumulate(usage, discovery)
-                    content = next((m.get("content") for m in reversed(msgs)
-                                    if m.get("message_type") == nlweb.NLWS), {})
-                    terminal_status = ("needs_clarification" if content.get("status") ==
-                                       "needs_clarification" else
-                                       ("complete" if content else "error"))
-                    _record_telemetry(ip, req, content,
-                                      (time.monotonic() - request_started) * 1000,
-                                      terminal_status, trace_id)
-                    return self._json(200, {"messages": msgs}, {"X-Request-ID": trace_id})
-                finally:
-                    _QUERY_SLOTS.release()
-                    _active_queries(-1)
-                    _operational_event(trace_id, terminal_status, request_started, question_hash)
-
-            self.send_response(200)
-            self._cors()
-            self.send_header("X-Request-ID", trace_id)
-            for k, v in nlweb.SSE_HEADERS.items():
-                self.send_header(k, v)
-            self.end_headers()
-            usage = discovery = None
-            answer_content = {}
-            terminal_status = "error"
-            try:
-                for m in run_nlweb(req):
-                    _record_progress(trace_id, request_started, question_hash, m)
-                    if m.get("message_type") == nlweb.NLWS and isinstance(m.get("content"), dict):
-                        answer_content = m["content"]
-                        usage = m["content"].get("usage")
-                        discovery = m["content"].get("discovery_usage")
-                    self.wfile.write(nlweb.encode(m, named=req["named_events"]))
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                terminal_status = "disconnected"
-            finally:
-                if terminal_status != "disconnected":
-                    terminal_status = (("needs_clarification" if answer_content.get("status") ==
-                                        "needs_clarification" else "complete") if answer_content
-                                       else "error")
-                _accumulate(usage, discovery)
-                _record_telemetry(ip, req, answer_content,
-                                  (time.monotonic() - request_started) * 1000,
-                                  terminal_status, trace_id)
-                _QUERY_SLOTS.release()
-                _active_queries(-1)
-                _operational_event(trace_id, terminal_status, request_started, question_hash)
-
-        def do_POST(self):
-            path = urllib.parse.urlparse(self.path).path.rstrip("/")
-            if path != "/ask":
-                return self._json(404, {"error": "not found"})
-            try:
-                n = int(self.headers.get("Content-Length", 0))
-            except (TypeError, ValueError):
-                return self._json(400, {"error": "invalid Content-Length"})
-            max_body = int(os.getenv("HARNESS_MAX_BODY", "65536"))
-            if n < 0 or n > max_body:
-                return self._json(413, {"error": f"request body exceeds {max_body} bytes"})
-            try:
-                params = json.loads(self.rfile.read(n) or b"{}")
-            except ValueError:
-                return self._json(400, {"error": "invalid JSON body"})
-            self._ask(params if isinstance(params, dict) else {})
-
-        def log_message(self, *a):
-            pass
-
-    # Loopback by default — the /ask endpoint spends LLM credits per call and has no auth, so it
-    # is not something to bind to the world without saying so. Set BIND_HOST to expose it.
-    host = os.getenv("HARNESS_BIND_HOST", "127.0.0.1")
-    print(f"Query harness on http://{host}:{port}/  (POST /ask)")
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        print("  NOTE: bound beyond loopback. /ask is unauthenticated and each call costs money — "
-              "put it behind a proxy that terminates TLS and authenticates.")
-    server = HTTPServer((host, port), H)
-    if ready:
-        ready(server)
-    def _stop(*_):
-        threading.Thread(target=server.shutdown, daemon=True).start()
-    if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, _stop)
-        signal.signal(signal.SIGINT, _stop)
-    try:
-        server.serve_forever()
-    finally:
-        server.server_close()
 
 
 _STEP_ORDER = ["classify", "resolve-entity", "resolve-concept", "check", "synthesize", "other"]
@@ -4557,19 +2647,8 @@ def _print_cost_report(u, d, out=None):
 def main(argv):
     if not llm.have_credentials():
         sys.exit(llm._NO_CREDS)
-    if argv and argv[0] == "--serve":
-        # --port wins; then PORT/WEBSITES_PORT, which is how App Service and most PaaS hosts tell
-        # an app where to listen; then the local default.
-        if "--port" in argv:
-            port = int(argv[argv.index("--port") + 1])
-        else:
-            port = int(os.getenv("PORT") or os.getenv("WEBSITES_PORT") or 8099)
-        return serve(port)
-    use_async = bool(argv and argv[0] == "--async")
-    if use_async:
-        argv = argv[1:]
     question = " ".join(argv) or "How much did Apple spend on R&D in 2023?"
-    res = asyncio.run(run_async(question)) if use_async else run(question)
+    res = asyncio.run(run(question))
     print(json.dumps(res, indent=2))
     _print_cost_report(res.get("usage") or {}, res.get("discovery_usage") or {})
 

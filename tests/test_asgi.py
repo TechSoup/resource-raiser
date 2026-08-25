@@ -14,6 +14,7 @@ sys.path.insert(0, ROOT)
 
 import app as asgi
 import nlweb
+import runtime
 from query_context import ProviderPermits
 
 
@@ -128,9 +129,9 @@ class AsgiTests(unittest.IsolatedAsyncioTestCase):
                     "provider_permits", "telemetry", "uptime_seconds", "instance_id"):
             self.assertIn(key, payload)
 
-    async def test_ordinary_system_exit_refusal_does_not_kill_server(self):
+    async def test_ordinary_refusal_does_not_kill_server(self):
         async def refuses(question, context=None, **kwargs):
-            raise SystemExit("ordinary refusal")
+            raise runtime.Refused("ordinary refusal")
         application = asgi.create_app(engine=refuses, clients_factory=Clients)
         life = application.router.lifespan_context(application)
         with mock.patch("harness._sources_catalog", return_value=[]):

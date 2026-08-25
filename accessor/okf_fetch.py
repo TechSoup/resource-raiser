@@ -40,10 +40,10 @@ def _fetch_with_retry(req, tries=4):
                 return r.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             if e.code not in (429, 500, 502, 503, 504) or attempt == tries - 1:
-                raise SystemExit(f"HTTP {e.code} for {req.full_url}\n{e.read().decode('utf-8')[:500]}")
+                raise runtime.Refused(f"HTTP {e.code} for {req.full_url}\n{e.read().decode('utf-8')[:500]}")
         except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
             if attempt == tries - 1:
-                raise SystemExit(f"network error for {req.full_url}: {e}")
+                raise runtime.Refused(f"network error for {req.full_url}: {e}")
         time.sleep(1.5 * (attempt + 1))                       # linear backoff before the next attempt
 
 
@@ -52,7 +52,7 @@ def load_okf(path):
     with open(path, encoding="utf-8") as stream:
         text = stream.read()
     if not text.startswith("---"):
-        raise SystemExit(f"{path}: no YAML frontmatter")
+        raise runtime.Refused(f"{path}: no YAML frontmatter")
     _, fm, _b = text.split("---", 2)
     return yaml.safe_load(fm) or {}
 
@@ -63,7 +63,7 @@ def resolve_access(fm, okf_path):
     if fm.get("source"):
         p = os.path.normpath(os.path.join(os.path.dirname(okf_path), fm["source"]))
         return load_okf(p).get("access", {})
-    raise SystemExit(f"{okf_path}: no access block and no source link")
+    raise runtime.Refused(f"{okf_path}: no access block and no source link")
 
 
 def preload_descriptors(sources_root=None):
@@ -94,7 +94,7 @@ def _request(okf_path, operation, params):
     access = resolve_access(fm, okf_path)
     ops = access.get("operations", {})
     if operation not in ops:
-        raise SystemExit(f"unknown operation '{operation}'. have: {list(ops)}")
+        raise runtime.Refused(f"unknown operation '{operation}'. have: {list(ops)}")
     op = ops[operation]
     params = dict(params)
     for field in placeholders(op):
@@ -120,9 +120,9 @@ def _decode(body, url, dotted=None):
     except json.JSONDecodeError:
         low = body.lower()
         if "missing key" in low or "missing_key" in low or "api key" in low or "api_key" in low:
-            raise SystemExit(f"CREDENTIAL_ERROR: {url[:120]} requires an API key; set it "
-                             f"(e.g. CENSUS_API_KEY / DATA_GOV_API_KEY) and retry.\n{body[:200]}")
-        raise SystemExit(f"non-JSON response from {url[:120]}\n{body[:300]}")
+            raise runtime.Refused(f"CREDENTIAL_ERROR: {url[:120]} requires an API key; set it "
+                                  f"(e.g. CENSUS_API_KEY / DATA_GOV_API_KEY) and retry.\n{body[:200]}")
+        raise runtime.Refused(f"non-JSON response from {url[:120]}\n{body[:300]}")
     if dotted:
         try:
             result = extract(result, dotted)
@@ -154,7 +154,7 @@ async def fetch_async(okf_path, operation, params=None, dotted=None, *, context,
             raise
         except httpx.RequestError as exc:
             if attempt == tries - 1:
-                raise SystemExit(f"network error for {url}: {exc}") from exc
+                raise runtime.Refused(f"network error for {url}: {exc}") from exc
         else:
             if response.status_code not in (429, 500, 502, 503, 504):
                 break
@@ -174,13 +174,13 @@ async def fetch_async(okf_path, operation, params=None, dotted=None, *, context,
                     break
         await context.sleep(delay)
     if response is None:
-        raise SystemExit(f"network error for {url}")
+        raise runtime.Refused(f"network error for {url}")
     if response.status_code == 429:
         raise PublisherRateLimitError(
             f"{urllib.parse.urlparse(url).netloc} is temporarily rate limiting requests; "
             "please try again shortly")
     if response.is_error:
-        raise SystemExit(f"HTTP {response.status_code} for {url}\n{response.text[:500]}")
+        raise runtime.Refused(f"HTTP {response.status_code} for {url}\n{response.text[:500]}")
     return _decode(response.text, url, dotted)
 
 
