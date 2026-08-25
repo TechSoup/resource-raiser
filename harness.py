@@ -450,8 +450,13 @@ def discover(question, sites=None, assumptions=None):
     # ranking tasks. The finder embeds both in one provider call, unions by max similarity, and runs
     # one rerank over the shared candidate pool.
     try:
+        # The reranker must see the SUBJECT, not just the measure. Sending only the attribute
+        # ("total revenue") leaves the choice between SEC company revenue and IRS 990 revenue
+        # underdetermined, and repeated calls alternate between them - which is why "Harvard
+        # University total revenue" answered from a different card run to run. The embedding
+        # stage already sees both phrasings; the ranking stage was the one flying blind.
         found = ard_client.search_many([primary, secondary] + extra, k=12, sources=sources,
-                                       rerank_query=primary)
+                                       rerank_query=question)
     except ard_client.DiscoveryError as e:
         raise SystemExit(str(e)) from e
     for h in found:
@@ -723,9 +728,15 @@ def _link_records(name, question="", kind=""):
             f"A question mentions the {kind or 'entity'} \"{name}\". Below are database records "
             "with similar names. Return the indices of the records that ARE that entity, judging "
             "by the description - a place, a university, an album and a hospital can share a "
-            "name. Return an EMPTY list if none of them is it. Return SEVERAL indices if the "
-            "question genuinely does not distinguish between them and a person would have to "
-            "choose; do not pick one arbitrarily in that case. "
+            "name. Usually exactly ONE record is the entity. Return an EMPTY list if none is. "
+            "Return several ONLY when two records are genuinely competing readings of the same "
+            "name and a person would have to choose between them - Springfield, Illinois versus "
+            "Springfield, Massachusetts. A part, subsidiary, department or campus of the entity "
+            "is NOT the entity: 'Stanford University School of Medicine' is not Stanford "
+            "University. Neither is an article, event or topic about it: 'history of Apple Inc.' "
+            "and 'Apple media event' are not Apple Inc. Judge IDENTITY ONLY: ignore which record "
+            "carries useful identifiers and whether data exists for it. A record is not the "
+            "intended entity merely because it has an EIN, CIK or FIPS code. "
             'Return JSON {"indices": [<n>, ...]}.\n\n'
             f"QUESTION: {question}\n\nRECORDS:\n{listing}",
             name, json_mode=True, stage="resolve-entity")).get("indices")

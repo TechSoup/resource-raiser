@@ -449,8 +449,11 @@ class AmbiguityTests(unittest.TestCase):
             ctx, _ = harness.discover("Apple profit", assumptions={"attribute": "net income"})
         self.assertEqual(ctx["attribute"], "net income")
         self.assertEqual(ctx["interpretations"], [])
+        # The reranker gets the FULL QUESTION, not the bare attribute: ranking "total revenue"
+        # with no subject cannot choose between SEC company revenue and IRS 990 revenue, and
+        # alternated between them run to run.
         search_many.assert_called_once_with(["net income", "Apple profit"], k=12,
-                                            sources=["sec-edgar"], rerank_query="net income")
+                                            sources=["sec-edgar"], rerank_query="Apple profit")
 
     def test_choosing_a_later_option_binds_that_option(self):
         """The full clarification round trip, resolved the way a GET client resolves it: echo the
