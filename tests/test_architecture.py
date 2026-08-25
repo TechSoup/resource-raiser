@@ -962,6 +962,22 @@ class EntityLinkingTests(unittest.TestCase):
             out = harness._link_entity(self.ctx(entity="Chicago", canonical_entity="Chicago, Illinois"))
         self.assertEqual(len([o for o in out if o]), 1)
 
+    def test_choosing_a_record_binds_it_without_asking_again(self):
+        """Answering an entity clarification chooses a RECORD, not a name.
+
+        Re-searching the name finds the same several records and asks again. "Is the Sierra
+        Club a 501(c)(3)?" looped forever in production: picking Sierra Club re-offered Sierra
+        Club and Sierra Club Foundation, because only the label was carried back.
+        """
+        searched = []
+        with mock.patch("resolver._claims", return_value=("Sierra Club", {"ein": "941153307"})), \
+             mock.patch("resolver._search", side_effect=lambda n: searched.append(n) or []):
+            out = harness._link_entity(self.ctx(entity="Sierra Club",
+                                                canonical_entity="Sierra Club",
+                                                entity_qid="Q508775"))
+        self.assertEqual(out[0]["qid"], "Q508775")
+        self.assertEqual(searched, [], "a chosen record must not be re-searched or re-adjudicated")
+
     def test_an_ambiguous_entity_is_not_guessed(self):
         """An unqualified Springfield must not become one particular Springfield."""
         called = []

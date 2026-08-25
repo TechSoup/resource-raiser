@@ -389,7 +389,7 @@ def discover(question, sites=None, assumptions=None):
     ctx = _normalize_shape(ctx)
     ctx["question"] = question
     if assumptions:
-        allowed = {"entity", "type", "attribute", "period", "shape", "concept"}
+        allowed = {"entity", "type", "attribute", "period", "shape", "concept", "entity_qid"}
         applied = {k: v for k, v in assumptions.items() if k in allowed and v not in (None, "")}
         ctx.update(applied)
         # A measure supplied on a follow-up is the user's answer to our clarification. Retaining
@@ -690,6 +690,21 @@ def _link_entity(ctx):
         # is fixed, because it has no way to know which one was meant either.
         return [None]
 
+    # A caller who answered an entity clarification chose a RECORD, not a name. Re-searching the
+    # name finds the same several records and asks again - the clarification loop Codex found on
+    # "Is the Sierra Club a 501(c)(3)?", where picking Sierra Club re-offered Sierra Club and
+    # Sierra Club Foundation indefinitely.
+    qid = (ctx.get("entity_qid") or "").strip()
+    if qid:
+        import resolver
+        try:
+            label, keys = resolver._claims(qid)
+        except Exception:
+            label, keys = None, {}
+        if label or keys:
+            _say("resolve", mention=mention or canonical or qid, label=label or canonical, keys=keys or {})
+            return [{"qid": qid, "label": label or canonical or qid,
+                     "name": canonical or label or qid, "keys": keys}, None]
     if not (canonical or mention):
         return [None]
     found = _link_records(canonical or mention, ctx.get("question") or "", ctx.get("type") or "")
@@ -1625,7 +1640,8 @@ def _entity_clarification(question, ctx, candidates, ledger, discovery):
             desc = c.get("description") or ""
             options.append(ClarificationOption(id=c.get("qid") or label,
                                                label=f"{label} — {desc}" if desc else label,
-                                               assumptions={"entity": label}))
+                                               assumptions={"entity": label,
+                                                            "entity_qid": c.get("qid") or ""}))
         else:
             options.append(ClarificationOption(id=c, label=c, assumptions={"entity": c}))
     # The classifier leaves `entity` empty when it declines to resolve, so name the thing the
