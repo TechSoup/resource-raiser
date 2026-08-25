@@ -161,11 +161,18 @@ def parse_request(params):
                 nested, assumptions_error = None, "'assumptions' must be a JSON object"
     if isinstance(nested, dict):
         aliases = {"measure": "attribute", "operation": "shape"}
-        for key in ("entity", "type", "measure", "attribute", "period", "operation", "shape", "concept"):
+        for key in ("entity", "entity_qid", "type", "measure", "attribute", "period",
+                    "operation", "shape", "concept"):
             value = nested.get(key)
             if isinstance(value, str) and value.strip():
                 assumptions[aliases.get(key, key)] = value.strip()
-    for param, field in (("assumption_entity", "entity"), ("assumption_type", "type"),
+    # entity_qid pins the RECORD a caller chose from an entity clarification. Without it here
+    # the browser's payload is silently reduced to the label, the follow-up re-searches that
+    # name, finds the same records and asks again - an infinite loop that no in-process test
+    # sees, because those call run(assumptions=...) directly and never cross this parser.
+    for param, field in (("assumption_entity", "entity"),
+                         ("assumption_entity_qid", "entity_qid"),
+                         ("assumption_type", "type"),
                          ("assumption_measure", "attribute"), ("assumption_period", "period"),
                          ("assumption_operation", "shape"),
                          ("assumption_concept", "concept")):

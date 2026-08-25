@@ -978,6 +978,25 @@ class EntityLinkingTests(unittest.TestCase):
         self.assertEqual(out[0]["qid"], "Q508775")
         self.assertEqual(searched, [], "a chosen record must not be re-searched or re-adjudicated")
 
+    def test_the_chosen_qid_survives_the_http_request_parser(self):
+        """The browser sends assumption_entity_qid; nlweb.parse_request must keep it.
+
+        The previous fix bound a pre-supplied QID correctly and its test passed, but called
+        run(assumptions=...) directly and never crossed this parser. The parser had an
+        allow-list that silently dropped entity_qid, so in a browser the follow-up still
+        arrived with only the label and re-asked - the loop stayed live in production while
+        the unit test was green.
+        """
+        req = nlweb.parse_request({"query": ["Is the Sierra Club a 501(c)(3)?"],
+                                   "assumption_entity": ["Sierra Club"],
+                                   "assumption_entity_qid": ["Q508775"]})
+        self.assertEqual(req["assumptions"].get("entity_qid"), "Q508775")
+
+    def test_the_chosen_qid_survives_a_nested_assumptions_object(self):
+        req = nlweb.parse_request({"query": ["q"],
+                                   "assumptions": ['{"entity":"Sierra Club","entity_qid":"Q508775"}']})
+        self.assertEqual(req["assumptions"].get("entity_qid"), "Q508775")
+
     def test_an_ambiguous_entity_is_not_guessed(self):
         """An unqualified Springfield must not become one particular Springfield."""
         called = []
