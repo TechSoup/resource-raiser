@@ -2283,8 +2283,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
        h+='<details><summary>How this answer was produced</summary>';
        if(d.intent)h+='<p><b>Interpretation:</b> '+esc(d.intent.operation||'')+' · '
           +esc(d.intent.entity||'no named entity')+' · '+esc(d.intent.measure||'')+' · '
-          +esc(d.intent.period||'latest')+' <button type="button" class="edit-intent" data-intent="'
-          +encodeURIComponent(JSON.stringify(d.intent))+'">edit & rerun</button></p>';
+          +esc(d.intent.period||'latest')+'</p>';
        if(d.attempts&&d.attempts.length){h+='<ol>';
          d.attempts.forEach(function(a){h+='<li><code>'+esc(a.identifier||a.source||'candidate')+'</code> — '
            +esc(a.outcome||'')+(a.reason?' · '+esc(a.reason):'');
@@ -2296,14 +2295,6 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
        h+='</details>';}
      if(d.usage)h+=renderUsage(d.usage,d.discovery_usage);
      var box=document.createElement('div');box.style.marginTop='16px';box.innerHTML=h;log.parentNode.appendChild(box);
-     var edit=box.querySelector('.edit-intent');if(edit)edit.onclick=function(){
-       var x=JSON.parse(decodeURIComponent(edit.getAttribute('data-intent')));
-       ASSUMPTIONS={operation:prompt('Operation',x.operation||'point')||x.operation,
-                    entity:prompt('Entity',x.entity||'')||'',
-                    type:prompt('Entity type',x.entity_type||'none')||x.entity_type,
-                    measure:prompt('Measure',x.measure||'')||x.measure,
-                    period:prompt('Period',x.period||'latest')||x.period};
-       f.requestSubmit();};
    }
    function usd(c){return c>=0.01?'$'+c.toFixed(3):(c>0?'$'+c.toFixed(5):'$0');}
    // Steps in PIPELINE order, not sorted by cost — the point of the report is to show where a

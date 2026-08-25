@@ -74,6 +74,12 @@ class AsgiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events,
             [nlweb.BEGIN, nlweb.INTERMEDIATE, nlweb.NLWS, nlweb.COMPLETE, nlweb.END])
 
+    async def test_homepage_has_no_edit_and_rerun_control(self):
+        response = await self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("edit & rerun", response.text.lower())
+        self.assertNotIn("edit-intent", response.text)
+
     async def test_one_hundred_users_overlap_without_threads_or_crossed_answers(self):
         before = {thread.ident for thread in threading.enumerate()}
         responses = await asyncio.gather(*(self.client.post(
