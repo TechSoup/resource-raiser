@@ -4,19 +4,19 @@
   "query_count": 66,
   "run": {
     "workers": 1,
-    "wall_ms": 480113,
+    "wall_ms": 623142,
     "thread_counts": {
       "harness": {
-        "pid": 79388,
-        "before": 2,
+        "pid": 25754,
+        "before": 1,
         "peak": 9,
         "after": 2
       },
       "finder": {
-        "pid": 79387,
+        "pid": 25753,
         "before": 1,
         "peak": 7,
-        "after": 2
+        "after": 3
       }
     },
     "results": [
@@ -25,7 +25,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/totrevenue.md",
         "answer_value": 3217077611,
-        "latency_ms": 9678,
+        "latency_ms": 8865,
         "llm_calls": 6,
         "error": null
       },
@@ -34,7 +34,7 @@
         "status": "needs_clarification",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 4558,
+        "latency_ms": 5829,
         "llm_calls": 4,
         "error": null
       },
@@ -43,7 +43,7 @@
         "status": "needs_clarification",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 4107,
+        "latency_ms": 4648,
         "llm_calls": 4,
         "error": null
       },
@@ -52,7 +52,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-bmf/deductibility.md",
         "answer_value": "Contributions are tax-deductible",
-        "latency_ms": 6937,
+        "latency_ms": 7458,
         "llm_calls": 6,
         "error": null
       },
@@ -61,7 +61,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-profile/inception.md",
         "answer_value": "1892",
-        "latency_ms": 4802,
+        "latency_ms": 8643,
         "llm_calls": 5,
         "error": null
       },
@@ -70,7 +70,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-profile/ceo.md",
         "answer_value": "Bernadette Meehan",
-        "latency_ms": 7550,
+        "latency_ms": 6912,
         "llm_calls": 6,
         "error": null
       },
@@ -79,7 +79,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-profile/overview.md",
         "answer_value": "Feeding America is a United States\u2013based non-profit organization that is a nationwide network of more than 200 food banks that feed more than 46 million people through food pantries, soup kitchens, shelters, and other community-based agencies. Forbes ranks it as the largest U.S. charity by revenue. Feeding America was known as America's Second Harvest until August 31, 2008.",
-        "latency_ms": 7804,
+        "latency_ms": 7341,
         "llm_calls": 6,
         "error": null
       },
@@ -88,7 +88,7 @@
         "status": "answered",
         "source_identifier": "sources/usaspending/federal-awards-received.md",
         "answer_value": 8404737.0,
-        "latency_ms": 6697,
+        "latency_ms": 7421,
         "llm_calls": 6,
         "error": null
       },
@@ -97,7 +97,7 @@
         "status": "answered",
         "source_identifier": "sources/nih-reporter/research-grants.md",
         "answer_value": 115963125.0,
-        "latency_ms": 10742,
+        "latency_ms": 8408,
         "llm_calls": 6,
         "error": null
       },
@@ -106,7 +106,7 @@
         "status": "answered",
         "source_identifier": "sources/grants-gov/funding-opportunities.md",
         "answer_value": null,
-        "latency_ms": 5850,
+        "latency_ms": 5456,
         "llm_calls": 5,
         "error": null
       },
@@ -115,7 +115,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/compnsatncurrofcr.md",
         "answer_value": 1714737,
-        "latency_ms": 6163,
+        "latency_ms": 12056,
         "llm_calls": 6,
         "error": null
       },
@@ -124,7 +124,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-bmf/eligibility.md",
         "answer_value": true,
-        "latency_ms": 5456,
+        "latency_ms": 6447,
         "llm_calls": 5,
         "error": null
       },
@@ -133,7 +133,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/totrevenue.md",
         "answer_value": null,
-        "latency_ms": 8879,
+        "latency_ms": 9849,
         "llm_calls": 14,
         "error": null
       },
@@ -142,7 +142,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/gftgrntsrcvd170.md",
         "answer_value": null,
-        "latency_ms": 19878,
+        "latency_ms": 21223,
         "llm_calls": 17,
         "error": null
       },
@@ -151,7 +151,7 @@
         "status": "answered",
         "source_identifier": "sources/irs-990-bq/totrevenue.md",
         "answer_value": null,
-        "latency_ms": 9561,
+        "latency_ms": 8038,
         "llm_calls": 4,
         "error": null
       },
@@ -160,7 +160,7 @@
         "status": "answered",
         "source_identifier": "sources/college-scorecard/latest-cost-tuition-out-of-state.md",
         "answer_value": 65910,
-        "latency_ms": 5932,
+        "latency_ms": 6837,
         "llm_calls": 5,
         "error": null
       },
@@ -169,7 +169,7 @@
         "status": "answered",
         "source_identifier": "sources/nih-reporter/research-grants.md",
         "answer_value": 686107112.0,
-        "latency_ms": 9028,
+        "latency_ms": 8878,
         "llm_calls": 6,
         "error": null
       },
@@ -178,7 +178,7 @@
         "status": "answered",
         "source_identifier": "sources/nsf-awards/research-grants.md",
         "answer_value": 33954369.0,
-        "latency_ms": 9343,
+        "latency_ms": 8460,
         "llm_calls": 6,
         "error": null
       },
@@ -187,7 +187,7 @@
         "status": "answered",
         "source_identifier": "sources/nih-reporter/research-grants.md",
         "answer_value": 969335575.0,
-        "latency_ms": 12196,
+        "latency_ms": 12222,
         "llm_calls": 6,
         "error": null
       },
@@ -196,7 +196,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/totrevenue.md",
         "answer_value": 65362351,
-        "latency_ms": 7110,
+        "latency_ms": 6793,
         "llm_calls": 6,
         "error": null
       },
@@ -204,8 +204,8 @@
         "question": "NSF research awards for Caltech",
         "status": "answered",
         "source_identifier": "sources/nsf-awards/research-grants.md",
-        "answer_value": 15948073.0,
-        "latency_ms": 7268,
+        "answer_value": 16298527.0,
+        "latency_ms": 8407,
         "llm_calls": 6,
         "error": null
       },
@@ -214,16 +214,16 @@
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 2723,
+        "latency_ms": 104597,
         "llm_calls": 0,
-        "error": "this is a 'filtered-subset' question, which needs a source that can see a whole population; nih-reporter no operation exposes an entity-grain population scan (offers filter, key, order, paginate)."
+        "error": "Rejected: All universities listed do not meet the threshold of receiving more than a billion dollars from NIH."
       },
       {
         "question": "Which university gets the most NIH funding?",
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 2465,
+        "latency_ms": 2640,
         "llm_calls": 0,
         "error": "this is a 'ranking' question, which needs a source that can see a whole population; nih-reporter no operation exposes an entity-grain population scan (offers filter, key, order, paginate)."
       },
@@ -232,7 +232,7 @@
         "status": "answered",
         "source_identifier": "sources/sec-edgar/revenue-from-contract-with-customer-excluding-assessed-tax.md",
         "answer_value": 416161000000,
-        "latency_ms": 6225,
+        "latency_ms": 9828,
         "llm_calls": 6,
         "error": null
       },
@@ -241,7 +241,7 @@
         "status": "answered",
         "source_identifier": "sources/sec-edgar/net-income-loss.md",
         "answer_value": 72361000000,
-        "latency_ms": 8964,
+        "latency_ms": 9723,
         "llm_calls": 6,
         "error": null
       },
@@ -250,7 +250,7 @@
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 7691,
+        "latency_ms": 8660,
         "llm_calls": 0,
         "error": "no source could answer: no viable hit (answer rejected: asked for percent, got per-share)"
       },
@@ -259,7 +259,7 @@
         "status": "answered",
         "source_identifier": "sources/sec-edgar/research-and-development-expense.md",
         "answer_value": 6411000000,
-        "latency_ms": 6401,
+        "latency_ms": 7674,
         "llm_calls": 6,
         "error": null
       },
@@ -268,7 +268,7 @@
         "status": "answered",
         "source_identifier": "sources/sec-edgar/revenue-from-contract-with-customer-excluding-assessed-tax.md",
         "answer_value": 26914000000,
-        "latency_ms": 6079,
+        "latency_ms": 11855,
         "llm_calls": 5,
         "error": null
       },
@@ -277,17 +277,17 @@
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 3392,
+        "latency_ms": 3238,
         "llm_calls": 0,
         "error": "no indexed table cleared the LLM relevance threshold (no valid score was returned; threshold 50); nothing was fetched"
       },
       {
         "question": "How big is Microsoft?",
         "status": "answered",
-        "source_identifier": "sources/sec-bq/assets.md",
+        "source_identifier": "sources/sec-edgar/multiemployer-plan-number-of-employees-covered.md",
         "answer_value": 331839000000,
-        "latency_ms": 18303,
-        "llm_calls": 28,
+        "latency_ms": 12829,
+        "llm_calls": 29,
         "error": null
       },
       {
@@ -295,7 +295,7 @@
         "status": "answered",
         "source_identifier": "sources/census/dp02-0154pe.md",
         "answer_value": 79.4,
-        "latency_ms": 9912,
+        "latency_ms": 9216,
         "llm_calls": 5,
         "error": null
       },
@@ -304,7 +304,7 @@
         "status": "answered",
         "source_identifier": "sources/fema/declarations.md",
         "answer_value": null,
-        "latency_ms": 8423,
+        "latency_ms": 8828,
         "llm_calls": 6,
         "error": null
       },
@@ -313,7 +313,7 @@
         "status": "answered",
         "source_identifier": "sources/census/dp03-0074pe.md",
         "answer_value": 37.8,
-        "latency_ms": 11160,
+        "latency_ms": 11141,
         "llm_calls": 5,
         "error": null
       },
@@ -322,7 +322,7 @@
         "status": "answered",
         "source_identifier": "sources/census/dp04-0134e.md",
         "answer_value": 1494,
-        "latency_ms": 5475,
+        "latency_ms": 5829,
         "llm_calls": 4,
         "error": null
       },
@@ -331,7 +331,7 @@
         "status": "answered",
         "source_identifier": "sources/census/dp04-0046pe.md",
         "answer_value": 42,
-        "latency_ms": 8465,
+        "latency_ms": 6950,
         "llm_calls": 5,
         "error": null
       },
@@ -340,7 +340,7 @@
         "status": "answered",
         "source_identifier": "sources/census/dp03-0062e.md",
         "answer_value": 91905,
-        "latency_ms": 5321,
+        "latency_ms": 6462,
         "llm_calls": 4,
         "error": null
       },
@@ -349,7 +349,7 @@
         "status": "answered",
         "source_identifier": "sources/census/dp03-0128e.md",
         "answer_value": 16.9,
-        "latency_ms": 13066,
+        "latency_ms": 8247,
         "llm_calls": 5,
         "error": null
       },
@@ -358,7 +358,7 @@
         "status": "answered",
         "source_identifier": "sources/cdc-places/diabetes.md",
         "answer_value": "16.5",
-        "latency_ms": 7383,
+        "latency_ms": 7717,
         "llm_calls": 5,
         "error": null
       },
@@ -367,7 +367,7 @@
         "status": "answered",
         "source_identifier": "sources/cdc-places/obesity.md",
         "answer_value": "33.6",
-        "latency_ms": 5763,
+        "latency_ms": 6246,
         "llm_calls": 5,
         "error": null
       },
@@ -376,7 +376,7 @@
         "status": "answered",
         "source_identifier": "sources/census/dp03-0009e.md",
         "answer_value": 14.7,
-        "latency_ms": 6375,
+        "latency_ms": 6132,
         "llm_calls": 4,
         "error": null
       },
@@ -385,7 +385,7 @@
         "status": "answered",
         "source_identifier": "sources/cdc-places/diabetes.md",
         "answer_value": null,
-        "latency_ms": 7279,
+        "latency_ms": 5115,
         "llm_calls": 4,
         "error": null
       },
@@ -394,7 +394,7 @@
         "status": "answered",
         "source_identifier": "sources/cdc-places/diabetes.md",
         "answer_value": 14,
-        "latency_ms": 4521,
+        "latency_ms": 4780,
         "llm_calls": 4,
         "error": null
       },
@@ -403,7 +403,7 @@
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 8088,
+        "latency_ms": 6166,
         "llm_calls": 0,
         "error": "accessor error: Traceback (most recent call last):\n  File \"/Users/guha/code/resource-raiser/accessor/okf_fetch.py\", line 131, in <module>\n    main(sys.argv[1:])\n    ~~~~^^^^^^^^^^^^^^\n  File \"/Users/guha/code/resource-raiser/accessor/okf_fetch.py\", line 106, in main\n    req = urllib.request.Request(url, data=data, headers=headers, method=method)\n  File \"/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py\", line 292, in __init__\n    self.full_url = url\n    ^^^^^^^^^^^^^\n  File \"/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py\", line 318, in full_url\n    self._parse()\n    ~~~~~~~~~~~^^\n  File \"/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py\", line 347, in _parse\n    raise ValueError(\"unknown url type: %r\" % self.full_url)\nValueError: unknown url type: ''\n"
       },
@@ -412,7 +412,7 @@
         "status": "answered",
         "source_identifier": "sources/treasury/debt-to-penny-tot-pub-debt-out-amt.md",
         "answer_value": 40032876505819.31,
-        "latency_ms": 5094,
+        "latency_ms": 6176,
         "llm_calls": 4,
         "error": null
       },
@@ -421,7 +421,7 @@
         "status": "answered",
         "source_identifier": "sources/treasury/rates-of-exchange-euro-zone-euro.md",
         "answer_value": 0.877,
-        "latency_ms": 4273,
+        "latency_ms": 5015,
         "llm_calls": 4,
         "error": null
       },
@@ -430,7 +430,7 @@
         "status": "answered",
         "source_identifier": "sources/treasury/rates-of-exchange-japan-yen.md",
         "answer_value": 162.38,
-        "latency_ms": 4228,
+        "latency_ms": 4217,
         "llm_calls": 4,
         "error": null
       },
@@ -439,7 +439,7 @@
         "status": "answered",
         "source_identifier": "sources/grants-gov/funding-opportunities.md",
         "answer_value": null,
-        "latency_ms": 4662,
+        "latency_ms": 6559,
         "llm_calls": 5,
         "error": null
       },
@@ -448,7 +448,7 @@
         "status": "answered",
         "source_identifier": "sources/usaspending/federal-awards-received.md",
         "answer_value": 554575.0,
-        "latency_ms": 6238,
+        "latency_ms": 7148,
         "llm_calls": 6,
         "error": null
       },
@@ -457,7 +457,7 @@
         "status": "needs_clarification",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 4838,
+        "latency_ms": 6157,
         "llm_calls": 4,
         "error": null
       },
@@ -466,7 +466,7 @@
         "status": "answered",
         "source_identifier": "sources/grants-gov/funding-opportunities.md",
         "answer_value": null,
-        "latency_ms": 4755,
+        "latency_ms": 6720,
         "llm_calls": 5,
         "error": null
       },
@@ -475,7 +475,7 @@
         "status": "answered",
         "source_identifier": "sources/usaspending/federal-awards-received.md",
         "answer_value": null,
-        "latency_ms": 3458,
+        "latency_ms": 3598,
         "llm_calls": 4,
         "error": null
       },
@@ -484,7 +484,7 @@
         "status": "answered",
         "source_identifier": "sources/nih-reporter/research-grants.md",
         "answer_value": 969335575.0,
-        "latency_ms": 12332,
+        "latency_ms": 10941,
         "llm_calls": 6,
         "error": null
       },
@@ -493,7 +493,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/totrevenue.md",
         "answer_value": 3217077611,
-        "latency_ms": 6467,
+        "latency_ms": 6688,
         "llm_calls": 5,
         "error": null
       },
@@ -502,7 +502,7 @@
         "status": "needs_clarification",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 2601,
+        "latency_ms": 11011,
         "llm_calls": 3,
         "error": null
       },
@@ -511,7 +511,7 @@
         "status": "answered",
         "source_identifier": "sources/nsf-awards/research-grants.md",
         "answer_value": 16298527.0,
-        "latency_ms": 5911,
+        "latency_ms": 7509,
         "llm_calls": 5,
         "error": null
       },
@@ -520,7 +520,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/totrevenue.md",
         "answer_value": null,
-        "latency_ms": 8933,
+        "latency_ms": 10966,
         "llm_calls": 12,
         "error": null
       },
@@ -529,7 +529,7 @@
         "status": "answered",
         "source_identifier": "sources/cdc-places/diabetes.md",
         "answer_value": null,
-        "latency_ms": 4344,
+        "latency_ms": 8269,
         "llm_calls": 4,
         "error": null
       },
@@ -538,7 +538,7 @@
         "status": "answered",
         "source_identifier": "sources/usaspending/federal-awards-received.md",
         "answer_value": null,
-        "latency_ms": 4384,
+        "latency_ms": 4273,
         "llm_calls": 4,
         "error": null
       },
@@ -547,7 +547,7 @@
         "status": "answered",
         "source_identifier": "sources/cdc-places/diabetes.md",
         "answer_value": 14,
-        "latency_ms": 5147,
+        "latency_ms": 5405,
         "llm_calls": 4,
         "error": null
       },
@@ -556,7 +556,7 @@
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 7205,
+        "latency_ms": 13389,
         "llm_calls": 0,
         "error": "this is a 'filtered-subset' question, which needs a source that can see a whole population; nih-reporter no operation exposes an entity-grain population scan (offers filter, key, order, paginate)."
       },
@@ -565,7 +565,7 @@
         "status": "answered",
         "source_identifier": "sources/nonprofit-990/gftgrntsrcvd170.md",
         "answer_value": null,
-        "latency_ms": 16485,
+        "latency_ms": 20710,
         "llm_calls": 14,
         "error": null
       },
@@ -574,7 +574,7 @@
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 4686,
+        "latency_ms": 6497,
         "llm_calls": 0,
         "error": "accessor error: Traceback (most recent call last):\n  File \"/Users/guha/code/resource-raiser/accessor/okf_fetch.py\", line 131, in <module>\n    main(sys.argv[1:])\n    ~~~~^^^^^^^^^^^^^^\n  File \"/Users/guha/code/resource-raiser/accessor/okf_fetch.py\", line 106, in main\n    req = urllib.request.Request(url, data=data, headers=headers, method=method)\n  File \"/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py\", line 292, in __init__\n    self.full_url = url\n    ^^^^^^^^^^^^^\n  File \"/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py\", line 318, in full_url\n    self._parse()\n    ~~~~~~~~~~~^^\n  File \"/opt/homebrew/Cellar/python@3.13/3.13.3_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/urllib/request.py\", line 347, in _parse\n    raise ValueError(\"unknown url type: %r\" % self.full_url)\nValueError: unknown url type: ''\n"
       },
@@ -583,7 +583,7 @@
         "status": "error",
         "source_identifier": null,
         "answer_value": null,
-        "latency_ms": 2433,
+        "latency_ms": 2171,
         "llm_calls": 0,
         "error": "this is a 'ranking' question, which needs a source that can see a whole population; nih-reporter no operation exposes an entity-grain population scan (offers filter, key, order, paginate)."
       },
@@ -592,7 +592,7 @@
         "status": "answered",
         "source_identifier": "sources/irs-990-bq/totrevenue.md",
         "answer_value": null,
-        "latency_ms": 9073,
+        "latency_ms": 8094,
         "llm_calls": 4,
         "error": null
       },
@@ -601,7 +601,7 @@
         "status": "answered",
         "source_identifier": "sources/irs-990-bq/totrevenue.md",
         "answer_value": 5,
-        "latency_ms": 6873,
+        "latency_ms": 7598,
         "llm_calls": 4,
         "error": null
       },
@@ -610,15 +610,15 @@
         "status": "answered",
         "source_identifier": "sources/sec-edgar/nonpatronage-source-earnings.md",
         "answer_value": 112010000000,
-        "latency_ms": 12662,
+        "latency_ms": 9959,
         "llm_calls": 23,
         "error": null
       }
     ]
   },
   "schema_version": 1,
-  "generated_at": "2026-08-25T16:18:51Z",
-  "commit": "7da2074a89db4c92fbd19c3b6f6584fa1c1a70ef",
-  "dirty": true,
-  "command": "/Users/guha/code/resource-raiser/.venv/bin/python tools/async_rewrite_baseline.py homepage --url http://127.0.0.1:8099/ask --harness-pid 79388 --finder-pid 79387 --workers 1 --output tests/baselines/homepage-7da2074.json"
+  "generated_at": "2026-08-25T16:41:25Z",
+  "commit": "06cd66b886ef1752484e0cffa7e84be60c7f3c5d",
+  "dirty": false,
+  "command": "/Users/guha/code/resource-raiser/.venv/bin/python tools/async_rewrite_baseline.py homepage --url http://127.0.0.1:8099/ask --harness-pid 25754 --finder-pid 25753 --workers 1 --output tests/baselines/homepage-06cd66b.json"
 }
