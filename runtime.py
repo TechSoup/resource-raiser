@@ -8,6 +8,14 @@ class QueryCancelled(RuntimeError):
     pass
 
 
+class Refused(Exception):
+    """An ordinary query cannot be answered; unlike SystemExit this never stops the process."""
+
+
+class QueryBudgetExceeded(Refused):
+    """A bounded query exhausted work, not wall-clock time or client cancellation."""
+
+
 def bind(cancel=None, deadline=None):
     _STATE.cancel, _STATE.deadline = cancel, deadline
 

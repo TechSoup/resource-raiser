@@ -84,6 +84,24 @@ class AsyncAccessorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         sleep.assert_awaited_once_with(0.25)
 
+    async def test_publisher_429_larger_than_query_window_is_reported_without_sleeping(self):
+        calls = 0
+        def handler(request):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(429, headers={"Retry-After": "11057"})
+        with tempfile.TemporaryDirectory() as directory:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                path = os.path.join(directory, "source.md")
+                descriptor(path, "https://publisher.test/data")
+                context = QueryContext.with_timeout(180, http_client=client)
+                with mock.patch.object(QueryContext, "sleep", mock.AsyncMock()) as sleep, \
+                     self.assertRaisesRegex(okf_fetch.PublisherRateLimitError,
+                                           "temporarily rate limiting"):
+                    await okf_fetch.fetch_async(path, "get", context=context)
+        self.assertEqual(calls, 1)
+        sleep.assert_not_awaited()
+
     async def test_cancellation_closes_pending_http_request(self):
         started, cancelled = asyncio.Event(), asyncio.Event()
         class Transport(httpx.AsyncBaseTransport):

@@ -448,7 +448,7 @@ async def chat_async(system, user, *, context: QueryContext, json_mode=False, mo
     for attempt in range(_RETRIES + 1):
         started = time.monotonic()
         try:
-            response = await context.wait(c.chat.completions.create(
+            response = await context.provider_call("llm", lambda: c.chat.completions.create(
                 model=model, temperature=0,
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": user}], **kw))
@@ -482,7 +482,8 @@ async def embed_async(texts, *, context: QueryContext, batch=96, stage="other"):
         for attempt in range(_RETRIES + 1):
             started = time.monotonic()
             try:
-                response = await context.wait(c.embeddings.create(model=model, input=chunk))
+                response = await context.provider_call(
+                    "llm", lambda: c.embeddings.create(model=model, input=chunk))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

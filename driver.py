@@ -141,7 +141,7 @@ class AsyncSecClient:
         for attempt in range(attempts):
             await self._pace(context)
             try:
-                response = await context.wait(self.http.get(
+                response = await context.provider_call("sec", lambda: self.http.get(
                     url, headers={"User-Agent": UA}, timeout=min(30, context.remaining() or 30)))
             except (asyncio.CancelledError, runtime.QueryCancelled):
                 raise

@@ -131,7 +131,7 @@ async def _arequest(context, method, path, *, params=None, json_body=None):
     remaining = context.remaining()
     timeout = TIMEOUT if remaining is None else min(TIMEOUT, remaining)
     try:
-        response = await context.wait(client.request(
+        response = await context.provider_call("finder", lambda: client.request(
             method, BASE + path, params=params, json=json_body, timeout=timeout))
     except (asyncio.CancelledError, runtime.QueryCancelled):
         raise

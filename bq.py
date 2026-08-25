@@ -103,7 +103,7 @@ class AsyncBigQueryClient:
                 "iss": credentials.service_account_email, "scope": self.SCOPE,
                 "aud": credentials._token_uri, "iat": now, "exp": now + 3600,
             }).decode()
-            response = await context.wait(self.http.post(
+            response = await context.provider_call("bigquery", lambda: self.http.post(
                 credentials._token_uri,
                 data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                       "assertion": assertion}, timeout=min(30, context.remaining() or 30)))
@@ -120,7 +120,7 @@ class AsyncBigQueryClient:
         for attempt in range(2):
             token = await self._access_token(context)
             headers = {**supplied_headers, "Authorization": f"Bearer {token}"}
-            response = await context.wait(self.http.request(
+            response = await context.provider_call("bigquery", lambda: self.http.request(
                 method, "https://bigquery.googleapis.com/bigquery/v2" + path,
                 headers=headers, timeout=min(60, context.remaining() or 60), **kwargs))
             if response.status_code != 401 or attempt:

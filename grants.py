@@ -200,7 +200,7 @@ class AsyncGrantPool:
                     await cursor.execute(_Pg._translate(sql), tuple(params))
                     rows = await cursor.fetchall()
                     return [tuple(_Rows._plain(value) for value in row) for row in rows]
-        return await context.wait(work())
+        return await context.provider_call("grants", work)
 
 
 async def _aq(sql, params=(), *, context):

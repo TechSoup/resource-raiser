@@ -148,7 +148,7 @@ async def fetch_async(okf_path, operation, params=None, dotted=None, *, context,
     for attempt in range(tries):
         delay = 1.5 * (attempt + 1)
         try:
-            response = await context.wait(context.http_client.request(
+            response = await context.provider_call("publisher", lambda: context.http_client.request(
                 method, url, headers=headers, content=body, timeout=min(40, context.remaining() or 40)))
         except (asyncio.CancelledError, runtime.QueryCancelled):
             raise
@@ -165,6 +165,13 @@ async def fetch_async(okf_path, operation, params=None, dotted=None, *, context,
                     delay = float(response.headers.get("Retry-After"))
                 except (TypeError, ValueError):
                     pass
+                # Some APIs return the seconds until a daily quota resets (College Scorecard
+                # returned 11,057). Sleeping that long merely converts a clear 429 into the
+                # query's opaque deadline error. Honor short throttles; report long ones now.
+                max_retry = float(os.getenv("PUBLISHER_MAX_RETRY_AFTER_SECONDS", "30"))
+                remaining = context.remaining()
+                if delay > max_retry or (remaining is not None and delay >= remaining):
+                    break
         await context.sleep(delay)
     if response is None:
         raise SystemExit(f"network error for {url}")

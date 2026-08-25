@@ -5,6 +5,7 @@ import ard_client
 import bq
 import driver
 import grants
+from query_context import ProviderPermits
 from accessor import okf_fetch
 
 
@@ -18,6 +19,15 @@ class AsyncSourceClients:
         self.descriptor_count = 0
         self._owns_http = http_client is None
         self._owns_grants = grant_pool is None
+        self.permits = ProviderPermits({
+            "llm": int(os.getenv("LLM_CONCURRENCY", "32")),
+            "finder": int(os.getenv("FINDER_CONCURRENCY", "32")),
+            "publisher": int(os.getenv("PUBLISHER_CONCURRENCY", "64")),
+            "sec": int(os.getenv("SEC_CONCURRENCY", "8")),
+            "bigquery": int(os.getenv("BIGQUERY_CONCURRENCY", "16")),
+            "grants": int(os.getenv("GRANTS_CONCURRENCY", "16")),
+            "wikidata": int(os.getenv("WIKIDATA_CONCURRENCY", "16")),
+        })
 
     async def start(self):
         try:
@@ -45,6 +55,7 @@ class AsyncSourceClients:
         context.sec_client = self.sec
         context.bigquery_client = self.bigquery
         context.grant_pool = self.grants
+        context.permits = self.permits
         return context
 
     async def close(self):

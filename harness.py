@@ -2510,6 +2510,12 @@ async def _search_async(question, ctx=None, hits=None, *, context):
                     json.dumps(state.get("key"), sort_keys=True, default=str), state.get("period"))
         if identity in done:
             raise Backtrack(f"already attempted ({done[identity]})")
+        try:
+            context.budget.consume_attempt()
+        except runtime.QueryBudgetExceeded as exc:
+            raise runtime.QueryBudgetExceeded(
+                f"{exc}; this branch tried {len(tried_tables)} of {len(hits)} candidate tables "
+                f"in {attempts} attempts") from exc
         attempts += 1
         tried_tables.add(state["hit"]["identifier"])
         attempt = Attempt(source=state["hit"].get("publisher") or state["hit"]["title"],
@@ -2550,8 +2556,451 @@ async def _present_async(question, evidence, *, context):
     return await TK.synthesize_async(question, evidence.payload, context=context), "llm-fallback"
 
 
+async def retrieve_for_async(question, *, context):
+    """Async universal join primitive; concurrent callers use forked scratch state."""
+    _ctx, _hits, hit, _tried, data, state = await _search_async(question, context=context)
+    val = data.get("value", data.get("value_usd", data.get("total_usd")))
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        pass
+    return {"source": hit["title"], "source_identifier": hit.get("identifier"),
+            "value": val, "data": data,
+            "attempts": [a.to_dict() for a in (state.get("_attempts") or [])]}
+
+
+async def _ordered(context, factories):
+    """Run branches concurrently and return their values in plan order."""
+    context.budget.consume_fanout(len(factories))
+    values = [None] * len(factories)
+    async def one(index, factory):
+        try:
+            values[index] = await factory(context.fork())
+        except SystemExit as exc:
+            raise runtime.Refused(str(exc)) from exc
+    try:
+        async with asyncio.TaskGroup() as group:
+            for index, factory in enumerate(factories):
+                group.create_task(one(index, factory))
+    except BaseExceptionGroup as group:
+        pending = list(group.exceptions)
+        while pending:
+            exc = pending.pop(0)
+            if isinstance(exc, BaseExceptionGroup):
+                pending[0:0] = exc.exceptions
+            elif isinstance(exc, runtime.Refused):
+                raise exc
+        raise
+    return values
+
+
+async def _admit_async(intent, hit, data, *, context):
+    attempt = Attempt(source=hit.get("publisher") or hit.get("title") or "",
+                      identifier=hit.get("identifier") or "", period=intent.period)
+    evidence = await connectors.for_hit(hit).execute_async(
+        intent, attempt, hit, lambda: asyncio.sleep(0, result=data),
+        adjudicator=lambda payload, verdict: _answers_async(
+            intent.question, payload, verdict, context=context))
+    return evidence, [attempt]
+
+
+async def _run_bq_async(question, ctx, p, *, context):
+    import bq
+    cfg = (driver.frontmatter(p["hit"]["identifier"]) or {})["bq"]
+    if ctx.get("shape") == "aggregate":
+        return await bq.aggregate_async(cfg, "count", context=context)
+    asc = any(word in question.lower() for word in
+              ("lowest", "least", "smallest", "fewest", "bottom"))
+    threshold = ctx.get("threshold") if ctx.get("shape") == "filtered-subset" else None
+    return await bq.rank_async(cfg, n=10, ascending=asc, threshold=threshold, context=context)
+
+
+async def _run_grants_async(question, ctx, *, context):
+    import grants
+    direction = _grant_direction(question, ctx, grants)
+    ql = question.lower()
+    asc = any(word in ql for word in ("lowest", "least", "smallest", "fewest", "bottom"))
+    entity = (ctx.get("entity") or "").strip()
+    if direction == "ranking":
+        threshold = ctx.get("threshold") or {}
+        if threshold.get("value") is not None:
+            return await grants.funders_above_async(
+                threshold["value"], ascending=str(threshold.get("op", ">")).startswith("<"),
+                context=context)
+        return await grants.top_grantmakers_async(n=10, ascending=asc, context=context)
+    if direction == "biggest_recipients":
+        by = "funders" if any(word in ql for word in
+            ("most funders", "most foundations", "most donors", "different funders",
+             "different foundations", "how many funder")) else "dollars"
+        return await grants.biggest_recipients_async(n=10, by=by, ascending=asc, context=context)
+    if direction == "geo":
+        states = grants.find_states(question)
+        if len(states) >= 2:
+            return await grants.geo_async("flow", from_state=states[0], to_state=states[1],
+                                          context=context)
+        mode = "funders" if any(word in ql for word in
+            ("send", "sent", "sending", "give the most", "gives the most", "from which state",
+             "which states give")) else "recipients"
+        return await grants.geo_async(mode, ascending=asc, context=context)
+    if direction == "overview":
+        match = re.search(r"20(2[0-4])", question)
+        return await grants.overview_async(year=int(match.group(0)) if match else None,
+                                           context=context)
+    if direction == "theme":
+        _major, word = grants.cause_of(ql)
+        grouped = any(term in ql for term in
+                      ("what cause", "which cause", "by cause", "kinds of", "breakdown"))
+        return await grants.grants_by_cause_async(None if grouped or not word else word,
+                                                  context=context)
+    if direction == "shared":
+        entities = [item for item in (ctx.get("entities") or []) if item] or ([entity] if entity else [])
+        if len(entities) < 2:
+            raise SystemExit("comparing shared grantees needs TWO named funders.")
+        return await grants.shared_grantees_async(entities[0], entities[1], context=context)
+    org = _grant_entity(question, ctx)
+    if not org:
+        raise SystemExit("this grant question needs a named organization (a funder or a recipient).")
+    if direction == "reverse":
+        return await grants.reverse_async(org, context=context)
+    return await grants.forward_async(org, context=context)
+
+
+async def _run_ranking_async(question, ctx, p, top_n=10, *, context):
+    hit, cap, operation = p["hit"], p["capability"], p["operation"]
+    fm = driver.frontmatter(hit["identifier"]) or {}
+    access = driver.frontmatter(planner.access_path(hit["identifier"])) or {}
+    operation_doc = ((access.get("access") or {}).get("operations") or {}).get(operation, {})
+    needed = {field for _, field, _, _ in __import__("string").Formatter().parse(
+        operation_doc.get("url", "")) if field}
+    params = {key: fm[key] for key in needed if key in fm}
+    threshold = ctx.get("threshold") or {}
+    if "n" in needed:
+        params["n"] = 500 if threshold.get("value") is not None else max(top_n, 25)
+    for key in needed - set(params):
+        if key in ("level", "fips", "geo"):
+            params[key] = (ctx.get("partition") or {}).get(key) or ""
+    rows = _rows_of(await driver.accessor_async(
+        hit["identifier"], operation, context=context, **params), cap)
+    if not rows:
+        raise SystemExit(f"ranking returned no usable rows from {hit['title']}")
+    if not (cap.get("order") or {}).get("server"):
+        rows.sort(key=lambda row: row["value"], reverse=True)
+    if any(word in question.lower() for word in ("lowest", "least", "smallest", "fewest", "bottom")):
+        rows.sort(key=lambda row: row["value"])
+    scanned = len(rows)
+    out = {"question": question, "source": fm.get("title") or hit["title"],
+           "measure": (fm.get("title") or "").split(" — ")[0], "scanned": scanned,
+           "complete": True}
+    if threshold.get("value") is not None:
+        import operator
+        compare = {">": operator.gt, ">=": operator.ge, "<": operator.lt,
+                   "<=": operator.le}.get(threshold.get("op"), operator.gt)
+        kept = [row for row in rows if compare(row["value"], float(threshold["value"]))]
+        out.update({"threshold": f"{threshold.get('op', '>')} {threshold['value']}",
+                    "matches": len(kept), "ranking": kept[:50]})
+        if kept and len(kept) >= scanned:
+            out["complete"] = False
+            out["note"] = f"at least {len(kept)} — the {scanned}-row scan window filled up"
+        elif not kept:
+            out["note"] = f"no member of the population is {threshold.get('op', '>')} {threshold['value']}"
+        return out
+    rows = rows[:top_n]
+    out.update({"ranking": rows, "top": rows[0]})
+    return out
+
+
+async def _run_ambiguous_async(question, ctx, *, context):
+    interpretations = [item for item in (ctx.get("interpretations") or []) if item][:4]
+    entity, period = ctx.get("entity") or "", ctx.get("period") or "latest"
+    year = "" if period == "latest" else f" in {period}"
+    async def branch(interp, branch_context):
+        subquestion = f"{interp} for {entity}{year}" if entity else f"{interp}{year}"
+        try:
+            result = await retrieve_for_async(subquestion, context=branch_context)
+            data = result.get("data") or {}
+            return {"interpretation": interp, "value": result.get("value"),
+                    "label": data.get("metric") or data.get("measure") or interp,
+                    "unit": data.get("unit"), "period": data.get("period"),
+                    "source": result.get("source"), "concept": data.get("concept"),
+                    "source_identifier": result.get("source_identifier"),
+                    "attempts": result.get("attempts") or []}
+        except driver.SourceRateLimitError as exc:
+            return {"interpretation": interp, "value": None, "temporary_error": str(exc)}
+        except (SystemExit, runtime.Refused, Backtrack) as exc:
+            return {"interpretation": interp, "value": None, "error": str(exc)}
+    answers = await _ordered(context, [
+        lambda branch_context, interp=interp: branch(interp, branch_context)
+        for interp in interpretations])
+    temporary = next((item["temporary_error"] for item in answers if item.get("temporary_error")), None)
+    if temporary:
+        raise driver.SourceRateLimitError(temporary)
+    got = [item for item in answers if isinstance(item.get("value"), (int, float))]
+    if not got:
+        raise SystemExit(f"'{ctx.get('attribute')}' is ambiguous and none of its interpretations could be answered")
+    return {"question": question, "ambiguous": True, "attribute": ctx.get("attribute"),
+            "entity": entity, "interpretations": answers,
+            "source": " · ".join(dict.fromkeys(item.get("source") or "?" for item in got))}
+
+
+async def _run_fanout_async(question, ctx, shape, *, context):
+    attribute = ctx.get("attribute") or ""
+    if shape == "timeseries":
+        years = [year for year in (ctx.get("periods") or []) if year][:20]
+        if len(years) < 2:
+            raise SystemExit("timeseries needs at least two periods")
+        _c, _h, hit, _t, _d, state = await _search_async(
+            f"{attribute} for {ctx.get('entity') or ''}", context=context.fork())
+        async def year_branch(year, branch_context):
+            try:
+                data = await _fetch_async({**state, "period": str(year)}, ctx,
+                                          context=branch_context)
+                return {"label": str(year),
+                        "value": data.get("value", data.get("value_usd", data.get("total_usd"))),
+                        "source": hit["title"]}
+            except (Backtrack, SystemExit, runtime.Refused) as exc:
+                return {"label": str(year), "value": None, "error": str(exc)}
+        series = await _ordered(context, [
+            lambda branch_context, year=year: year_branch(year, branch_context) for year in years])
+    else:
+        if shape == "comparison":
+            subquestions = [(entity, f"{attribute} for {entity}")
+                            for entity in (ctx.get("entities") or []) if entity][:8]
+        else:
+            subquestions = [(year, f"{attribute} for {ctx.get('entity') or ''} in {year}")
+                            for year in (ctx.get("periods") or []) if year][:20]
+        if len(subquestions) < 2:
+            raise SystemExit(f"{shape} needs at least two values")
+        async def sub_branch(label, subquestion, branch_context):
+            try:
+                result = await retrieve_for_async(subquestion, context=branch_context)
+                return {"label": str(label), "value": result.get("value"),
+                        "source": result.get("source")}
+            except (SystemExit, runtime.Refused) as exc:
+                return {"label": str(label), "value": None, "error": str(exc)}
+        series = await _ordered(context, [
+            lambda branch_context, label=label, subquestion=subquestion:
+                sub_branch(label, subquestion, branch_context)
+            for label, subquestion in subquestions])
+        hit = None
+    got = [item for item in series if isinstance(item.get("value"), (int, float))]
+    if len(got) < 2:
+        raise SystemExit(f"could not retrieve comparable values for {shape}")
+    out = {"question": question, "shape": shape, "attribute": attribute, "series": series,
+           "source": hit["title"] if hit else got[0].get("source")}
+    if shape == "comparison":
+        best = max(got, key=lambda item: item["value"])
+        out.update({"highest": best["label"],
+                    "difference": round(best["value"] - min(item["value"] for item in got), 2)})
+    else:
+        first, last = got[0], got[-1]
+        out["change"] = round(last["value"] - first["value"], 2)
+        if first["value"]:
+            out["change_pct"] = round((last["value"] - first["value"]) / abs(first["value"]) * 100, 1)
+    return out
+
+
+async def _run_derive_async(question, ctx, *, context):
+    spec = json.loads(await llm.chat_async(
+        "Decompose this into the INDEPENDENT figures needed, each a self-contained sub-question "
+        "naming its entity and measure explicitly. Return JSON "
+        "{\"parts\":[{\"label\":\"<short name>\",\"question\":\"<sub-question>\"}],"
+        "\"compute\":\"share|ratio|difference|sum\",\"of\":\"<numerator/left label>\","
+        "\"per\":\"<denominator/right label>\"}.",
+        question, context=context, json_mode=True, stage="classify"))
+    parts = [part for part in (spec.get("parts") or []) if part.get("question")][:4]
+    if len(parts) < 2:
+        raise SystemExit("could not decompose this into two or more figures to join")
+    async def branch(part, branch_context):
+        try:
+            result = await retrieve_for_async(part["question"], context=branch_context)
+            data = result.get("data") or {}
+            return {"label": part["label"], "question": part["question"],
+                    "value": result.get("value"), "source": result.get("source"),
+                    "period": data.get("period") or data.get("as_of") or data.get("fiscal_year"),
+                    "complete": data.get("complete", True),
+                    "matched_entities": data.get("matched_entities"),
+                    "coverage": data.get("coverage")}
+        except (SystemExit, runtime.Refused) as exc:
+            return {"label": part["label"], "value": None, "error": str(exc)}
+    values = await _ordered(context, [
+        lambda branch_context, part=part: branch(part, branch_context) for part in parts])
+    got = {item["label"]: item for item in values}
+    numeric = [item for item in values if isinstance(item.get("value"), (int, float))]
+    if len(numeric) < 2:
+        raise SystemExit("could not retrieve two comparable figures for this join")
+    left, right = got.get(spec.get("of")), got.get(spec.get("per"))
+    if not (left and right and isinstance(left.get("value"), (int, float))
+            and isinstance(right.get("value"), (int, float))):
+        left, right = numeric[:2]
+    operation = spec.get("compute") or "ratio"
+    if operation in ("share", "ratio") and right["value"]:
+        ratio = left["value"] / right["value"]
+        computed = round(ratio * 100, 2) if operation == "share" else round(ratio, 4)
+        outcome = {"computed": computed, "unit": "percent" if operation == "share" else "ratio",
+                   "formula": f"{left['label']} / {right['label']} = {left['value']:,.0f} / {right['value']:,.0f}"}
+    elif operation == "difference":
+        outcome = {"computed": round(left["value"] - right["value"], 2), "unit": "difference",
+                   "formula": f"{left['label']} - {right['label']} = {left['value']:,.0f} - {right['value']:,.0f}"}
+    else:
+        outcome = {"computed": round(sum(item["value"] for item in numeric), 2), "unit": "sum",
+                   "formula": " + ".join(item["label"] for item in numeric)}
+    warnings = []
+    periods = {item["label"]: item.get("period") for item in numeric if item.get("period")}
+    if len(set(periods.values())) > 1:
+        warnings.append("the figures cover different periods (" +
+                        ", ".join(f"{key}: {value}" for key, value in periods.items()) + ")")
+    for item in numeric:
+        if item.get("complete") is False:
+            warnings.append(f"'{item['label']}' is a PARTIAL total")
+        if (item.get("matched_entities") or 1) > 1:
+            warnings.append(f"'{item['label']}' matched multiple separately registered entities")
+    if len({item.get("source") for item in numeric}) < 2:
+        warnings.append("both figures came from the same source — this is not a cross-source join")
+    return {"question": question, "join": values, "compute": operation,
+            "source": " + ".join(dict.fromkeys(item.get("source") or "?" for item in numeric)),
+            **outcome, **({"alignment_warnings": warnings} if warnings else {})}
+
+
+async def _run_generate_test_async(question, ctx, p, want=6, *, context):
+    threshold, attribute = ctx.get("threshold") or {}, ctx.get("attribute") or ""
+    population = ctx.get("population_type") or "organizations"
+    proposed = json.loads(await llm.chat_async(
+        f"Name up to {want + 4} real US {population} MOST LIKELY to satisfy: "
+        f"{attribute} {threshold.get('op', '>')} {threshold.get('value')}. "
+        "Use full official names. Return JSON {\"candidates\":[\"...\"]}.",
+        question, context=context, json_mode=True, stage="classify"))
+    candidates = [item for item in (proposed.get("candidates") or []) if isinstance(item, str)][:want + 4]
+    if not candidates:
+        raise SystemExit("could not propose candidates to test")
+    import operator
+    compare = {">": operator.gt, ">=": operator.ge, "<": operator.lt,
+               "<=": operator.le}.get(threshold.get("op"), operator.gt)
+    async def branch(candidate, branch_context):
+        try:
+            result = await retrieve_for_async(f"{attribute} for {candidate}", context=branch_context)
+            value = result.get("value")
+            passes = (isinstance(value, (int, float)) and threshold.get("value") is not None
+                      and compare(value, float(threshold["value"])))
+            return {"label": candidate, "value": value, "passes": bool(passes),
+                    "source": result.get("source")}
+        except (SystemExit, runtime.Refused) as exc:
+            return {"label": candidate, "value": None, "error": str(exc)}
+    tested = await _ordered(context, [
+        lambda branch_context, candidate=candidate: branch(candidate, branch_context)
+        for candidate in candidates])
+    passing = [{"label": item["label"], "value": item["value"]}
+               for item in tested if item.get("passes")][:want]
+    return {"question": question, "ranking": passing, "matches": len(passing), "tested": tested,
+            "threshold": f"{threshold.get('op', '>')} {threshold.get('value')}", "complete": False,
+            "candidate_source": "model-proposed, then verified against the source",
+            "note": "these are checked examples, not a complete population scan",
+            "source": next((item.get("source") for item in tested if item.get("source")),
+                           p["hit"]["title"])}
+
+
+async def _materialize_async(hit, grain="county", scope="06", *, context):
+    identifier = hit["identifier"]
+    fm = driver.frontmatter(identifier) or {}
+    operation, capability = next(((name, cap) for name, cap in
+        planner.capabilities(identifier).items() if cap.get("grain") == grain), (None, None))
+    if not operation:
+        raise SystemExit(f"{hit['title']} does not serve data at {grain} grain")
+    if fm.get("get") or fm.get("variable"):
+        async def rows_for(variable=None):
+            kwargs = {"geo": f"{grain}:*&in=state:{scope}"}
+            if variable:
+                kwargs["get"] = variable
+            rows = await driver.accessor_async(identifier, operation, context=context, **kwargs)
+            observations = []
+            for row in rows[1:] if isinstance(rows, list) and len(rows) > 1 else []:
+                try:
+                    value = float(row[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if value <= -100000000:
+                    continue
+                observations.append({"entity": store.eid("fips", row[-2] + row[-1]),
+                    "entity_name": row[0], "value": value, "source": fm.get("title")})
+            return observations
+        observations = await rows_for()
+        variable = fm.get("get", "")
+        if not observations and variable.endswith("E") and not variable.endswith("PE"):
+            observations = await rows_for(variable[:-1] + "PE")
+        return observations, False
+    result = await driver.accessor_async(identifier, operation, context=context,
+        **{key: fm[key] for key in ("measureid", "get", "key") if key in fm}, n=5000)
+    entity_field = capability.get("entity_field") or "locationid"
+    returns, observations = capability.get("returns") or {}, []
+    for row in result if isinstance(result, list) else []:
+        try:
+            value = float(row.get(returns.get("value") or "data_value"))
+        except (TypeError, ValueError):
+            continue
+        if row.get(entity_field):
+            observations.append({"entity": store.eid("fips", row[entity_field]),
+                "entity_name": row.get(returns.get("label") or "locationname"),
+                "value": value, "source": fm.get("title")})
+    return observations, False
+
+
+async def _run_correlate_async(question, ctx, *, context):
+    spec = json.loads(await llm.chat_async(
+        "Identify the TWO measures being related and population. Return JSON "
+        "{\"measure_a\":\"<measure>\",\"measure_b\":\"<measure>\","
+        "\"grain\":\"county|state\",\"state_fips\":\"<2-digit FIPS or empty>\"}.",
+        question, context=context, json_mode=True, stage="classify"))
+    measures = [item for item in (spec.get("measure_a"), spec.get("measure_b")) if item]
+    found = await _ordered(context, [
+        lambda branch_context, measure=measure: ard_client.search_async(
+            measure, k=6, context=branch_context) for measure in measures])
+    picked, seen = [], set()
+    for hits in found:
+        match = next((hit for hit in hits if hit["identifier"] not in seen and
+                      any(cap.get("grain") == "county" for cap in
+                          planner.capabilities(hit["identifier"]).values())), None)
+        if match:
+            picked.append(match); seen.add(match["identifier"])
+    if len(picked) < 2:
+        raise runtime.Refused("a correlation needs two measures available at county grain")
+    scope = re.sub(r"\D", "", str(spec.get("state_fips") or "")) or "06"
+    for hit in picked:
+        capability = next((cap for cap in planner.capabilities(hit["identifier"]).values()
+                           if cap.get("grain")), {})
+        estimate = store.estimate(capability, "county", 3000)
+        if (estimate.get("known") and estimate.get("blowup") and
+                estimate["blowup"] > 50):
+            raise runtime.Refused(
+                f"materializing {hit['title']} would transfer ~{estimate['rows']:,} rows for "
+                f"~3,000 counties (blowup {estimate['blowup']}x) — too expensive for one "
+                "question; it should be materialized once per vintage instead")
+    materialized = await _ordered(context, [
+        lambda branch_context, hit=hit: _materialize_async(hit, scope=scope,
+                                                            context=branch_context)
+        for hit in picked])
+    series, metadata = {}, []
+    for hit, (observations, cached) in zip(picked, materialized):
+        if not observations:
+            raise SystemExit(f"'{hit['title']}' has no usable county-level values")
+        label = hit["title"].split(" — ")[0][:40]
+        series[label] = observations
+        metadata.append({"measure": hit["title"], "n": len(observations), "cached": cached})
+    rows, report = store.align(series)
+    labels = list(series)
+    if len(rows) < 3:
+        raise SystemExit(f"only {len(rows)} units had both measures — too few to correlate")
+    xs, ys = [row[labels[0]] for row in rows], [row[labels[1]] for row in rows]
+    count = len(xs); mx, my = sum(xs) / count, sum(ys) / count
+    sx = math.sqrt(sum((value - mx) ** 2 for value in xs))
+    sy = math.sqrt(sum((value - my) ** 2 for value in ys))
+    correlation = sum((a - mx) * (b - my) for a, b in zip(xs, ys)) / (sx * sy) if sx and sy else 0
+    return {"question": question, "correlation_r": round(correlation, 3), "n": count,
+            "measures": labels, "series_meta": metadata, "join": report,
+            "source": " + ".join(dict.fromkeys(hit["title"] for hit in picked)),
+            "caveats": ["correlation is not causation", "this is an ecological correlation"]}
+
+
 async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer", *, context=None):
-    """First complete single-loop path for point/status/entity-list questions."""
+    """Complete event-loop-native engine, including every composite plan."""
     owned_clients = None
     if context is None:
         from source_clients import AsyncSourceClients
@@ -2560,6 +3009,8 @@ async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer
     context.usage_ledger = context.usage_ledger or llm.Ledger()
     context.discovery_ledger = context.discovery_ledger or ard_client.DiscoveryUsage()
     try:
+        if on_ambiguity not in ("answer", "ask", "all"):
+            on_ambiguity = "answer"
         ctx, hits = await discover_async(
             question, sites=sites, assumptions=assumptions, context=context)
         if not hits:
@@ -2569,23 +3020,105 @@ async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer
             return _entity_clarification(
                 question, ctx, candidates, context.usage_ledger, context.discovery_ledger)
         shape = ctx.get("shape") if ctx.get("shape") in planner.SHAPES else "point"
-        if shape not in ("point", "status", "entity-list") or len(ctx.get("interpretations") or []) >= 2:
-            raise SystemExit(f"async composite shape '{shape}' is scheduled for Stage 6")
-        linked = await _link_entity_async(ctx, context=context)
-        linked_candidates = [entity for entity in linked if entity]
-        if len(linked_candidates) > 1:
-            return _entity_clarification(
-                question, ctx, linked_candidates, context.usage_ledger, context.discovery_ledger)
+        if len(ctx.get("interpretations") or []) < 2:
+            linked = await _link_entity_async(ctx, context=context)
+            linked_candidates = [entity for entity in linked if entity]
+            if len(linked_candidates) > 1:
+                return _entity_clarification(
+                    question, ctx, linked_candidates, context.usage_ledger, context.discovery_ledger)
         intent = QueryIntent.from_context(question, ctx, sites)
+
+        if len(ctx.get("interpretations") or []) >= 2 and shape in ("point", "status", "entity-list"):
+            data = await _run_ambiguous_async(question, ctx, context=context)
+            clarification = _clarification(ctx.get("attribute") or "the requested measure",
+                                           ctx.get("entity") or "", data.get("interpretations") or [])
+            if clarification:
+                trace = [attempt for option in data.get("interpretations") or []
+                         for attempt in option.get("attempts") or []]
+                return _ambiguity_result(
+                    question, ctx, hits, intent, clarification, on_ambiguity,
+                    context.usage_ledger, context.discovery_ledger, trace)
+            hit = hits[0]
+            evidence, attempts = await _admit_async(intent, hit, data, context=context)
+            answer, renderer = await _present_async(question, evidence, context=context)
+            return {"question": question, "answer": answer, "shape": shape,
+                    "usage": context.usage_ledger.snapshot(),
+                    "discovery_usage": context.discovery_ledger.snapshot(),
+                    "intent": intent.to_dict(), "attempts": [item.to_dict() for item in attempts],
+                    "evidence": evidence.to_dict(), "answer_renderer": renderer,
+                    "plan": f"ambiguous measure → {len(data['interpretations'])} interpretations answered separately",
+                    "source": {"identifier": hit["identifier"], "title": hit["title"],
+                               "publisher": hit.get("publisher")},
+                    "candidates": [{"identifier": item.get("identifier"), "title": item["title"],
+                                    "score": item["score"], "publisher": item.get("publisher")}
+                                   for item in hits], "data": data}
+
         plan = planner.plan(shape, hits, ctx.get("quantifier") or "exhaustive")
-        if plan["verdict"] == "infeasible":
-            raise SystemExit(f"this is a '{shape}' question; {plan['why']}.")
-        ctx, hits, hit, _tried, data, state = await _search_async(
-            question, ctx=ctx, hits=hits, context=context)
+        await _asay(context, "plan_chosen", shape=shape, verdict=plan["verdict"],
+                    why=plan.get("why", ""), summary=planner.describe(shape, plan))
+        grant_hit = next((hit for hit in ([plan["hit"]] if plan.get("hit") else []) + hits[:2]
+                          if (driver.frontmatter(hit["identifier"]) or {}).get("irsgrants")), None)
+        state = None
+        if grant_hit:
+            import grants as grants_module
+            data = await _run_grants_async(question, ctx, context=context)
+            grant_leaf = {"forward": "grants-made", "reverse": "grants-received",
+                          "ranking": "top-grantmakers", "biggest_recipients": "biggest-recipients",
+                          "geo": "geographic", "overview": "grant-overview",
+                          "shared": "shared-grantees", "theme": "grants-by-cause"}
+            identifier = ("sources/irs-grants/" +
+                          grant_leaf.get(_grant_direction(question, ctx, grants_module), "grants-made") + ".md")
+            hit = next((item for item in hits if item["identifier"] == identifier), None)
+            if not hit:
+                fm = driver.frontmatter(identifier) or {}
+                hit = {"identifier": identifier, "title": fm.get("title", grant_hit["title"]),
+                       "publisher": grant_hit.get("publisher")}
+        elif plan["verdict"] == "infeasible":
+            need = ("a source that can see a whole population"
+                    if shape in ("ranking", "aggregate", "filtered-subset")
+                    else "a capability none of the matching sources declare")
+            raise SystemExit(f"this is a '{shape}' question, which needs {need}; {plan['why']}.")
+        elif plan["verdict"] == "compose:materialize-and-correlate":
+            data = await _run_correlate_async(question, ctx, context=context); hit = plan["hit"]
+        elif plan["verdict"] == "compose:derive":
+            data = await _run_derive_async(question, ctx, context=context); hit = plan["hit"]
+        elif plan["verdict"] == "compose:generate-and-test":
+            data = await _run_generate_test_async(question, ctx, plan, context=context); hit = plan["hit"]
+        elif plan["verdict"].startswith("compose:fan-out"):
+            data = await _run_fanout_async(question, ctx, shape, context=context); hit = plan["hit"]
+        elif (plan["verdict"].startswith("compose:scan-and") or
+              shape in ("ranking", "aggregate", "filtered-subset")):
+            hit = plan["hit"]
+            if (driver.frontmatter(hit["identifier"]) or {}).get("bq"):
+                data = await _run_bq_async(question, ctx, plan, context=context)
+            else:
+                data = await _run_ranking_async(question, ctx, plan, context=context)
+        else:
+            ctx, hits, hit, _tried, data, state = await _search_async(
+                question, ctx=ctx, hits=hits, context=context)
+
+        resolution = data.pop("_ambiguity", None) if isinstance(data, dict) else None
+        if resolution:
+            clarification = _clarification(resolution.get("attribute") or intent.measure,
+                                           intent.entity or "", resolution.get("options") or [])
+            if clarification and on_ambiguity in ("ask", "all"):
+                ordered_hits = [hit] + [item for item in hits
+                                        if item.get("identifier") != hit.get("identifier")]
+                trace = [item.to_dict() for item in ((state or {}).get("_attempts") or [])]
+                return _ambiguity_result(
+                    question, ctx, ordered_hits, intent, clarification, on_ambiguity,
+                    context.usage_ledger, context.discovery_ledger, trace)
+            if clarification:
+                data["ambiguity"] = {"attribute": clarification.attribute,
+                                     "reason": resolution.get("reason"),
+                                     "options": clarification.to_dict()["options"]}
         hit = _cite_concept_actually_used(hit, data)
-        evidence, attempts = state["_evidence"], state.get("_attempts") or []
-        evidence.identifier = hit["identifier"]
-        evidence.provenance["source_document"] = hit["identifier"]
+        if state and state.get("_evidence"):
+            evidence, attempts = state["_evidence"], state.get("_attempts") or []
+            evidence.identifier = hit["identifier"]
+            evidence.provenance["source_document"] = hit["identifier"]
+        else:
+            evidence, attempts = await _admit_async(intent, hit, data, context=context)
         answer, renderer = await _present_async(question, evidence, context=context)
         return {"question": question, "answer": answer,
                 "usage": context.usage_ledger.snapshot(),

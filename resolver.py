@@ -43,7 +43,7 @@ async def _get_async(url, *, context):
     if context.http_client is None:
         raise RuntimeError("async Wikidata access requires QueryContext.http_client")
     try:
-        response = await context.wait(context.http_client.get(
+        response = await context.provider_call("wikidata", lambda: context.http_client.get(
             url, headers={"User-Agent": "ard-data-demo/1.0 (guha@guha.com)"},
             timeout=min(20, context.remaining() or 20)))
     except (asyncio.CancelledError, runtime.QueryCancelled):
