@@ -320,6 +320,21 @@ def discover(question, sites=None, assumptions=None):
         "Analyze a data question. Return JSON with: 'entity' (the single company/nonprofit/place/org "
         "it is about, or empty), 'entities' (ALL named entities if it compares several, else []), "
         "'type' (one of: company, nonprofit, place, org, none), 'attribute' (the metric/measure asked, "
+        "'canonical_entity' (the entity's full commonly-used name, specific enough to identify it "
+        "uniquely, disambiguated using THE QUESTION'S CONTEXT: 'St. Jude' in a question about NIH "
+        "research funding is 'St. Jude Children's Research Hospital'; 'Stanford' is 'Stanford "
+        "University'; a US city takes its state, 'Chicago, Illinois'), "
+        "'entity_status' ('resolved' when you are confident which real-world entity is meant; "
+        "'ambiguous' when the question genuinely does not distinguish it - an unqualified "
+        "Springfield, Portland, Cambridge, Washington or Georgia; 'none' when the question names "
+        "no entity at all, such as an exchange rate, a national total or a topical search), "
+        "'entity_candidates' (when and only when the status is 'ambiguous', the 2-5 real-world "
+        "entities the question could plausibly mean, each a full name in the same form as "
+        "canonical_entity, most likely first - e.g. for an unqualified Springfield: "
+        "['Springfield, Illinois', 'Springfield, Massachusetts', 'Springfield, Missouri']. "
+        "Leave canonical_entity empty when the status is 'ambiguous' or 'none'; do not guess "
+        "one, and do not invent candidates for a resolved or absent entity), "
+
         "with the entity REMOVED — e.g. 'total revenue', 'poverty rate'), 'period' ('FY<year>' or "
         "'latest'), 'periods' (list of 'FY<year>' if it spans several years, else []), 'sources' (the "
         "dir names below whose entity type + scope fit), and 'shape', exactly one of:\n"
@@ -371,6 +386,18 @@ def discover(question, sites=None, assumptions=None):
         # the classifier's original interpretations would immediately ask the same question again.
         if "attribute" in applied:
             ctx["interpretations"] = []
+        # An entity supplied on a follow-up is the caller's answer to our entity clarification.
+        # Without this the classifier still reports "ambiguous" and we ask the same question again.
+        if applied.get("entity"):
+            ctx["entity_status"] = "resolved"
+            ctx["canonical_entity"] = applied["entity"]
+            ctx["entity_candidates"] = []
+        # An entity supplied on a follow-up is the caller's answer to our entity clarification.
+        # Without this the classifier still reports "ambiguous" and we ask the same question again.
+        if applied.get("entity"):
+            ctx["entity_status"] = "resolved"
+            ctx["canonical_entity"] = applied["entity"]
+            ctx["entity_candidates"] = []
         ctx = _normalize_shape(ctx)
     # Robustness: the classifier sometimes drops the place from a "<measure> in <Place>" question
     # (leaving an empty entity). Recover it from the question so a place lookup doesn't fail with no geo.
@@ -611,132 +638,85 @@ _TICKER_CACHE = {}
 _ENTITY_CACHE = {}
 
 
-# What an entity IS, from Wikidata. Identifier families are strong evidence when present,
-# but most Wikidata items carry none - "University of Detroit Mercy" has no EIN - so absence
-# of identifiers cannot be read as absence of a type. P31 (instance of) is the evidence that
-# actually discriminates, and it is matched on the CLASS LABEL rather than a curated QID set,
-# because the set of classes meaning "a place" is large, open, and changes without notice.
-_TYPE_KEYS = {
-    # No gnis here: the Geographic Names system also names universities, hospitals and
-    # stadiums, so a GNIS code does not distinguish a place from a building in one.
-    "place": ("fips_place", "fips_county", "fips_state"),
-    "company": ("cik", "ticker", "lei"),
-    "nonprofit": ("ein",),
-}
-
-# Word sets for reading a Wikidata class label. Matched with word boundaries and checked in
-# order, because a substring test on the joined labels is wrong in both directions: "country
-# music group" contains "country", and "state" appears in far more than states. NOT_A_TYPE is
-# checked first so a creative work, a person's name, a taxon or a sports club is excluded
-# before any word inside it can be mistaken for a place.
-_NOT_A_TYPE = ("album", "song", "single", "film", "movie", "video game", "game", "episode",
-               "series", "version", "edition", "translation", "taxon", "species", "genus",
-               "given name", "family name", "surname", "band", "group", "duo", "team", "club",
-               "franchise", "brand name", "unisex name")
-
-_CLASS_WORDS = {
-    "nonprofit": ("nonprofit", "non-profit", "charity", "foundation", "university", "college",
-                  "school", "museum", "hospital", "institute", "association", "society",
-                  "organization", "organisation", "church", "educational"),
-    "company": ("business", "company", "corporation", "enterprise", "manufacturer"),
-    # No "country": it appears in "country music group". A nation still reads as a place via
-    # "sovereign state". These are checked BEFORE the negative list so "island group" and
-    # "university town" stay places while "musical group" does not.
-    "place": ("city", "town", "village", "municipality", "county", "state", "borough",
-              "settlement", "census-designated", "township", "district", "region",
-              "territory", "capital", "metropolis", "commune", "prefecture", "province",
-              "nation", "seat", "community", "colonia", "island", "locality", "hamlet",
-              "populated place", "neighborhood", "neighbourhood", "suburb"),
-}
+def _norm(text):
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
 
 
-def _kind_from_classes(labels):
-    """Which of our types the Wikidata classes describe, or None when they describe none."""
-    text = " ".join(str(l).lower() for l in labels).strip()
-    if not text:
-        return None
-    def says(words):
-        return any(re.search(r"\b" + re.escape(w) + r"\b", text) for w in words)
-    # Place first: a class naming a kind of settlement is a place even when it also contains a
-    # word like "town" that appears in "university town", or "group" in "island group".
-    if says(_CLASS_WORDS["place"]):
-        return "place"
-    if says(_NOT_A_TYPE):
-        return "other"
-    for kind in ("nonprofit", "company"):
-        if says(_CLASS_WORDS[kind]):
-            return kind
-    return "other"
+def _link_entity(ctx):
+    """Map the entity the CLASSIFIER determined to Wikidata identifiers.
 
+    The classifier reads the whole question and decides which real-world entity is meant;
+    "St. Jude" in an NIH-funding question is the hospital, and only the question says so. This
+    function never revisits that decision - it links a settled identity to source keys. A
+    failed data lookup downstream must not be able to change the subject of the question,
+    which is what backtracking over ranked search results allowed.
 
-def _type_compatible(keys, thint, class_labels=()):
-    """False when the evidence says this candidate is not the kind of thing asked for.
+    It returns ONE identity when the classifier resolved the entity. It returns several only
+    when the classifier reported genuine ambiguity and named the candidates itself - an
+    unqualified "Springfield" - and the caller must turn those into a question, not pick one.
 
-    Order matters. Identifiers of the requested kind accept immediately. Otherwise P31 class
-    labels decide, because they are present for effectively every item while identifiers are
-    not: "University of Detroit Mercy" carries no EIN at all, so an identifier-only rule let
-    it answer a question about the city of Detroit. Only when there is no evidence of any
-    kind does the candidate pass, since absence is not disqualifying.
+    The trailing None is the native-name key, not a second identity: name-matched sources
+    (IRS BMF, College Scorecard) key on the mention itself.
     """
-    wanted = _TYPE_KEYS.get(thint)
-    if not wanted:
-        return True
-    if keys and any(keys.get(k) for k in wanted):
-        return True
-    kind = _kind_from_classes(class_labels)
-    if kind is not None:
-        return kind == thint
-    if keys and any(keys.get(k) for other, ks in _TYPE_KEYS.items() if other != thint for k in ks):
-        return False
-    return True
-
-
-def _entity_options(mention, thint):
-    """CHOICE: which canonical entity. Ranked (LLM-disambiguated) candidates, then None = native name."""
-    if not mention:
+    status = (ctx.get("entity_status") or "").strip().lower()
+    canonical = (ctx.get("canonical_entity") or "").strip()
+    mention = (ctx.get("entity") or "").strip()
+    if status == "none":
         return [None]
-    if (mention, thint) in _ENTITY_CACHE:                    # resolve a mention once per question, not per hit
-        return _ENTITY_CACHE[(mention, thint)]
-    _say("status", icon="🧩", msg=f"Resolving “{mention}” to a canonical entity…")
+    if status == "ambiguous":
+        # The question does not distinguish which Springfield. That is settled by the caller
+        # choosing one, not by looking anything up - Wikidata is not consulted until an entity
+        # is fixed, because it has no way to know which one was meant either.
+        return [None]
+
+    if not (canonical or mention):
+        return [None]
+    linked = _link_one(canonical or mention)
+    return [linked, None] if linked else [None]
+
+
+def _link_one(name):
+    """Identifiers for ONE determined name, or None.
+
+    The classifier has already decided which entity this is. Searching a CANONICAL name is a
+    lookup, not a disambiguation: "Chicago, Illinois" returns the city, where the bare mention
+    "Chicago" ranks University of Chicago first. This never reinterprets the name - if the
+    lookup finds nothing, the link fails rather than settling for a different entity.
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    if name in _ENTITY_CACHE:
+        return _ENTITY_CACHE[name]
     import resolver
     try:
-        cands = resolver._search(mention)
-    except Exception:
-        return [None]
-    if not cands:
-        return [None]
-    listing = "\n".join(f"{i}. {c.get('label','')} — {c.get('description','')}" for i, c in enumerate(cands))
-    try:
-        order = json.loads(TK.llm(
-            f'Rank the candidates by how well each is the {thint or "entity"} named "{mention}", best first. '
-            'JSON {"order":[<indices>]}.\n' + listing, mention, json_mode=True,
-            stage="resolve-entity")).get("order", [])
-    except Exception:
-        order = []
-    order = [i for i in order if isinstance(i, int) and 0 <= i < len(cands)] or list(range(len(cands)))
-    out = []
-    for i in order[:3]:
-        try:
-            label, keys = resolver._claims(cands[i]["id"])
-        except Exception:
-            continue
-        try:
-            classes = list(resolver.class_labels(resolver.instance_of(cands[i]["id"])).values())
-        except Exception:
-            classes = []
-        if not _type_compatible(keys, thint, classes):
-            # "Detroit Institute of Arts" is a real Wikidata match for the mention
-            # "Detroit" and the ranker will sometimes keep it. A nonprofit cannot answer a
-            # question about a place, so this is settled deterministically from the resolved
-            # identifiers rather than left to the ranking.
+        cands = resolver._search(name)
+        top = cands[0] if cands else None
+        # The top hit for a CANONICAL name is the right record, but check it actually denotes
+        # the name we asked for rather than trusting rank: Wikidata labels "Chicago, Illinois"
+        # as "Chicago", so containment either way is the honest test, and it still refuses
+        # "University of Detroit Mercy" for "Detroit, Michigan".
+        want, got = _norm(name), _norm(top and top.get("label"))
+        if not top or not got or not (got in want or want in got):
             _say("status", icon="🚫",
-                 msg=f"“{label}” is not a {thint} — not a candidate for this question")
-            continue
-        out.append({"qid": cands[i]["id"], "label": label, "keys": keys})
-    if out:
-        _say("resolve", mention=mention, label=out[0].get("label") or mention, keys=out[0].get("keys") or {})
-    _ENTITY_CACHE[(mention, thint)] = res = out + [None]
+                 msg=f"“{name}” did not match a record ({(top or {}).get('label') or 'no candidates'})")
+            _ENTITY_CACHE[name] = None
+            return None
+        qid = top["id"]
+        label, keys = resolver._claims(qid)
+    except Exception:
+        qid = None
+    if not qid:
+        _say("status", icon="🚫", msg=f"No identifier record for “{name}”")
+        _ENTITY_CACHE[name] = None
+        return None
+    _say("resolve", mention=name, label=label or name, keys=keys or {})
+    # `name` is what the classifier asked for and is what a human recognises: Wikidata labels
+    # all three Springfields "Springfield", which makes a clarification useless.
+    _ENTITY_CACHE[name] = res = {"qid": qid, "label": label or name, "name": name, "keys": keys}
     return res
+
+
 
 
 def _key_options(state, ctx):
@@ -1568,6 +1548,34 @@ def _run_ambiguous(question, ctx):
             "source": " · ".join(dict.fromkeys(a.get("source") or "?" for a in got))}
 
 
+def _entity_clarification(question, ctx, candidates, ledger, discovery):
+    """Ask which entity was meant, before spending a fetch on any of them.
+
+    The measure clarification fetches every interpretation first, because two names for the
+    same measure can turn out to be the same number and not worth interrupting anyone over.
+    Entities are not like that: Springfield, Illinois and Springfield, Missouri both return a
+    valid population, and the difference is the whole question.
+
+    Nothing is looked up here. These are the names the classifier produced, and no identifier
+    registry can tell us which one the caller meant.
+    """
+    options = [ClarificationOption(id=name, label=name, assumptions={"entity": name})
+               for name in candidates]
+    # The classifier leaves `entity` empty when it declines to resolve, so name the thing the
+    # caller actually typed by taking what the candidates share.
+    subject = (ctx.get("entity") or "").strip() or (options[0].label.split(",")[0] if options else "That name")
+    clar = Clarification(question=f"“{subject}” could mean more than one place or "
+                                  f"organization. Which one do you mean?",
+                         options=options,
+                         attribute=ctx.get("attribute") or "the requested measure")
+    return {"question": question, "status": "needs_clarification", "answer": None,
+            "answer_renderer": None, "clarification": clar.to_dict(),
+            "shape": ctx.get("shape") or "point", "usage": ledger.snapshot(),
+            "discovery_usage": discovery.snapshot(),
+            "data": {"ambiguous_entity": True, "candidates": [o.label for o in options]},
+            "plan": f"ambiguous entity → ask which of {len(options)} the caller means"}
+
+
 def _clarification(attribute, entity, raw_options):
     """Turn fetched alternatives into a resolvable, human-readable clarification.
 
@@ -1892,7 +1900,7 @@ def _search(question, ctx=None, hits=None):
     trace = []
     steps = [
         ("hit", lambda s: hits),
-        ("entity", lambda s: _entity_options(ctx.get("entity"), ctx.get("type"))),
+        ("entity", lambda s: _link_entity(ctx)),
         ("key", lambda s: _key_options(s, ctx)),
         ("period", lambda s: ([p, "latest"] if p != "latest" else ["latest"])),
     ]
@@ -2054,6 +2062,12 @@ def run(question, sites=None, assumptions=None, on_ambiguity="answer"):
     ctx, hits = discover(question, sites, assumptions)
     if not hits:
         raise SystemExit("agent finder returned no sources")
+    # An entity the question does not pin down is a question for the caller, not a guess. Ask
+    # before fetching: unlike an ambiguous measure, every candidate here would return a
+    # perfectly valid number for the wrong place.
+    candidates = ctx.get("entity_candidates") or []
+    if (ctx.get("entity_status") or "").lower() == "ambiguous" and len(candidates) > 1:
+        return _entity_clarification(question, ctx, candidates, _ledger, _disc)
     shape = ctx.get("shape") if ctx.get("shape") in planner.SHAPES else "point"
     intent = QueryIntent.from_context(question, ctx, sites)
     # A genuinely ambiguous measure over a single entity gets SEPARATE answers per interpretation

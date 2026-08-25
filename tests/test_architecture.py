@@ -291,7 +291,7 @@ class HttpPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(harness, "TELEMETRY_PATH", os.path.join(td, "telemetry.jsonl")), \
              mock.patch.object(harness, "discover", side_effect=discover), \
-             mock.patch.object(harness, "_entity_options", return_value=[{"label": "Chicago", "keys": {}}]), \
+             mock.patch.object(harness, "_link_entity", return_value=[{"label": "Chicago", "keys": {}}]), \
              mock.patch.object(harness, "_key_options", return_value=["fixture-key"]), \
              mock.patch.object(harness, "_fetch", side_effect=fetch), \
              mock.patch.object(harness, "_answers", return_value=(True, "")):
@@ -541,7 +541,7 @@ class EndToEndRenderingTests(unittest.TestCase):
         ctx.update(intent_extra or {})
         with mock.patch.object(harness, "discover", return_value=(ctx, [hit])), \
              mock.patch.object(harness, "_fetch", return_value=payload), \
-             mock.patch.object(harness, "_entity_options",
+             mock.patch.object(harness, "_link_entity",
                                return_value=[{"label": ctx["entity"], "keys": {}}]), \
              mock.patch.object(harness, "_answers", return_value=(True, "")), \
              mock.patch.object(harness.TK, "synthesize",
@@ -821,92 +821,6 @@ class SearchOrderTests(unittest.TestCase):
         self.assertEqual(seen, ["e1", "e2", "e3"])
 
 
-class EntityTypeGateTests(unittest.TestCase):
-    """The reported leak: a question about the city of Detroit fetched for nonprofits.
-
-    The fixture holds the REAL Wikidata claims and P31 class labels for every candidate the
-    resolver returns for the mention "Detroit", captured from the live API. An identifier-only
-    rule passes University of Detroit Mercy, which carries no EIN at all, so this is the case
-    that proves the production bug rather than the helper.
-    """
-
-    with open(os.path.join(ROOT, "tests", "fixtures", "detroit_candidates.json")) as f:
-        DETROIT = json.load(f)
-
-    def _keep(self, thint):
-        return {d["label"] for d in self.DETROIT.values()
-                if harness._type_compatible(d["keys"], thint, d["classes"])}
-
-    def test_only_the_city_answers_a_place_question(self):
-        self.assertEqual(self._keep("place"), {"Detroit"})
-
-    def test_the_reported_leaks_are_both_dropped(self):
-        for qid in ("Q1320232", "Q1201549"):          # U of Detroit Mercy, Detroit Institute of Arts
-            d = self.DETROIT[qid]
-            self.assertFalse(harness._type_compatible(d["keys"], "place", d["classes"]),
-                             f"{d['label']} must not answer a question about a place")
-
-    def test_an_entity_with_no_identifiers_is_still_judged(self):
-        """University of Detroit Mercy has no EIN; absence of identifiers cannot mean 'allow'."""
-        self.assertEqual(self.DETROIT["Q1320232"]["keys"], {})
-        self.assertFalse(harness._type_compatible({}, "place", ["university"]))
-
-    def test_sports_teams_and_creative_works_are_dropped(self):
-        for qid in ("Q1642809", "Q194116", "Q271880", "Q141104587"):
-            d = self.DETROIT[qid]
-            self.assertFalse(harness._type_compatible(d["keys"], "place", d["classes"]))
-
-    with open(os.path.join(ROOT, "tests", "fixtures", "place_candidates.json")) as f:
-        PLACES = json.load(f)
-
-    def test_a_music_group_is_not_a_place(self):
-        """"country music group" contains "country"; a substring test called Alabama a place."""
-        band = next(c for c in self.PLACES.values()
-                    if "country music group" in " ".join(c["classes"]))
-        self.assertFalse(harness._type_compatible(band["keys"], "place", band["classes"]))
-
-    def test_a_university_with_a_gnis_code_is_not_a_place(self):
-        """GNIS names universities and stadiums too, so it is not evidence of a place."""
-        uni = next(c for c in self.PLACES.values()
-                   if c["label"] == "University of Texas at Austin")
-        self.assertIn("gnis", uni["keys"])
-        self.assertFalse(harness._type_compatible(uni["keys"], "place", uni["classes"]))
-
-    def test_only_real_places_survive_across_every_mention(self):
-        """Colorado, Texas, Alabama, Detroit: 4 of 25 real candidates are places."""
-        both = dict(self.PLACES)
-        both.update(self.DETROIT)
-        kept = sorted(c["label"] for c in both.values()
-                      if harness._type_compatible(c["keys"], "place", c["classes"]))
-        self.assertEqual(kept, ["Alabama", "Colorado", "Detroit", "Texas"])
-
-    def test_legitimate_place_classes_are_not_rejected(self):
-        """Fail-closed on unknown classes made the English word lists load-bearing.
-
-        "university town" was read as a nonprofit because nonprofit was checked first, and
-        "island group" was rejected because "group" was globally negative. Both are places.
-        """
-        for label in ("unincorporated community", "colonia", "university town", "island group"):
-            self.assertTrue(harness._type_compatible({}, "place", [label]), label)
-
-    def test_places_win_without_readmitting_bands_or_teams(self):
-        """The ordering that admits "island group" must still exclude "musical group"."""
-        for label in ("musical group, country music group", "ice hockey team",
-                      "university and college sports club", "album", "monotypic taxon"):
-            self.assertFalse(harness._type_compatible({}, "place", [label]), label)
-
-    def test_no_evidence_at_all_still_passes(self):
-        """Absence of both identifiers and classes is not disqualifying."""
-        self.assertTrue(harness._type_compatible({}, "place", []))
-
-    def test_identifiers_of_the_requested_kind_accept_immediately(self):
-        self.assertTrue(harness._type_compatible({"fips_place": "2622000"}, "place", []))
-        self.assertTrue(harness._type_compatible({"cik": "320193"}, "company", []))
-
-    def test_no_type_hint_never_rejects(self):
-        self.assertTrue(harness._type_compatible({"ein": "1"}, None, ["university"]))
-
-
 class SilentWrongAnswerTests(unittest.TestCase):
     """Cases where the system answered confidently with the wrong number, or crashed.
 
@@ -959,6 +873,74 @@ class SilentWrongAnswerTests(unittest.TestCase):
         self.assertEqual(harness._recover_place("What is the population in Colorado?"), "Colorado")
         self.assertEqual(harness._recover_place("Poverty rate across Wayne County?"), "Wayne County")
         self.assertIsNone(harness._recover_place("What was Apple's total revenue?"))
+
+
+class EntityLinkingTests(unittest.TestCase):
+    """The classifier decides WHICH entity; this only maps that decision to identifiers.
+
+    The original failure was the reverse: a bare mention was searched, the top three
+    candidates were kept, and the solver backtracked into a university and an art museum
+    while answering a question about the city of Detroit. A failed data lookup must never be
+    able to change the subject of the question.
+    """
+
+    @staticmethod
+    def ctx(**kw):
+        base = {"entity": "", "canonical_entity": "", "entity_status": "resolved"}
+        base.update(kw)
+        return base
+
+    def test_a_determined_entity_is_looked_up_by_its_canonical_name(self):
+        with mock.patch("resolver._search", return_value=[{"id": "Q1297", "label": "Chicago"}]), \
+             mock.patch("resolver._claims", return_value=("Chicago", {"fips_place": "17-14000"})):
+            out = harness._link_entity(self.ctx(entity="Chicago", canonical_entity="Chicago, Illinois"))
+        self.assertEqual(out[0]["qid"], "Q1297")
+
+    def test_at_most_one_identity_is_ever_returned(self):
+        """The trailing None is the native-name key, not a second entity."""
+        with mock.patch("resolver._search", return_value=[{"id": "Q1297", "label": "Chicago"}]), \
+             mock.patch("resolver._claims", return_value=("Chicago", {})):
+            out = harness._link_entity(self.ctx(entity="Chicago", canonical_entity="Chicago, Illinois"))
+        self.assertEqual(len([o for o in out if o]), 1)
+
+    def test_an_ambiguous_entity_is_not_guessed(self):
+        """An unqualified Springfield must not become one particular Springfield."""
+        called = []
+        with mock.patch("resolver._search", side_effect=lambda t: called.append(t) or []):
+            out = harness._link_entity(self.ctx(entity="Springfield", entity_status="ambiguous"))
+        self.assertEqual(out, [None])
+        self.assertEqual(called, [], "an ambiguous entity must not be looked up at all")
+
+    def test_a_question_with_no_entity_looks_nothing_up(self):
+        called = []
+        with mock.patch("resolver._search", side_effect=lambda t: called.append(t) or []):
+            out = harness._link_entity(self.ctx(entity="", entity_status="none"))
+        self.assertEqual(out, [None])
+        self.assertEqual(called, [])
+
+    def test_search_is_a_fallback_and_must_match_the_determined_name(self):
+        """Wikidata covers more than Wikipedia, but a candidate must denote the same entity."""
+        cands = [{"id": "Q1", "label": "Housing Trust Silicon Valley"},
+                 {"id": "Q2", "label": "Silicon Valley Community Foundation"}]
+        with mock.patch("resolver._search", return_value=cands), \
+             mock.patch("resolver._claims", return_value=("Housing Trust Silicon Valley", {"ein": "1"})):
+            out = harness._link_entity(self.ctx(canonical_entity="Housing Trust Silicon Valley"))
+        self.assertEqual(out[0]["qid"], "Q1")
+
+    def test_a_differently_named_candidate_is_never_accepted(self):
+        """Never fall through to another entity merely because it ranks first."""
+        cands = [{"id": "Q9", "label": "University of Detroit Mercy"}]
+        with mock.patch("resolver._search", return_value=cands), \
+             mock.patch("resolver._claims", return_value=(cands[0]["label"], {})):
+            out = harness._link_entity(self.ctx(entity="Detroit", canonical_entity="Detroit, Michigan"))
+        self.assertEqual(out, [None])
+
+    def test_a_record_that_does_not_denote_the_name_is_refused(self):
+        cands = [{"id": "Q1", "label": "Totally Different Trust"}]
+        with mock.patch("resolver._search", return_value=cands), \
+             mock.patch("resolver._claims", return_value=(cands[0]["label"], {})):
+            out = harness._link_entity(self.ctx(canonical_entity="Acme Fund"))
+        self.assertEqual(out, [None])
 
 
 if __name__ == "__main__":
