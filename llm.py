@@ -13,10 +13,13 @@ Pick a provider with LLM_PROVIDER, or leave it unset and it auto-detects from wh
 
 See set_keys.example.sh for the full list.
 """
-import os, time, threading
+import asyncio, inspect, os, time, threading
 import runtime
+from query_context import QueryContext
 
 _client = None
+_async_client = None
+_async_client_lock = threading.Lock()  # only spans construction/clear; no provider I/O under it
 _provider = None
 
 # Gemini model ids change often; these are current working defaults (verify with client().models.list()).
@@ -100,6 +103,51 @@ def client():
     return _client
 
 
+def _build_async():
+    """Application-lifetime async SDK client. Retries live below so backoff is cancellable."""
+    p = provider()
+    if p == "azure":
+        from openai import AsyncAzureOpenAI
+        return AsyncAzureOpenAI(api_key=os.environ["AZURE_OPENAI_API_KEY"],
+                                azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+                                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+                                timeout=_TIMEOUT, max_retries=0)
+    from openai import AsyncOpenAI
+    if p == "gemini":
+        return AsyncOpenAI(api_key=os.getenv("GEMINI_API_KEY") or os.environ["GOOGLE_API_KEY"],
+                           base_url=os.getenv("OPENAI_BASE_URL", _GEMINI_BASE),
+                           timeout=_TIMEOUT, max_retries=0)
+    if p == "openrouter":
+        return AsyncOpenAI(api_key=os.environ["OPENROUTER_API_KEY"],
+                           base_url=os.getenv("OPENROUTER_BASE_URL", _OPENROUTER_BASE),
+                           default_headers={"HTTP-Referer": os.getenv("OPENROUTER_APP_URL", ""),
+                                            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Resource Raiser")},
+                           timeout=_TIMEOUT, max_retries=0)
+    return AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"],
+                       base_url=os.getenv("OPENAI_BASE_URL") or None,
+                       timeout=_TIMEOUT, max_retries=0)
+
+
+def async_client():
+    """Return the one shared async SDK client; the ASGI lifespan will own it after Stage 7."""
+    global _async_client
+    with _async_client_lock:
+        if _async_client is None:
+            _async_client = _build_async()
+    return _async_client
+
+
+async def close_async_client():
+    """Close and clear the shared client at application shutdown (also useful to tests)."""
+    global _async_client
+    with _async_client_lock:
+        c, _async_client = _async_client, None
+    if c is not None:
+        result = c.close()
+        if inspect.isawaitable(result):
+            await result
+
+
 def chat_model():
     # Azure addresses a DEPLOYMENT name; OpenAI/Gemini address a model id.
     if provider() == "azure":
@@ -151,6 +199,7 @@ _PRICES = {
     "gemini-embedding-001": (0.15, 0.0),
     "nomic-embed-text": (0.0, 0.0),                    # local (Ollama) — free
 }
+MAX_CALL_EVENTS = 200
 
 
 def price_for(model):
@@ -177,6 +226,8 @@ class Ledger:
         self.cost_is_reported = False                  # True once a provider gave us a real figure
         self.by_model = {}
         self.by_stage = {}
+        self.call_events = []
+        self.call_events_dropped = 0
 
     def record(self, kind, model, prompt_tokens=0, completion_tokens=0, reported_cost=None,
                stage="other"):
@@ -200,6 +251,24 @@ class Ledger:
                 b["tokens"] += prompt_tokens + completion_tokens
                 b["cost_usd"] += cost
 
+    def event(self, target, model, stage, elapsed_ms, outcome, prompt_tokens=0,
+              completion_tokens=0, cost_usd=0.0):
+        """Per-provider-attempt telemetry; aggregate call counts above retain billing parity."""
+        with self._lock:
+            item = {
+                "target": target, "model": model, "stage": stage,
+                "elapsed_ms": round(elapsed_ms), "outcome": outcome,
+                "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                "tokens": prompt_tokens + completion_tokens,
+                "cost_usd": round(cost_usd, 6),
+            }
+            if len(self.call_events) < MAX_CALL_EVENTS:
+                self.call_events.append(item)
+            else:
+                # Stage 7's exporter will receive the unbounded operational stream. The usage
+                # snapshot rides in every user response, so keep it bounded and disclose loss.
+                self.call_events_dropped += 1
+
     def snapshot(self):
         with self._lock:
             return {
@@ -216,6 +285,8 @@ class Ledger:
                              for k, v in self.by_model.items()},
                 "by_stage": {k: {**v, "cost_usd": round(v["cost_usd"], 6)}
                              for k, v in self.by_stage.items()},
+                "call_events": [dict(event) for event in self.call_events],
+                "call_events_dropped": self.call_events_dropped,
             }
 
 
@@ -283,15 +354,165 @@ def chat(system, user, json_mode=False, model=None, stage="other", max_tokens=No
             extra["provider"] = {"sort": sort}
         kw["extra_body"] = extra
     model = model or chat_model()
-    r = client().chat.completions.create(
-        model=model, temperature=0,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}], **kw)
+    started = time.monotonic()
+    try:
+        r = client().chat.completions.create(
+            model=model, temperature=0,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}], **kw)
+    except Exception as exc:
+        if ledger() is not None:
+            ledger().event(provider(), model, stage, (time.monotonic() - started) * 1000,
+                           _outcome(exc))
+        raise
     u = getattr(r, "usage", None)
-    _record("chat", model, u, _reported_cost(u), stage)
+    reported = _reported_cost(u)
+    _record("chat", model, u, reported, stage)
+    if ledger() is not None:
+        prompt, completion = _usage_tokens(u)
+        ledger().event(provider(), model, stage, (time.monotonic() - started) * 1000, "success",
+                       prompt, completion, _event_cost(model, u, reported))
     return r.choices[0].message.content
 
 
-def embed(texts, batch=96):
+def _async_ledger(context):
+    if context.usage_ledger is None:
+        context.usage_ledger = Ledger()
+    return context.usage_ledger
+
+
+def _usage_tokens(usage):
+    return (getattr(usage, "prompt_tokens", 0) or 0,
+            getattr(usage, "completion_tokens", 0) or 0)
+
+
+def _event_cost(model, usage, reported):
+    if reported is not None:
+        return reported
+    prompt, completion = _usage_tokens(usage)
+    pin, pout = price_for(model)
+    return (prompt * pin + completion * pout) / 1e6
+
+
+def _retry_after(exc, attempt):
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or getattr(exc, "headers", None) or {}
+    raw = headers.get("retry-after") or headers.get("Retry-After")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return min(30.0, float(2 ** attempt))
+
+
+def _retryable(exc):
+    if isinstance(exc, runtime.QueryCancelled):
+        return False
+    status = getattr(exc, "status_code", None)
+    if status in (408, 409, 429) or isinstance(status, int) and status >= 500:
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in
+               ("429", "quota", "rate limit", "resource_exhausted", "timeout", "timed out",
+                "connection", "temporarily unavailable"))
+
+
+def _outcome(exc):
+    if getattr(exc, "status_code", None) == 429 or "rate limit" in str(exc).lower():
+        return "rate_limited"
+    if isinstance(exc, runtime.QueryCancelled):
+        return "cancelled"
+    if "timeout" in f"{type(exc).__name__}: {exc}".lower():
+        return "timeout"
+    return "error"
+
+
+async def chat_async(system, user, *, context: QueryContext, json_mode=False, model=None,
+                     stage="other", max_tokens=None, reasoning_effort=None):
+    """Async chat with explicit query ownership and cancellable provider retry/backoff."""
+    context.check()
+    model = model or chat_model()
+    kw = {"response_format": {"type": "json_object"}} if json_mode else {}
+    if max_tokens is not None:
+        kw["max_tokens"] = int(max_tokens)
+    if _openrouter():
+        extra = {"usage": {"include": True}}
+        if reasoning_effort:
+            extra["reasoning"] = {"effort": reasoning_effort}
+        sort = os.getenv("LLM_PROVIDER_SORT", "throughput").strip()
+        if sort:
+            extra["provider"] = {"sort": sort}
+        kw["extra_body"] = extra
+    c = context.llm_client or async_client()
+    ledger = _async_ledger(context)
+    target = provider()
+
+    for attempt in range(_RETRIES + 1):
+        started = time.monotonic()
+        try:
+            response = await context.wait(c.chat.completions.create(
+                model=model, temperature=0,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}], **kw))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            elapsed = (time.monotonic() - started) * 1000
+            ledger.event(target, model, stage, elapsed, _outcome(exc))
+            if attempt >= _RETRIES or not _retryable(exc):
+                raise
+            await context.sleep(_retry_after(exc, attempt))
+            continue
+        usage = getattr(response, "usage", None)
+        prompt, completion = _usage_tokens(usage)
+        reported = _reported_cost(usage)
+        ledger.record("chat", model, prompt, completion, reported, stage)
+        ledger.event(target, model, stage, (time.monotonic() - started) * 1000, "success",
+                     prompt, completion, _event_cost(model, usage, reported))
+        return response.choices[0].message.content
+    raise AssertionError("unreachable")
+
+
+async def embed_async(texts, *, context: QueryContext, batch=96, stage="other"):
+    """Async embeddings with the sync path's batch-splitting semantics and cancellable retries."""
+    context.check()
+    c, model = context.llm_client or async_client(), embed_model()
+    ledger, target = _async_ledger(context), provider()
+
+    async def call(chunk, split_depth=0):
+        last = None
+        for attempt in range(_RETRIES + 1):
+            started = time.monotonic()
+            try:
+                response = await context.wait(c.embeddings.create(model=model, input=chunk))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last = exc
+                elapsed = (time.monotonic() - started) * 1000
+                ledger.event(target, model, stage, elapsed, _outcome(exc))
+                if attempt < _RETRIES and _retryable(exc):
+                    await context.sleep(_retry_after(exc, attempt))
+                    continue
+                break
+            usage = getattr(response, "usage", None)
+            prompt, completion = _usage_tokens(usage)
+            reported = _reported_cost(usage)
+            ledger.record("embed", model, prompt, completion, reported, stage)
+            ledger.event(target, model, stage, (time.monotonic() - started) * 1000, "success",
+                         prompt, completion, _event_cost(model, usage, reported))
+            return [item.embedding for item in response.data]
+        if len(chunk) > 1:
+            half = len(chunk) // 2
+            return (await call(chunk[:half], split_depth + 1) +
+                    await call(chunk[half:], split_depth + 1))
+        raise last
+
+    vectors = []
+    for offset in range(0, len(texts), batch):
+        vectors.extend(await call([text[:8000] for text in texts[offset:offset + batch]]))
+    return vectors
+
+
+def embed(texts, batch=96, stage="other"):
     """Embed a list of strings -> list of vectors. Robust to two provider quirks:
       - a 429 / quota / rate error backs OFF and retries the same chunk (it does NOT fan out into
         one call per string, which would burn a free-tier quota that's already exhausted);
@@ -302,12 +523,21 @@ def embed(texts, batch=96):
 
     def _call(chunk, depth=0):
         runtime.check()
+        started = time.monotonic()
         try:
             r = c.embeddings.create(model=model, input=chunk)
             u = getattr(r, "usage", None)
-            _record("embed", model, u, _reported_cost(u))
+            reported = _reported_cost(u)
+            _record("embed", model, u, reported, stage)
+            if ledger() is not None:
+                prompt, completion = _usage_tokens(u)
+                ledger().event(provider(), model, stage, (time.monotonic() - started) * 1000,
+                               "success", prompt, completion, _event_cost(model, u, reported))
             return [d.embedding for d in r.data]
         except Exception as e:
+            if ledger() is not None:
+                ledger().event(provider(), model, stage, (time.monotonic() - started) * 1000,
+                               _outcome(e))
             m = str(e).lower()
             if ("429" in m or "quota" in m or "rate limit" in m or "resource_exhausted" in m
                     or "timeout" in m or "timed out" in m) and depth < 6:

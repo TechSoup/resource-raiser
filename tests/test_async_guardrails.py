@@ -183,9 +183,15 @@ class StreamLifecycleTests(unittest.TestCase):
             self.assertEqual(answer, f"answer-{question}")
 
     def test_deadline_is_a_terminal_protocol_error(self):
+        finished = threading.Event()
+
         def slow_run(*_, **__):
             time.sleep(0.05)
-            runtime.check()
+            try:
+                runtime.check()
+            except runtime.QueryCancelled:
+                finished.set()
+                return self._result("cancelled")
 
         with mock.patch.dict(os.environ, {"QUERY_TIMEOUT_SECONDS": "0"}), \
              mock.patch.object(harness, "run", side_effect=slow_run):
@@ -193,6 +199,7 @@ class StreamLifecycleTests(unittest.TestCase):
         self.assertEqual([m["message_type"] for m in messages],
                          [nlweb.BEGIN, nlweb.ERROR, nlweb.END])
         self.assertIn("deadline exceeded", messages[1]["content"])
+        self.assertTrue(finished.wait(1), "deadline did not reach the worker")
 
     def test_closing_stream_signals_cancellation_to_worker(self):
         cancelled = threading.Event()
