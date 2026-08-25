@@ -880,6 +880,21 @@ class EntityTypeGateTests(unittest.TestCase):
                       if harness._type_compatible(c["keys"], "place", c["classes"]))
         self.assertEqual(kept, ["Alabama", "Colorado", "Detroit", "Texas"])
 
+    def test_legitimate_place_classes_are_not_rejected(self):
+        """Fail-closed on unknown classes made the English word lists load-bearing.
+
+        "university town" was read as a nonprofit because nonprofit was checked first, and
+        "island group" was rejected because "group" was globally negative. Both are places.
+        """
+        for label in ("unincorporated community", "colonia", "university town", "island group"):
+            self.assertTrue(harness._type_compatible({}, "place", [label]), label)
+
+    def test_places_win_without_readmitting_bands_or_teams(self):
+        """The ordering that admits "island group" must still exclude "musical group"."""
+        for label in ("musical group, country music group", "ice hockey team",
+                      "university and college sports club", "album", "monotypic taxon"):
+            self.assertFalse(harness._type_compatible({}, "place", [label]), label)
+
     def test_no_evidence_at_all_still_passes(self):
         """Absence of both identifiers and classes is not disqualifying."""
         self.assertTrue(harness._type_compatible({}, "place", []))
@@ -934,15 +949,16 @@ class SilentWrongAnswerTests(unittest.TestCase):
         self.assertIsNone(harness._geo_from_fips({"fips_place": "12450"}))
 
     def test_the_place_recovery_accepts_more_than_in(self):
-        """"the population OF Colorado" had no safety net when the classifier dropped the entity."""
-        import re
-        pattern = r"\b(?:in|of|for|across|throughout) (?:the )?([A-Z][\w .,\'&-]+?)\s*\??$"
-        for q, want in [("What is the population of Colorado?", "Colorado"),
-                        ("What is the population in Colorado?", "Colorado"),
-                        ("Poverty rate across Wayne County?", "Wayne County")]:
-            m = re.search(pattern, q)
-            self.assertIsNotNone(m, q)
-            self.assertEqual(m.group(1).strip(), want)
+        """"the population OF Colorado" had no safety net when the classifier dropped the entity.
+
+        Calls the production helper. An earlier version of this test copied the regular
+        expression and asserted against the copy, so narrowing the real one back to "in" left
+        it green — the test could not fail for the reason it existed.
+        """
+        self.assertEqual(harness._recover_place("What is the population of Colorado?"), "Colorado")
+        self.assertEqual(harness._recover_place("What is the population in Colorado?"), "Colorado")
+        self.assertEqual(harness._recover_place("Poverty rate across Wayne County?"), "Wayne County")
+        self.assertIsNone(harness._recover_place("What was Apple's total revenue?"))
 
 
 if __name__ == "__main__":

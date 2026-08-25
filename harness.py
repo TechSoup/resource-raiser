@@ -383,10 +383,9 @@ def discover(question, sites=None, assumptions=None):
         # "in" was the only preposition here, so "the population OF Colorado" had no safety net:
         # the classifier dropped the entity, nothing recovered it, and every candidate then failed
         # with "no geo" until the attempt budget ran out.
-        m = re.search(r"\b(?:in|of|for|across|throughout) (?:the )?([A-Z][\w .,'&-]+?)\s*\??$",
-                      question)
-        if m:
-            ctx["entity"] = m.group(1).strip()
+        recovered = _recover_place(question)
+        if recovered:
+            ctx["entity"] = recovered
     sources = [s for s in (ctx.get("sources") or []) if s in SOURCE_TYPES] or list(SOURCE_TYPES)
     sources = _ensure_grant_graph(question, sources)
     if sites:
@@ -501,6 +500,18 @@ def _ard_publishers():
     """Facet counts from POST /explore — what the source picker is built from."""
     f = (ard_client.explore("publisher").get("facets") or {}).get("publisher") or {}
     return [{"dir": b["value"], "count": b["count"]} for b in f.get("buckets", [])]
+
+
+def _recover_place(question):
+    """The place named at the end of a question, or None.
+
+    The classifier intermittently returns an empty entity for a place question. Only "in" was
+    matched here, so "the population OF Colorado" had no safety net: every candidate then failed
+    with "no geo" until the attempt budget ran out.
+    """
+    m = re.search(r"\b(?:in|of|for|across|throughout) (?:the )?([A-Z][\w .,'&-]+?)\s*\??$",
+                  question)
+    return m.group(1).strip() if m else None
 
 
 def _geo_from_fips(keys):
@@ -633,10 +644,14 @@ _CLASS_WORDS = {
                   "school", "museum", "hospital", "institute", "association", "society",
                   "organization", "organisation", "church", "educational"),
     "company": ("business", "company", "corporation", "enterprise", "manufacturer"),
+    # No "country": it appears in "country music group". A nation still reads as a place via
+    # "sovereign state". These are checked BEFORE the negative list so "island group" and
+    # "university town" stay places while "musical group" does not.
     "place": ("city", "town", "village", "municipality", "county", "state", "borough",
               "settlement", "census-designated", "township", "district", "region",
               "territory", "capital", "metropolis", "commune", "prefecture", "province",
-              "country", "nation", "seat"),
+              "nation", "seat", "community", "colonia", "island", "locality", "hamlet",
+              "populated place", "neighborhood", "neighbourhood", "suburb"),
 }
 
 
@@ -647,9 +662,13 @@ def _kind_from_classes(labels):
         return None
     def says(words):
         return any(re.search(r"\b" + re.escape(w) + r"\b", text) for w in words)
+    # Place first: a class naming a kind of settlement is a place even when it also contains a
+    # word like "town" that appears in "university town", or "group" in "island group".
+    if says(_CLASS_WORDS["place"]):
+        return "place"
     if says(_NOT_A_TYPE):
         return "other"
-    for kind in ("nonprofit", "company", "place"):
+    for kind in ("nonprofit", "company"):
         if says(_CLASS_WORDS[kind]):
             return kind
     return "other"
