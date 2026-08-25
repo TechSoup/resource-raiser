@@ -13,9 +13,18 @@ tables). Run with the Azure keys loaded:
   set -a; source ./set_keys.sh; set +a
   python3 agent_finder.py            # serves on http://127.0.0.1:8088
 """
-import base64, json, os, re, signal, sys, threading, time, urllib.parse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as HTTPServer
-import llm
+import asyncio, base64, json, os, re, sys, time, urllib.parse
+from contextlib import asynccontextmanager
+
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+import llm, runtime
+from query_context import QueryContext
 from registry import index
 
 PORT = int(os.getenv("AGENT_FINDER_PORT", "8088"))
@@ -33,21 +42,21 @@ SELF = os.getenv("AGENT_FINDER_SELF") or f"http://{'127.0.0.1' if HOST in ('0.0.
 # the cap applies to /search specifically rather than to the whole service.
 SEARCH_LIMIT_PER_DAY = int(os.getenv("SEARCH_LIMIT_PER_DAY", "500"))     # 0 disables
 TRUST_PROXY = os.getenv("TRUST_PROXY", "0").lower() in ("1", "true", "yes")
-_QUOTA, _QUOTA_LOCK = {}, threading.Lock()
+_QUOTA = {}  # event-loop-owned; quota_ok contains no await, so each update is one critical section
 
 
-def client_ip(handler):
+def client_ip(request):
     """Who to bill a search to. X-Forwarded-For is client-supplied, so it is only believed when a
     proxy we control is declared — otherwise anyone could mint a fresh quota per request."""
     if TRUST_PROXY:
-        xff = handler.headers.get("X-Forwarded-For", "")
+        xff = request.headers.get("X-Forwarded-For", "")
         if xff:
             ip = xff.split(",")[-1].strip()
             if ip.count(":") == 1:
                 ip = ip.split(":")[0]
             if ip:
                 return ip
-    return handler.client_address[0]
+    return request.client.host if request.client else "unknown"
 
 
 def quota_ok(ip):
@@ -55,18 +64,17 @@ def quota_ok(ip):
         return True, 0
     now = time.time()
     day, reset = int(now // 86400), int((int(now // 86400) + 1) * 86400 - now)
-    with _QUOTA_LOCK:
-        rec = _QUOTA.get(ip)
-        if rec is None or rec[0] != day:
-            if len(_QUOTA) > 50_000:
-                for k in [k for k, v in _QUOTA.items() if v[0] != day]:
-                    _QUOTA.pop(k, None)
-            rec = [day, 0]
-            _QUOTA[ip] = rec
-        if rec[1] >= SEARCH_LIMIT_PER_DAY:
-            return False, reset
-        rec[1] += 1
-        return True, reset
+    rec = _QUOTA.get(ip)
+    if rec is None or rec[0] != day:
+        if len(_QUOTA) > 50_000:
+            for key in [key for key, value in _QUOTA.items() if value[0] != day]:
+                _QUOTA.pop(key, None)
+        rec = [day, 0]
+        _QUOTA[ip] = rec
+    if rec[1] >= SEARCH_LIMIT_PER_DAY:
+        return False, reset
+    rec[1] += 1
+    return True, reset
 
 
 def publisher(identifier):
@@ -138,7 +146,8 @@ def _access_fm(source_dir):
         import yaml
         p = os.path.join(ROOT, "sources", source_dir, "_access.md")
         try:
-            t = open(p, encoding="utf-8").read()
+            with open(p, encoding="utf-8") as stream:
+                t = stream.read()
             _ACCESS_CACHE[source_dir] = yaml.safe_load(t.split("---", 2)[1]) or {}
         except Exception:
             _ACCESS_CACHE[source_dir] = {}
@@ -149,7 +158,8 @@ def _leaf_fm(identifier):
     import yaml
     p = os.path.join(ROOT, identifier)
     try:
-        t = open(p, encoding="utf-8").read()
+        with open(p, encoding="utf-8") as stream:
+            t = stream.read()
         return yaml.safe_load(t.split("---", 2)[1]) or {}
     except Exception:
         return {}
@@ -213,7 +223,8 @@ def _leaf_text(identifier):
     path = os.path.realpath(os.path.join(ROOT, identifier))
     if not path.startswith(root + os.sep) or not path.endswith(".md") or not os.path.exists(path):
         return ""
-    return open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as stream:
+        return stream.read()
 
 
 def _catalog():
@@ -221,7 +232,9 @@ def _catalog():
     global _ENTRIES, _BY_PUBLISHER, _BY_URN
     if _ENTRIES is None:
         _ENTRIES, _BY_PUBLISHER, _BY_URN = [], {}, {}
-        for m in json.load(open(index.CACHE_META)):
+        with open(index.CACHE_META) as stream:
+            metadata = json.load(stream)
+        for m in metadata:
             e = _entry_from_meta(m)
             e["_path"] = m["identifier"]                  # internal: not emitted on the wire
             _ENTRIES.append(e)
@@ -374,134 +387,179 @@ def _manifest():
     }
 
 
-class Handler(BaseHTTPRequestHandler):
-    def _cors(self):
-        # A discovery registry is a public read surface; without these a browser-based agent
-        # cannot call it cross-origin at all.
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+FINDER_QUERY_TIMEOUT = float(os.getenv("AGENT_FINDER_QUERY_TIMEOUT", "180"))
+_MAX_BODY = int(os.getenv("AGENT_FINDER_MAX_BODY", "65536"))
 
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self._cors()
-        self.send_header("Access-Control-Max-Age", "86400")
-        self.end_headers()
 
-    def _json(self, code, obj):
-        b = json.dumps(obj).encode()
-        self.send_response(code)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(b)))
-        self.end_headers()
-        self.wfile.write(b)
+def _json(payload, status=200, headers=None):
+    return JSONResponse(payload, status_code=status, headers=headers)
 
-    def do_GET(self):
-        u = urllib.parse.urlparse(self.path)
-        p, qs = u.path.rstrip("/"), urllib.parse.parse_qs(u.query)
-        if p in ("", "/"):
-            return self._json(200, {"name": "ARD Agent Finder — OKF data tables",
-                                    "store": "in-memory",
-                                    "endpoints": {"search": "POST /search", "explore": "POST /explore",
-                                                  "list": "GET /agents",
-                                                  "entry": "GET /agents/entry?id=",
-                                                  "manifest": "GET /.well-known/ard.json"}})
-        if p == "/healthz":
-            # Cost-free liveness/readiness: validate the already-built artifacts without embedding
-            # a probe query, spending provider credits, or consuming the /search quota.
-            try:
-                vecs, meta = index._store()
-                ok = len(vecs) == len(meta) and len(meta) > 0 and len(vecs.shape) == 2
-                return self._json(200 if ok else 503,
-                                  {"ok": ok, "entries": len(meta),
-                                   "dimensions": int(vecs.shape[1]) if ok else 0})
-            except Exception as e:
-                return self._json(503, {"ok": False, "error": type(e).__name__})
-        if p == "/.well-known/ard.json":
-            return self._json(200, _manifest())
-        if p == "/agents/entry":
-            e = _entry((qs.get("id") or [""])[0])
-            return self._json(200, e) if e else self._json(404, {"error": "no such entry"})
-        if p == "/agents":
-            return self._json(200, _agents(qs))
-        self._json(404, {"error": "not found"})
 
-    def do_POST(self):
-        path = urllib.parse.urlparse(self.path).path.rstrip("/")
-        if path not in ("/search", "/explore"):
-            return self._json(404, {"error": "not found"})
+async def _body(request):
+    raw_length = request.headers.get("content-length")
+    try:
+        length = int(raw_length) if raw_length is not None else 0
+    except (TypeError, ValueError):
+        return None, _json({"error": "invalid Content-Length"}, 400)
+    if length < 0 or length > _MAX_BODY:
+        return None, _json({"error": f"request body exceeds {_MAX_BODY} bytes"}, 413)
+    try:
+        raw = await request.body()
+    except Exception:
+        return None, _json({"error": "could not read request body"}, 400)
+    if len(raw) > _MAX_BODY:
+        return None, _json({"error": f"request body exceeds {_MAX_BODY} bytes"}, 413)
+    try:
+        payload = json.loads(raw or b"{}")
+    except (ValueError, UnicodeDecodeError):
+        return None, _json({"error": "invalid JSON body"}, 400)
+    if not isinstance(payload, dict):
+        return None, _json({"error": "JSON body must be an object"}, 400)
+    return payload, None
+
+
+async def root(_request):
+    return _json({"name": "ARD Agent Finder — OKF data tables", "store": "in-memory",
+                  "endpoints": {"search": "POST /search", "explore": "POST /explore",
+                                "list": "GET /agents",
+                                "entry": "GET /agents/entry?id=",
+                                "manifest": "GET /.well-known/ard.json"}})
+
+
+async def healthz(_request):
+    try:
+        vecs, meta = index._store()
+        ok = len(vecs) == len(meta) and len(meta) > 0 and len(vecs.shape) == 2
+        return _json({"ok": ok, "entries": len(meta),
+                      "dimensions": int(vecs.shape[1]) if ok else 0}, 200 if ok else 503)
+    except Exception as exc:
+        return _json({"ok": False, "error": type(exc).__name__}, 503)
+
+
+async def manifest_endpoint(_request):
+    return _json(_manifest())
+
+
+async def agents_endpoint(request):
+    params = {}
+    for key, value in request.query_params.multi_items():
+        params.setdefault(key, []).append(value)
+    return _json(_agents(params))
+
+
+async def entry_endpoint(request):
+    entry = _entry(request.query_params.get("id", ""))
+    return _json(entry) if entry else _json({"error": "no such entry"}, 404)
+
+
+async def explore_endpoint(request):
+    payload, error = await _body(request)
+    return error or _json(_explore(payload))
+
+
+async def search_endpoint(request):
+    payload, error = await _body(request)
+    if error:
+        return error
+    ok, reset = quota_ok(client_ip(request))
+    if not ok:
+        return _json({"error": f"daily search limit reached ({SEARCH_LIMIT_PER_DAY}/day per source)",
+                      "retryAfterSeconds": reset}, 429, {"Retry-After": str(reset)})
+    query = payload.get("query") or {}
+    if not isinstance(query, dict) or not isinstance(query.get("text"), str) \
+            or not query["text"].strip():
+        return _json({"error": "query.text must be a non-empty string"}, 400)
+    text = query["text"].strip()
+    texts = query.get("texts") or [text]
+    if (not isinstance(texts, list) or len(texts) > 4
+            or not all(isinstance(item, str) and item.strip() for item in texts)):
+        return _json({"error": "query.texts must be a list of 1-4 non-empty strings"}, 400)
+    texts = [item.strip() for item in texts]
+    try:
+        k = int(payload.get("pageSize", 10))
+    except (TypeError, ValueError):
+        return _json({"error": "pageSize must be an integer"}, 400)
+    k = max(1, min(k, 100))
+
+    ledger = llm.Ledger()
+    context = QueryContext.with_timeout(
+        FINDER_QUERY_TIMEOUT, usage_ledger=ledger,
+        llm_client=request.app.state.llm_client or llm.async_client())
+    try:
+        matches = await index.search_many_async(
+            texts, k, sources=payload.get("sources"), rerank=payload.get("rerank", True),
+            rerank_query=text, context=context)
+    except asyncio.CancelledError:
+        context.cancel()
+        raise
+    except runtime.QueryCancelled as exc:
+        return _json({"code": "query_cancelled", "error": str(exc), "usage": ledger.snapshot()}, 504)
+    except index.RelevanceScoringError:
+        return _json({
+            "code": "relevance_scoring_failed",
+            "error": ("table relevance scoring is temporarily unavailable; embedding "
+                      "similarity was not used as a substitute"),
+            "usage": ledger.snapshot(),
+        }, 503)
+    except index.NoRelevantTablesError as exc:
+        return _json({
+            "@context": [ARD_CONTEXT, {"okf": OKF_NS}],
+            "results": [], "referrals": [], "pageToken": None,
+            "eligibility": {"status": "no_match", "threshold": exc.threshold,
+                            "topScore": exc.top_score},
+            "usage": ledger.snapshot(),
+        })
+
+    results = []
+    for hit in matches:
+        entry = _entry_from_meta({"identifier": hit["identifier"], "title": hit["title"],
+                                  "description": hit.get("description", ""),
+                                  "queries": hit.get("queries") or []})
+        entry.update({"score": hit["score"], "source": SELF})
+        results.append(_wire(entry))
+    return _json({"@context": [ARD_CONTEXT, {"okf": OKF_NS}],
+                  "results": results, "referrals": [], "pageToken": None,
+                  "usage": ledger.snapshot()})
+
+
+def create_app(llm_client=None):
+    @asynccontextmanager
+    async def lifespan(application):
+        # Immutable release artifacts are loaded before readiness, never on a request.
+        index._store()
+        _catalog()
+        owns_client = llm_client is None
+        application.state.llm_client = llm_client or llm.async_client()
         try:
-            n = int(self.headers.get("Content-Length", 0))
-        except (TypeError, ValueError):
-            return self._json(400, {"error": "invalid Content-Length"})
-        max_body = int(os.getenv("AGENT_FINDER_MAX_BODY", "65536"))
-        if n < 0 or n > max_body:
-            return self._json(413, {"error": f"request body exceeds {max_body} bytes"})
-        try:
-            req = json.loads(self.rfile.read(n) or b"{}")
-        except (ValueError, UnicodeDecodeError):
-            return self._json(400, {"error": "invalid JSON body"})
-        if not isinstance(req, dict):
-            return self._json(400, {"error": "JSON body must be an object"})
-        if path == "/explore":
-            return self._json(200, _explore(req))
-        ok, reset = quota_ok(client_ip(self))
-        if not ok:
-            return self._json(429, {"error": f"daily search limit reached "
-                                             f"({SEARCH_LIMIT_PER_DAY}/day per source)",
-                                    "retryAfterSeconds": reset})
-        query = req.get("query") or {}
-        if not isinstance(query, dict) or not isinstance(query.get("text"), str) or not query["text"].strip():
-            return self._json(400, {"error": "query.text must be a non-empty string"})
-        text = query["text"].strip()
-        texts = query.get("texts") or [text]
-        if (not isinstance(texts, list) or len(texts) > 4 or
-                not all(isinstance(item, str) and item.strip() for item in texts)):
-            return self._json(400, {"error": "query.texts must be a list of 1-4 non-empty strings"})
-        texts = [item.strip() for item in texts]
-        try:
-            k = int(req.get("pageSize", 10))
-        except (TypeError, ValueError):
-            return self._json(400, {"error": "pageSize must be an integer"})
-        k = max(1, min(k, 100))
-        # Discovery's query embedding and its LLM re-rank are billed HERE, in this service. They
-        # are reported per search so a caller can see what discovery cost — the finder has its own
-        # lifecycle, so this is not part of any one question's bill.
-        led = llm.start_ledger()
-        # results are ardEntryProjections: only `identifier` is required, and `score`/`source`
-        # ride alongside as the transport's own annotations.
-        results = []
-        try:
-            matches = index.search_many(texts, k, sources=req.get("sources"),
-                                        rerank=req.get("rerank", True), rerank_query=text)
-        except index.RelevanceScoringError:
-            return self._json(503, {
-                "code": "relevance_scoring_failed",
-                "error": ("table relevance scoring is temporarily unavailable; embedding "
-                          "similarity was not used as a substitute"),
-                "usage": led.snapshot(),
-            })
-        except index.NoRelevantTablesError as e:
-            return self._json(200, {
-                "@context": [ARD_CONTEXT, {"okf": OKF_NS}],
-                "results": [], "referrals": [], "pageToken": None,
-                "eligibility": {"status": "no_match", "threshold": e.threshold,
-                                "topScore": e.top_score},
-                "usage": led.snapshot(),
-            })
-        for h in matches:
-            e = _entry_from_meta({"identifier": h["identifier"], "title": h["title"],
-                                  "description": h.get("description", ""),
-                                  "queries": h.get("queries") or []})
-            e.update({"score": h["score"], "source": SELF})
-            results.append(_wire(e))
-        self._json(200, {"@context": [ARD_CONTEXT, {"okf": OKF_NS}],
-                         "results": results, "referrals": [], "pageToken": None,
-                         "usage": led.snapshot()})
+            yield
+        finally:
+            if owns_client:
+                await llm.close_async_client()
 
-    def log_message(self, *a):
-        pass
+    routes = [
+        Route("/", root),
+        Route("/healthz", healthz),
+        Route("/healthz/", healthz),
+        Route("/.well-known/ard.json", manifest_endpoint),
+        Route("/.well-known/ard.json/", manifest_endpoint),
+        Route("/agents/entry", entry_endpoint),
+        Route("/agents/entry/", entry_endpoint),
+        Route("/agents", agents_endpoint),
+        Route("/agents/", agents_endpoint),
+        Route("/explore", explore_endpoint, methods=["POST"]),
+        Route("/explore/", explore_endpoint, methods=["POST"]),
+        Route("/search", search_endpoint, methods=["POST"]),
+        Route("/search/", search_endpoint, methods=["POST"]),
+    ]
+    middleware = [Middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"], expose_headers=["Retry-After"], max_age=86400)]
+    application = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
+    application.state.llm_client = llm_client
+    return application
+
+
+app = create_app()
 
 
 if __name__ == "__main__":
@@ -512,14 +570,9 @@ if __name__ == "__main__":
             print(f"  - {error}", file=sys.stderr)
         print(f"Run: {sys.executable} tools/build_registry_release.py", file=sys.stderr)
         raise SystemExit(1)
+    with open(index.CACHE_META) as stream:
+        table_count = len(json.load(stream))
     print(f"ARD Agent Finder on {SELF} (bind {HOST}:{PORT})  (POST /search) — "
-          f"{len(json.load(open(index.CACHE_META)))} tables")
-    server = HTTPServer((HOST, PORT), Handler)
-    def _stop(*_):
-        threading.Thread(target=server.shutdown, daemon=True).start()
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-    try:
-        server.serve_forever()
-    finally:
-        server.server_close()
+          f"{table_count} tables")
+    import uvicorn
+    uvicorn.run(app, host=HOST, port=PORT, workers=1)

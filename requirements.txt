@@ -1,6 +1,9 @@
 numpy>=1.24
 pyyaml>=6.0
 openai>=1.40          # the one SDK for Azure OpenAI, OpenAI, Gemini (OpenAI-compat), and local (Ollama)
+starlette>=0.40       # async Agent Finder and Resource Raiser ASGI applications
+uvicorn>=0.30         # single-worker event-loop server; scale out with instances, not threads
+httpx>=0.27           # shared async service and publisher HTTP clients
 psycopg[binary]>=3.1  # IRS grant graph when GRANTS_URL / DATABASE_URL selects Postgres
 
 # Optional — only for the BigQuery population sources (sec-bq, irs-990-bq, census-acs-bq):

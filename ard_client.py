@@ -5,7 +5,11 @@ This is the discovery seam: everything that needs to find a table goes through
 here, so the registry can be a separate process (or remote) rather than an
 in-process call. Configure the finder with AGENT_FINDER_URL.
 """
-import os, json, socket, urllib.parse, urllib.request, urllib.error, threading
+import asyncio, os, json, socket, urllib.parse, urllib.request, urllib.error, threading
+
+import httpx
+
+import runtime
 
 BASE = os.getenv("AGENT_FINDER_URL", "http://127.0.0.1:8088").rstrip("/")
 # Generous default: a rerank on a slow LOCAL model can take minutes; a too-short timeout was raising
@@ -98,6 +102,60 @@ def usage():
     return getattr(_TALLY, "u", None)
 
 
+def create_async_http_client(**kwargs):
+    """Create the application-owned client used by the async harness path.
+
+    Ownership is deliberately outside this module: one Resource Raiser ASGI application will
+    create one client at startup, place it on each QueryContext, and close it at shutdown. That
+    avoids a client singleton tied to whichever event loop happened to call this module first.
+    """
+    kwargs.setdefault("timeout", TIMEOUT)
+    return httpx.AsyncClient(**kwargs)
+
+
+def _async_http_client(context):
+    context.check()
+    if context.http_client is None:
+        raise RuntimeError("async Agent Finder access requires QueryContext.http_client")
+    return context.http_client
+
+
+def _record_async_usage(context, payload):
+    if context.discovery_ledger is not None and isinstance(payload, dict):
+        context.discovery_ledger.add(payload.get("usage"))
+
+
+async def _arequest(context, method, path, *, params=None, json_body=None):
+    """Make one cancellable Finder request through the caller-owned shared HTTPX client."""
+    client = _async_http_client(context)
+    remaining = context.remaining()
+    timeout = TIMEOUT if remaining is None else min(TIMEOUT, remaining)
+    try:
+        response = await context.wait(client.request(
+            method, BASE + path, params=params, json=json_body, timeout=timeout))
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except httpx.TimeoutException as exc:
+        raise SystemExit(f"agent finder unreachable or too slow at {BASE} ({exc})") from exc
+    except httpx.RequestError as exc:
+        raise SystemExit(f"agent finder unreachable at {BASE} ({exc})") from exc
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    _record_async_usage(context, payload)
+    return response, payload
+
+
+async def _aget_async(path, *, context, params=None):
+    response, payload = await _arequest(context, "GET", path, params=params)
+    if response.status_code == 404:
+        return None
+    if response.is_error:
+        raise SystemExit(f"agent finder error {response.status_code} for {path}")
+    return payload
+
+
 def _get(path, params=None):
     """GET against the Agent Finder. The registry is a service, so enumerating it goes over the
     same API as searching it rather than through the index file behind its back."""
@@ -157,6 +215,42 @@ def health():
     return _get("/healthz") or {"ok": False}
 
 
+async def agents_async(publisher=None, q="", page_size=50, page_token="", *, context):
+    params = {"pageSize": page_size}
+    if publisher:
+        params["publisher"] = publisher
+    if q:
+        params["q"] = q
+    if page_token:
+        params["pageToken"] = page_token
+    return await _aget_async("/agents", context=context, params=params) or {
+        "entries": [], "totalSize": 0, "pageToken": None}
+
+
+async def entry_async(identifier, *, context):
+    return await _aget_async("/agents/entry", context=context, params={"id": identifier})
+
+
+async def explore_async(field="publisher", limit=100, *, context):
+    body = {"query": {"text": ""},
+            "resultType": {"facets": [{"field": field, "limit": limit}]}}
+    try:
+        response, payload = await _arequest(context, "POST", "/explore", json_body=body)
+        return payload if not response.is_error else {"facets": {}}
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except SystemExit:
+        return {"facets": {}}
+
+
+async def manifest_async(*, context):
+    return await _aget_async("/.well-known/ard.json", context=context) or {}
+
+
+async def health_async(*, context):
+    return await _aget_async("/healthz", context=context) or {"ok": False}
+
+
 def search_many(texts, k=10, sources=None, rerank=True, rerank_query=None):
     """One finder request for several phrasings; the finder embeds them together and reranks once."""
     texts = list(dict.fromkeys(str(text).strip() for text in texts if str(text).strip()))
@@ -189,6 +283,14 @@ def search_many(texts, k=10, sources=None, rerank=True, rerank_query=None):
         raise SystemExit(f"agent finder unreachable or too slow at {BASE} ({e}). "
                          f"Start it (python3 agent_finder.py); for slow local models raise "
                          f"AGENT_FINDER_TIMEOUT.")
+    return _search_results(payload)
+
+
+def search(text, k=10, sources=None, rerank=True):
+    return search_many([text], k=k, sources=sources, rerank=rerank, rerank_query=text)
+
+
+def _search_results(payload):
     eligibility = payload.get("eligibility") or {}
     if eligibility.get("status") == "no_match":
         top, threshold = eligibility.get("topScore"), eligibility.get("threshold")
@@ -196,17 +298,34 @@ def search_many(texts, k=10, sources=None, rerank=True, rerank_query=None):
         raise NoRelevantTablesError(
             f"no indexed table cleared the LLM relevance threshold ({observed}; "
             f"threshold {threshold:g}); nothing was fetched")
-    results = payload.get("results", [])
-    # ARD v0.91 identifiers are URNs. Everything downstream addresses a table by its OKF document
-    # path (that is what the planner, the accessor and the fetchers all take), so map the wire form
-    # back here — this client is the seam between the protocol and the engine.
-    return [{"identifier": x.get("okf:sourceDocument") or x["identifier"],
-             "urn": x["identifier"],
-             "title": x.get("displayName", ""),
-             "score": x.get("score"),
-             "publisher": x.get("okf:source") or (x.get("tags") or [None])[0]}
-            for x in results]
+    return [{"identifier": item.get("okf:sourceDocument") or item["identifier"],
+             "urn": item["identifier"],
+             "title": item.get("displayName", ""),
+             "score": item.get("score"),
+             "publisher": item.get("okf:source") or (item.get("tags") or [None])[0]}
+            for item in payload.get("results", [])]
 
 
-def search(text, k=10, sources=None, rerank=True):
-    return search_many([text], k=k, sources=sources, rerank=rerank, rerank_query=text)
+async def search_many_async(texts, k=10, sources=None, rerank=True, rerank_query=None, *, context):
+    """Async Finder discovery through the shared client carried by QueryContext."""
+    texts = list(dict.fromkeys(str(text).strip() for text in texts if str(text).strip()))
+    if not texts:
+        return []
+    body = {"query": {"text": rerank_query or texts[0], "texts": texts},
+            "pageSize": k, "sources": sources, "rerank": rerank}
+    response, payload = await _arequest(context, "POST", "/search", json_body=body)
+    if response.is_error:
+        if payload.get("code") == "relevance_scoring_failed":
+            raise RelevanceScoringError(payload.get("error") or
+                                        "table relevance scoring is temporarily unavailable")
+        if payload.get("code") == "query_cancelled":
+            context.cancel()
+            raise runtime.QueryCancelled(payload.get("error") or "Agent Finder query cancelled")
+        raise SystemExit(f"agent finder error {response.status_code}: "
+                         f"{payload.get('error') or response.reason_phrase}")
+    return _search_results(payload)
+
+
+async def search_async(text, k=10, sources=None, rerank=True, *, context):
+    return await search_many_async([text], k=k, sources=sources, rerank=rerank,
+                                   rerank_query=text, context=context)

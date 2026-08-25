@@ -12,12 +12,12 @@ embedding key. The /search shape mirrors ARD so this is swappable for a full reg
 Set ARD_RERANK=0 to skip the second-stage LLM re-rank (much faster on slow/local models; the
 embedding prefilter alone is usually enough).
 """
-import os, sys, glob, json, hashlib, shutil
+import asyncio, os, sys, glob, json, hashlib, shutil
 from datetime import datetime, timezone
 import numpy as np
 import yaml
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), "..")))
-import llm            # provider-agnostic embeddings (Azure OpenAI | OpenAI | Gemini)
+import llm, runtime   # provider-agnostic embeddings (Azure OpenAI | OpenAI | Gemini)
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 SOURCES = os.path.join(ROOT, "sources")
@@ -391,28 +391,38 @@ def _rerank(query, candidates, k):
     full card for each (title, description, and the questions people ask for it)."""
     sys.path.insert(0, ROOT)                                   # driver.py lives at the project root
     import driver
-    listing = "\n".join(_card(i, c) for i, c in enumerate(candidates))
+    system, user = _rerank_messages(query, candidates, k)
     try:
         ranked = json.loads(driver.ask_llm(
-            "You rank candidate data tables by how well each ANSWERS the user's query. Judge each "
-            "candidate by its full card (title, description, and the example questions people ask for "
-            "it): match the table's SUBJECT and SCOPE (the kind of entity, organization, or place it "
-            "covers) and its measure to what the question is about. "
-            "IMPORTANT: this stage is for RECALL, not final selection. KEEP every genuinely relevant "
-            "table, INCLUDING close variants, siblings, and alternative definitions of the same measure "
-            "(e.g. keep both a legacy and a current revenue concept; keep basic AND diluted EPS). Do NOT "
-            "drop a candidate merely because another looks more 'headline' — the final choice is made "
-            "downstream from the actual reported data, and a dropped candidate can never be chosen. "
-            "For an amount prefer a dollar/count/median value; for a rate or share prefer a percentage. "
-            f'Return JSON {{"ranked":[{{"i":<candidate number>,"score":<0-100 relevance>}}]}} '
-            f"for the {k} most relevant tables, best first. Omit only the CLEARLY irrelevant. "
-            "Return only the compact JSON object; do not explain any choice.",
-            f"Query: {query}\n\nCandidate tables:\n{listing}", json_mode=True,
-            model=llm.rerank_model(),
+            system, user, json_mode=True, model=llm.rerank_model(),
             max_tokens=int(os.getenv("ARD_RERANK_MAX_TOKENS", "400")),
             reasoning_effort=os.getenv("ARD_RERANK_REASONING_EFFORT", "low"))).get("ranked", [])
     except Exception:
         return None
+    return _ranked_candidates(ranked, candidates, k)
+
+
+def _rerank_messages(query, candidates, k):
+    """One prompt shared by the compatibility and async paths so their ranking cannot drift."""
+    listing = "\n".join(_card(i, c) for i, c in enumerate(candidates))
+    system = (
+        "You rank candidate data tables by how well each ANSWERS the user's query. Judge each "
+        "candidate by its full card (title, description, and the example questions people ask for "
+        "it): match the table's SUBJECT and SCOPE (the kind of entity, organization, or place it "
+        "covers) and its measure to what the question is about. "
+        "IMPORTANT: this stage is for RECALL, not final selection. KEEP every genuinely relevant "
+        "table, INCLUDING close variants, siblings, and alternative definitions of the same measure "
+        "(e.g. keep both a legacy and a current revenue concept; keep basic AND diluted EPS). Do NOT "
+        "drop a candidate merely because another looks more 'headline' — the final choice is made "
+        "downstream from the actual reported data, and a dropped candidate can never be chosen. "
+        "For an amount prefer a dollar/count/median value; for a rate or share prefer a percentage. "
+        f'Return JSON {{"ranked":[{{"i":<candidate number>,"score":<0-100 relevance>}}]}} '
+        f"for the {k} most relevant tables, best first. Omit only the CLEARLY irrelevant. "
+        "Return only the compact JSON object; do not explain any choice.")
+    return system, f"Query: {query}\n\nCandidate tables:\n{listing}"
+
+
+def _ranked_candidates(ranked, candidates, k):
     if not isinstance(ranked, list):
         return None
     scored = []
@@ -429,6 +439,20 @@ def _rerank(query, candidates, k):
         top = max((candidate["score"] for candidate in scored), default=None)
         raise NoRelevantTablesError(top)
     return eligible
+
+
+async def _rerank_async(query, candidates, k, context):
+    system, user = _rerank_messages(query, candidates, k)
+    try:
+        ranked = json.loads(await llm.chat_async(
+            system, user, context=context, json_mode=True, model=llm.rerank_model(),
+            stage="rerank", max_tokens=int(os.getenv("ARD_RERANK_MAX_TOKENS", "400")),
+            reasoning_effort=os.getenv("ARD_RERANK_REASONING_EFFORT", "low"))).get("ranked", [])
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except Exception:
+        return None
+    return _ranked_candidates(ranked, candidates, k)
 
 
 _STORE = None
@@ -504,6 +528,41 @@ def search(query, k=5, prefilter=None, sources=None, rerank=True):
     """Two-stage retrieval for one query; see search_many for the shared implementation."""
     return search_many([query], k=k, prefilter=prefilter, sources=sources, rerank=rerank,
                        rerank_query=query)
+
+
+async def search_many_async(queries, k=5, prefilter=None, sources=None, rerank=True,
+                            rerank_query=None, *, context):
+    """Async online search path; immutable numpy similarity remains an in-loop memory operation."""
+    if os.getenv("ARD_RERANK", "1").lower() in ("0", "false", "no"):
+        rerank = False
+    queries = list(dict.fromkeys(str(q).strip() for q in queries if str(q).strip()))
+    if not queries:
+        return []
+    prefilter = max(prefilter or PREFILTER, k)
+    vecs, meta = _store()
+    q = normed(np.asarray(await llm.embed_async(queries, context=context, stage="embed-query"),
+                          dtype=np.float32))
+    scores = np.max(vecs @ q.T, axis=1)
+    candidates = []
+    for i in np.argsort(-scores):
+        m = meta[i]
+        if sources and _srcdir(m["identifier"]) not in sources:
+            continue
+        candidates.append({**m, "embed_score": round(float(scores[i]) * 100, 1)})
+        if len(candidates) >= prefilter:
+            break
+    if not rerank:
+        return [{**candidate, "score": candidate["embed_score"]}
+                for candidate in candidates[:k]]
+    reranked = await _rerank_async(rerank_query or queries[0], candidates, k, context)
+    if reranked is None:
+        raise RelevanceScoringError("LLM table relevance scoring failed")
+    return reranked
+
+
+async def search_async(query, k=5, prefilter=None, sources=None, rerank=True, *, context):
+    return await search_many_async([query], k=k, prefilter=prefilter, sources=sources,
+                                   rerank=rerank, rerank_query=query, context=context)
 
 
 if __name__ == "__main__":
