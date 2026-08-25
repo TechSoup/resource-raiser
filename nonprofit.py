@@ -29,6 +29,101 @@ def resolve(org):
     return {"ein": ein, "name": name}
 
 
+async def resolve_async(org, *, context):
+    if str(org).isdigit():
+        data = await driver.accessor_async(ACCESS, "organization", ein=str(org), context=context)
+        return {"ein": int(org), "name": data["organization"]["name"]}
+    data = await driver.accessor_async(ACCESS, "search", q=org, context=context)
+    organizations = data.get("organizations", [])
+    if not organizations:
+        raise SystemExit(f"no nonprofit found for {org!r}")
+    return {"ein": organizations[0]["ein"], "name": organizations[0]["name"]}
+
+
+async def federal_funding_async(org, *, context):
+    name = (await resolve_async(org, context=context))["name"] if str(org).isdigit() else org
+    data = await driver.accessor_async(
+        "sources/usaspending/federal-awards-received.md", "awards_by_recipient",
+        org=name, context=context)
+    awards = data.get("results", []) if isinstance(data, dict) else (data or [])
+    total = sum(award.get("Award Amount") or 0 for award in awards)
+    return {"organization": name, "federal_awards_total_usd": total, "award_count": len(awards),
+            "source": "USAspending.gov", "note": "sum of the largest returned awards"}
+
+
+async def fetch_np_async(field, org, period="latest", *, context):
+    ein = (await resolve_async(org, context=context))["ein"]
+    data = await driver.accessor_async(ACCESS, "organization", ein=ein, context=context)
+    filings = data.get("filings_with_data", [])
+    if not filings:
+        raise SystemExit(f"no 990 financial data for {org!r}")
+    year = re.sub(r"\D", "", period or "")
+    filing = (next((item for item in filings if str(item.get("tax_prd_yr")) == year), None)
+              if len(year) == 4 else None)
+    filing = filing or max(filings, key=lambda item: item.get("tax_prd_yr", 0))
+    return {"organization": data["organization"]["name"], "ein": ein, "field": field,
+            "period": f"FY{filing.get('tax_prd_yr')}", "value_usd": filing.get(field),
+            "source": "IRS Form 990 (via ProPublica Nonprofit Explorer)"}
+
+
+async def classify_async(org, *, context):
+    resolved = await resolve_async(org, context=context)
+    data = await driver.accessor_async(
+        ACCESS, "organization", ein=resolved["ein"], context=context)
+    organization = data["organization"]
+    filings = data.get("filings_with_data", [])
+    subsection = filings[0].get("subseccd") if filings else None
+    latest = max((filing.get("tax_prd_yr", 0) for filing in filings), default=None)
+    return {"organization": organization.get("name", resolved["name"]), "ein": resolved["ein"],
+            "subsection": subsection, "is_501c3": subsection == 3,
+            "ntee_code": organization.get("ntee_code"), "ruling_date": organization.get("ruling_date"),
+            "latest_filing_year": latest, "actively_filing": bool(latest),
+            "source": "IRS Form 990 (via ProPublica Nonprofit Explorer)"}
+
+
+async def bmf_async(field, org, *, context):
+    resolved = await resolve_async(org, context=context)
+    data = await driver.accessor_async(
+        ACCESS, "organization", ein=resolved["ein"], context=context)
+    organization = data["organization"]
+    base = {"organization": organization.get("name", resolved["name"]), "ein": resolved["ein"],
+            "source": "IRS Exempt Organization Business Master File (via ProPublica Nonprofit Explorer)"}
+    if field == "location":
+        return {**base, "field": "headquarters",
+                "value": ", ".join(value for value in
+                                    [organization.get("city"), organization.get("state")] if value) or None,
+                "address": organization.get("address"), "zipcode": organization.get("zipcode")}
+    if field == "ntee":
+        code = organization.get("ntee_code") or ""
+        return {**base, "field": "ntee_sector", "ntee_code": code or None,
+                "value": NTEE_MAJOR.get(code[:1].upper()) if code else None}
+    if field == "foundation":
+        code = str(organization.get("foundation_code") or "").zfill(2)
+        return {**base, "field": "foundation_type", "foundation_code": code,
+                "value": FOUNDATION.get(code, "Unclassified")}
+    if field == "deductibility":
+        code = str(organization.get("deductibility_code") or "")
+        return {**base, "field": "deductibility", "deductibility_code": code,
+                "value": DEDUCT.get(code, "Unknown")}
+    if field == "ruling_date":
+        ruling = str(organization.get("ruling_date") or "")
+        return {**base, "field": "ruling_date",
+                "value": f"{ruling[:4]}-{ruling[4:6]}" if len(ruling) >= 6 else ruling or None}
+    if field == "eligibility":
+        status = str(organization.get("exempt_organization_status_code") or "")
+        subsection = str(organization.get("subsection_code") or "")
+        active = status in ("1", "2")
+        return {**base, "field": "eligibility_status",
+                "exempt_status": EO_STATUS.get(status, f"Unknown (code {status})") if status else None,
+                "is_501c3": subsection in ("03", "3"),
+                "contributions_deductible": str(organization.get("deductibility_code") or "") == "1",
+                "value": ("Active 501(c)(3) in good standing" if active and subsection in ("03", "3")
+                          else "Active tax-exempt organization" if active
+                          else EO_STATUS.get(status, "status unknown")),
+                "eligible_for_nonprofit_programs": active}
+    return {**base, "field": field, "value": organization.get(field)}
+
+
 def federal_funding(org):
     """Federal grant/assistance awards to this org (USAspending), summed. USAspending
     matches by NAME, so resolve an EIN to its name first."""

@@ -14,7 +14,7 @@ when possible. The funder EIN is always present (it is the filer); recipient EIN
 Schedule I but not for 990-PF, so reverse also falls back to a name match and says which it used.
 Credential-free and local: the edge table is a small sqlite file, so this needs no GCP project.
 """
-import os, sqlite3, re, decimal, threading
+import asyncio, os, sqlite3, re, decimal, threading
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DB = os.getenv("GRANTS_DB") or os.path.join(ROOT, "data", "990", "grants.sqlite")
@@ -149,6 +149,64 @@ def _conn():
     if URL:
         return _Pg(URL)
     return _Sqlite(DB)
+
+
+class AsyncGrantPool:
+    """Application-owned psycopg 3 pool. Server mode deliberately has no SQLite fallback."""
+    def __init__(self, url=None, min_size=1, max_size=10):
+        url = url or os.getenv("GRANTS_URL") or os.getenv("DATABASE_URL")
+        if not url:
+            raise RuntimeError("async grant server mode requires GRANTS_URL or DATABASE_URL; "
+                               "SQLite is offline/CLI-only")
+        from psycopg_pool import AsyncConnectionPool
+        self._pool_class = AsyncConnectionPool
+        self._pool_args = (url, min_size, max_size)
+        self._open_lock = asyncio.Lock()
+        self.pool = None
+
+    async def open(self, *, context=None):
+        """Open on demand so an optional grants outage cannot block application startup."""
+        if self.pool is not None:
+            return self
+        acquire = self._open_lock.acquire()
+        await (context.wait(acquire) if context is not None else acquire)
+        try:
+            if self.pool is not None:
+                return self
+            url, min_size, max_size = self._pool_args
+            pool = self._pool_class(url, min_size=min_size, max_size=max_size,
+                                    open=False, kwargs={"autocommit": True})
+            try:
+                opening = pool.open(wait=True)
+                await (context.wait(opening) if context is not None else opening)
+            except BaseException:
+                await pool.close()
+                raise
+            self.pool = pool
+        finally:
+            self._open_lock.release()
+        return self
+
+    async def close(self):
+        if self.pool is not None:
+            pool, self.pool = self.pool, None
+            await pool.close()
+
+    async def query(self, sql, params=(), *, context):
+        await self.open(context=context)
+        async def work():
+            async with self.pool.connection() as connection:
+                async with connection.cursor() as cursor:
+                    await cursor.execute(_Pg._translate(sql), tuple(params))
+                    rows = await cursor.fetchall()
+                    return [tuple(_Rows._plain(value) for value in row) for row in rows]
+        return await context.wait(work())
+
+
+async def _aq(sql, params=(), *, context):
+    if context.grant_pool is None:
+        raise RuntimeError("async grant access requires QueryContext.grant_pool")
+    return await context.grant_pool.query(sql, params, context=context)
 
 
 def available():
@@ -515,6 +573,245 @@ def top_grantmakers(n=10, ascending=False):
              "value_display": _disp(r[1]), "grants": r[2]} for r in rows]
     return {"measure": "total granted", "complete": True, "ranking": rank,
             "top": rank[0] if rank else None, "source": SOURCE}
+
+
+# --- asynchronous server path ---------------------------------------------------------------
+async def _resolve_async(name, context):
+    if _ein(name):
+        return _ein(name), str(name)
+    try:
+        import nonprofit
+        result = await nonprofit.resolve_async(name, context=context)
+        return _ein(result["ein"]), result["name"]
+    except Exception:
+        return None, str(name)
+
+
+async def forward_async(name, n=12, *, context):
+    ein, display = await _resolve_async(name, context)
+    rows, total, method = [], [], "name"
+    if ein:
+        rows = await _aq(
+            "SELECT recipient_name, MAX(recipient_ein), SUM(amount) amt, COUNT(*) k "
+            "FROM grant_edges WHERE funder_ein=? AND amount>0 GROUP BY recipient_name "
+            "ORDER BY amt DESC LIMIT ?", (ein, n), context=context)
+        if rows:
+            total = await _aq("SELECT SUM(amount), COUNT(*), COUNT(DISTINCT recipient_name) "
+                              "FROM grant_edges WHERE funder_ein=? AND amount>0", (ein,), context=context)
+            method = "EIN"
+    if not rows:
+        needle = f"%{name.upper()}%"
+        rows = await _aq(
+            "SELECT recipient_name, MAX(recipient_ein), SUM(amount) amt, COUNT(*) k "
+            "FROM grant_edges WHERE funder_name LIKE ? AND amount>0 GROUP BY recipient_name "
+            "ORDER BY amt DESC LIMIT ?", (needle, n), context=context)
+        total = await _aq("SELECT SUM(amount), COUNT(*), COUNT(DISTINCT recipient_name) "
+                          "FROM grant_edges WHERE funder_name LIKE ? AND amount>0", (needle,), context=context)
+        display = name
+    if not rows:
+        return {"direction": "grants_made", "funder": display, "grant_count": 0,
+                "note": "no grants found in the 2022-2024 IRS 990 e-file data for this funder",
+                "source": SOURCE}
+    recipients = [{"recipient": row[0], "amount": row[2], "amount_display": _disp(row[2]),
+                   "grants": row[3]} for row in rows]
+    totals = total[0]
+    return {"direction": "grants_made", "funder": display, "matched_by": method,
+            "total_granted_usd": totals[0], "total_granted_display": _disp(totals[0]),
+            "grant_count": totals[1], "recipient_count": totals[2], "recipients": recipients,
+            "top": recipients[0], "source": SOURCE}
+
+
+async def reverse_async(name, n=12, *, context):
+    ein, display = await _resolve_async(name, context)
+    needle = f"%{name.upper()}%"
+    dominant = await _aq(
+        "SELECT recipient_ein, MAX(recipient_name), SUM(amount) amt FROM grant_edges "
+        "WHERE recipient_name LIKE ? AND recipient_ein<>'' AND amount>0 "
+        "GROUP BY recipient_ein ORDER BY amt DESC LIMIT 1", (needle,), context=context)
+    use_ein = dominant[0][0] if dominant else None
+    if not use_ein and ein:
+        exists = await _aq("SELECT 1 FROM grant_edges WHERE recipient_ein=? AND amount>0 LIMIT 1",
+                           (ein,), context=context)
+        use_ein = ein if exists else None
+    if use_ein:
+        where, params, method = "recipient_ein=?", (use_ein,), "EIN"
+        if dominant:
+            display = dominant[0][1]
+    else:
+        where, params, method, display = "recipient_name LIKE ?", (needle,), "name", name
+    rows = await _aq(
+        f"SELECT MAX(funder_name), funder_ein, SUM(amount) amt, COUNT(*) k FROM grant_edges "
+        f"WHERE {where} AND amount>0 GROUP BY funder_ein ORDER BY amt DESC LIMIT ?",
+        params + (n,), context=context)
+    total = await _aq(f"SELECT SUM(amount), COUNT(DISTINCT funder_ein) FROM grant_edges "
+                      f"WHERE {where} AND amount>0", params, context=context)
+    if not rows:
+        return {"direction": "funded_by", "recipient": display, "funder_count": 0,
+                "note": "no incoming grants found in the 2022-2024 IRS 990 e-file data for this recipient",
+                "source": SOURCE}
+    funders = [{"funder": row[0], "amount": row[2], "amount_display": _disp(row[2]),
+                "grants": row[3]} for row in rows]
+    totals = total[0]
+    return {"direction": "funded_by", "recipient": display, "matched_by": method,
+            "total_received_usd": totals[0], "total_received_display": _disp(totals[0]),
+            "funder_count": totals[1], "funders": funders, "top": funders[0], "source": SOURCE}
+
+
+async def top_grantmakers_async(n=10, ascending=False, *, context):
+    order = "ASC" if ascending else "DESC"
+    rows = await _aq(
+        _rollup_or(f"SELECT funder_name, amount amt, grants k FROM agg_funder "
+                   f"ORDER BY amt {order} LIMIT ?",
+                   f"SELECT MAX(funder_name), SUM(amount) amt, COUNT(*) k FROM grant_edges "
+                   f"WHERE amount>0 GROUP BY funder_ein ORDER BY amt {order} LIMIT ?"),
+        (n,), context=context)
+    ranking = [{"label": row[0], "entity": f"grantmaker/{row[0]}", "value": row[1],
+                "value_display": _disp(row[1]), "grants": row[2]} for row in rows]
+    return {"measure": "total granted", "complete": True, "ranking": ranking,
+            "top": ranking[0] if ranking else None, "source": SOURCE}
+
+
+async def biggest_recipients_async(n=10, by="dollars", ascending=False, *, context):
+    order = "COUNT(DISTINCT funder_ein)" if by == "funders" else "SUM(amount)"
+    direction = "ASC" if ascending else "DESC"
+    rows = await _aq(_rollup_or(
+        f"SELECT recipient_name, amount amt, funders fn FROM agg_recipient WHERE recipient_name<>'' "
+        f"ORDER BY {'funders' if by == 'funders' else 'amount'} {direction} LIMIT ?",
+        f"SELECT recipient_name, SUM(amount) amt, COUNT(DISTINCT funder_ein) fn FROM grant_edges "
+        f"WHERE amount>0 AND recipient_name<>'' GROUP BY recipient_name "
+        f"ORDER BY {order} {direction} LIMIT ?"), (n,), context=context)
+    ranking = [{"label": row[0], "entity": f"recipient/{row[0]}",
+                "value": row[2] if by == "funders" else row[1],
+                "value_display": f"{row[2]} funders" if by == "funders" else _disp(row[1]),
+                "received_display": _disp(row[1]), "funders": row[2]} for row in rows]
+    return {"measure": "distinct funders" if by == "funders" else "total received",
+            "complete": True, "ranking": ranking, "top": ranking[0] if ranking else None,
+            "source": SOURCE}
+
+
+async def funders_above_async(threshold, n=60, ascending=False, *, context):
+    direction, operator = ("ASC", "<") if ascending else ("DESC", ">")
+    rows = await _aq(_rollup_or(
+        f"SELECT funder_name, amount amt, grants k FROM agg_funder WHERE amount {operator} ? "
+        f"ORDER BY amt {direction} LIMIT ?",
+        f"SELECT MAX(funder_name), SUM(amount) amt, COUNT(*) k FROM grant_edges WHERE amount>0 "
+        f"GROUP BY funder_ein HAVING SUM(amount) {operator} ? ORDER BY amt {direction} LIMIT ?"),
+        (float(threshold), n), context=context)
+    ranking = [{"label": row[0], "entity": f"grantmaker/{row[0]}", "value": row[1],
+                "value_display": _disp(row[1]), "grants": row[2]} for row in rows]
+    return {"measure": "total granted", "matches": len(ranking),
+            "threshold_display": f"{'under' if ascending else 'over'} {_disp(float(threshold))}",
+            "complete": True, "ranking": ranking, "source": SOURCE}
+
+
+async def overview_async(year=None, *, context):
+    if ROLLUPS and not year:
+        summary = (await _aq(
+            "SELECT grants, amount, avg_amount, funders, recipients FROM agg_overview",
+            context=context))[0]
+    else:
+        where, params = ("WHERE amount>0 AND tax_year=?", (year,)) if year else ("WHERE amount>0", ())
+        summary = (await _aq(
+            "SELECT COUNT(*), SUM(amount), AVG(amount), COUNT(DISTINCT funder_ein), "
+            f"COUNT(DISTINCT recipient_name) FROM grant_edges {where}", params, context=context))[0]
+    years = await _aq(_rollup_or(
+        "SELECT tax_year, grants, amount FROM agg_year ORDER BY tax_year",
+        "SELECT tax_year, COUNT(*), SUM(amount) FROM grant_edges WHERE amount>0 "
+        "GROUP BY tax_year ORDER BY tax_year"), context=context)
+    count, total, average, funders, recipients = summary
+    return {"direction": "overview", "scope": f"tax year {year}" if year else "2022-2024 filings",
+            "grant_count": count or 0, "total_display": _disp(total or 0),
+            "avg_grant_display": _disp(average or 0), "funder_count": funders or 0,
+            "recipient_count": recipients or 0,
+            "by_year": [{"year": y, "grants": n, "total_display": _disp(value or 0)}
+                        for y, n, value in years], "source": SOURCE}
+
+
+async def geo_async(mode="recipients", from_state=None, to_state=None, n=12, ascending=False,
+                    *, context):
+    direction = "ASC" if ascending else "DESC"
+    if mode == "flow" and from_state and to_state:
+        rows = await _aq(_rollup_or(
+            "SELECT SUM(amount), SUM(grants) FROM agg_state WHERE funder_state=? AND recipient_state=?",
+            "SELECT SUM(amount), COUNT(*) FROM grant_edges WHERE funder_state=? "
+            "AND recipient_state=? AND amount>0"), (from_state, to_state), context=context)
+        row = rows[0]
+        return {"direction": "geo_flow", "from_state": _ABBR.get(from_state, from_state),
+                "to_state": _ABBR.get(to_state, to_state), "total_display": _disp(row[0] or 0),
+                "grant_count": row[1] or 0, "source": SOURCE}
+    column = "funder_state" if mode == "funders" else "recipient_state"
+    rows = await _aq(_rollup_or(
+        f"SELECT {column}, SUM(amount) amt, SUM(grants) k FROM agg_state WHERE {column} IS NOT NULL "
+        f"AND {column}<>'' GROUP BY {column} ORDER BY amt {direction} LIMIT ?",
+        f"SELECT {column}, SUM(amount) amt, COUNT(*) k FROM grant_edges WHERE amount>0 "
+        f"AND {column} IS NOT NULL AND {column}<>'' GROUP BY {column} "
+        f"ORDER BY amt {direction} LIMIT ?"), (n,), context=context)
+    ranking = [{"label": _ABBR.get(row[0], row[0]), "entity": f"state/{row[0]}",
+                "value": row[1], "value_display": _disp(row[1]), "grants": row[2]} for row in rows]
+    return {"measure": f"total grant dollars {'sent' if mode == 'funders' else 'received'}",
+            "complete": True, "ranking": ranking, "top": ranking[0] if ranking else None,
+            "source": SOURCE}
+
+
+async def grants_by_cause_async(cause=None, n=15, *, context):
+    major, word = cause_of(cause) if cause else (None, None)
+    if not ROLLUPS:
+        raise RuntimeError("async grant server mode requires Postgres rollup tables")
+    if major:
+        rows = await _aq("SELECT category, amount, grants FROM agg_cause WHERE major=?",
+                         (major,), context=context)
+        row = rows[0] if rows else None
+        return {"direction": "by_cause_one", "cause": row[0] if row and row[0] else word,
+                "total_display": _disp((row[1] if row else 0) or 0),
+                "grant_count": (row[2] if row else 0) or 0, "coverage": _COVERAGE,
+                "source": SOURCE}
+    rows = await _aq("SELECT category, amount amt, grants k FROM agg_cause "
+                     "ORDER BY amt DESC LIMIT ?", (n,), context=context)
+    ranking = [{"label": row[0], "entity": f"cause/{row[0]}", "value": row[1],
+                "value_display": _disp(row[1]), "grants": row[2]} for row in rows]
+    return {"measure": "grant dollars by cause", "complete": True, "ranking": ranking,
+            "top": ranking[0] if ranking else None, "coverage": _COVERAGE, "source": SOURCE}
+
+
+async def _funder_recipients_async(name, context):
+    ein, display = await _resolve_async(name, context)
+    rows = []
+    if ein:
+        rows = await _aq("SELECT recipient_name, SUM(amount) FROM grant_edges WHERE funder_ein=? "
+                         "AND amount>0 GROUP BY recipient_name", (ein,), context=context)
+    if rows:
+        return {row[0]: row[1] for row in rows}, display
+    rows = await _aq("SELECT recipient_name, SUM(amount) FROM grant_edges WHERE funder_name LIKE ? "
+                     "AND amount>0 GROUP BY recipient_name", (f"%{name.upper()}%",), context=context)
+    return {row[0]: row[1] for row in rows}, name
+
+
+async def shared_grantees_async(name_a, name_b, n=20, *, context):
+    first, first_name = await _funder_recipients_async(name_a, context)
+    second, second_name = await _funder_recipients_async(name_b, context)
+    common = sorted(set(first) & set(second), key=lambda recipient: -(first[recipient] + second[recipient]))
+    shared = [{"recipient": recipient, "from_a_display": _disp(first[recipient]),
+               "from_b_display": _disp(second[recipient]),
+               "combined": first[recipient] + second[recipient]} for recipient in common[:n]]
+    return {"direction": "shared_grantees", "funder_a": first_name, "funder_b": second_name,
+            "shared_count": len(common), "shared": shared, "a_recipient_count": len(first),
+            "b_recipient_count": len(second), "source": SOURCE}
+
+
+ASYNC_OPERATIONS = {
+    "forward": forward_async, "reverse": reverse_async,
+    "top_grantmakers": top_grantmakers_async, "biggest_recipients": biggest_recipients_async,
+    "funders_above": funders_above_async, "overview": overview_async, "geo": geo_async,
+    "grants_by_cause": grants_by_cause_async, "shared_grantees": shared_grantees_async,
+}
+
+
+async def execute_async(operation, *args, context, **kwargs):
+    try:
+        function = ASYNC_OPERATIONS[operation]
+    except KeyError:
+        raise NotImplementedError(f"async grant operation {operation!r} is not implemented")
+    return await function(*args, context=context, **kwargs)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ already resolved on the cross-source spine (see resolver.py), so no extra lookup
 """
 import re, urllib.request, urllib.parse, json
 
+import resolver
+
 WD = "https://www.wikidata.org/w/api.php"
 WP = "https://en.wikipedia.org/api/rest_v1/page/summary/"
 UA = {"User-Agent": "ard-data-demo/1.0 (guha@guha.com)"}
@@ -81,3 +83,48 @@ def fetch(attr, qid, orgname=None):
             raise SystemExit(f"no resolvable {human} for {orgname}")
         rec["value"] = ", ".join(names)
     return rec
+
+
+async def fetch_async(attr, qid, orgname=None, *, context):
+    entity = (await resolver._get_async(
+        f"{WD}?action=wbgetentities&ids={qid}&props=claims|labels|sitelinks&format=json",
+        context=context))["entities"][qid]
+    orgname = orgname or (entity.get("labels", {}).get("en") or {}).get("value") or qid
+    base = {"organization": orgname, "qid": qid,
+            "source": "Wikidata + Wikipedia (did:web:wikidata.org)"}
+    if attr == "overview":
+        title = (entity.get("sitelinks", {}).get("enwiki") or {}).get("title")
+        if not title:
+            raise SystemExit(f"no Wikipedia article for {orgname}")
+        summary = await resolver._get_async(
+            WP + urllib.parse.quote(title.replace(" ", "_")), context=context)
+        if not summary.get("extract"):
+            raise SystemExit(f"no Wikipedia overview for {orgname}")
+        return {**base, "field": "Overview", "value": summary["extract"]}
+    prop, human, kind = PROPS[attr]
+    claims = [claim for claim in entity.get("claims", {}).get(prop, [])
+              if claim["mainsnak"].get("datavalue")]
+    if not claims:
+        raise SystemExit(f"no {human} on Wikidata for {orgname}")
+    record = {**base, "field": human}
+    value = claims[0]["mainsnak"]["datavalue"]["value"]
+    if kind == "date":
+        record["value"] = (str(value.get("time", "")).lstrip("+")[:4]
+                           if isinstance(value, dict) else str(value)[:4])
+    elif kind == "amount":
+        record["value"] = str(value.get("amount") if isinstance(value, dict) else value).lstrip("+")
+    elif kind == "url":
+        record["value"] = value
+    else:
+        current = [claim for claim in claims if "P582" not in claim.get("qualifiers", {})]
+        selected = current if attr in ("ceo", "headquarters") and current else claims
+        ids = list(dict.fromkeys(
+            value.get("id") for claim in selected
+            if isinstance((value := claim["mainsnak"]["datavalue"]["value"]), dict)
+            and value.get("id")))[:4]
+        labels = await resolver.class_labels_async(ids, context=context)
+        names = [labels[qid] for qid in ids if labels.get(qid)]
+        if not names:
+            raise SystemExit(f"no resolvable {human} for {orgname}")
+        record["value"] = ", ".join(names)
+    return record

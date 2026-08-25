@@ -28,6 +28,9 @@ class QueryContext:
     discovery_ledger: Any = None
     llm_client: Any = None
     http_client: Any = None
+    sec_client: Any = None
+    bigquery_client: Any = None
+    grant_pool: Any = None
 
     @classmethod
     def with_timeout(cls, seconds: float, **kwargs):

@@ -9,7 +9,11 @@ university, company vs band) is delegated to a `pick` callback (the LLM).
 
 Results are cached to resolver_cache.json — resolutions are stable.
 """
-import os, json, threading, urllib.request, urllib.parse
+import asyncio, os, json, threading, urllib.request, urllib.parse
+
+import httpx
+
+import runtime
 _LOCK = threading.Lock()
 
 WD = "https://www.wikidata.org/w/api.php"
@@ -34,23 +38,128 @@ def _get(url):
         return json.load(r)
 
 
+async def _get_async(url, *, context):
+    context.check()
+    if context.http_client is None:
+        raise RuntimeError("async Wikidata access requires QueryContext.http_client")
+    try:
+        response = await context.wait(context.http_client.get(
+            url, headers={"User-Agent": "ard-data-demo/1.0 (guha@guha.com)"},
+            timeout=min(20, context.remaining() or 20)))
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Wikidata request failed: {exc}") from exc
+    response.raise_for_status()
+    return response.json()
+
+
 def _search(mention, limit=7):
     q = urllib.parse.quote(mention)
     return _get(f"{WD}?action=wbsearchentities&search={q}&language=en&type=item&format=json&limit={limit}").get("search", [])
 
 
-def _claims(qid):
-    e = _get(f"{WD}?action=wbgetentities&ids={qid}&props=claims|labels&format=json")["entities"][qid]
+async def search_async(mention, limit=7, *, context):
+    q = urllib.parse.quote(mention)
+    data = await _get_async(
+        f"{WD}?action=wbsearchentities&search={q}&language=en&type=item&format=json&limit={limit}",
+        context=context)
+    return data.get("search", [])
+
+
+def _claim_values(entity):
     keys = {}
-    for p, name in PROPS.items():
-        if p in e.get("claims", {}):
+    for prop, name in PROPS.items():
+        if prop in entity.get("claims", {}):
             try:
-                v = e["claims"][p][0]["mainsnak"]["datavalue"]["value"]
-                keys[name] = v.get("id", v) if isinstance(v, dict) else v
+                value = entity["claims"][prop][0]["mainsnak"]["datavalue"]["value"]
+                keys[name] = value.get("id", value) if isinstance(value, dict) else value
             except Exception:
                 pass
-    label = (e.get("labels", {}).get("en") or {}).get("value")
-    return label, keys
+    return (entity.get("labels", {}).get("en") or {}).get("value"), keys
+
+
+def _claims(qid):
+    e = _get(f"{WD}?action=wbgetentities&ids={qid}&props=claims|labels&format=json")["entities"][qid]
+    return _claim_values(e)
+
+
+async def claims_async(qid, *, context):
+    data = await _get_async(
+        f"{WD}?action=wbgetentities&ids={qid}&props=claims|labels&format=json", context=context)
+    return _claim_values(data["entities"][qid])
+
+
+async def instance_of_async(qid, *, context):
+    ck = f"p31|{qid}"
+    if ck in _cache:
+        return _cache[ck]
+    entity = (await _get_async(
+        f"{WD}?action=wbgetentities&ids={qid}&props=claims&format=json", context=context))["entities"][qid]
+    out = []
+    for claim in entity.get("claims", {}).get("P31", []):
+        try:
+            out.append(claim["mainsnak"]["datavalue"]["value"]["id"])
+        except Exception:
+            pass
+    _cache[ck] = out
+    return out
+
+
+async def class_labels_async(qids, *, context):
+    qids = [qid for qid in dict.fromkeys(qids) if qid]
+    out, need = {}, []
+    for qid in qids:
+        ck = f"clabel|{qid}"
+        if ck in _cache:
+            out[qid] = _cache[ck]
+        else:
+            need.append(qid)
+    for offset in range(0, len(need), 40):
+        chunk = need[offset:offset + 40]
+        entities = (await _get_async(
+            f"{WD}?action=wbgetentities&ids={'|'.join(chunk)}&props=labels&format=json",
+            context=context))["entities"]
+        for qid, entity in entities.items():
+            out[qid] = _cache[f"clabel|{qid}"] = (
+                entity.get("labels", {}).get("en") or {}).get("value", "")
+    return out
+
+
+async def hierarchy_async(qid, max_depth=4, *, context):
+    ck = f"hier|{qid}"
+    if ck in _cache:
+        return _cache[ck]
+    out, seen, current = [], set(), qid
+    while current and current not in seen and len(out) < max_depth:
+        seen.add(current)
+        entity = (await _get_async(
+            f"{WD}?action=wbgetentities&ids={current}&props=claims|labels&format=json",
+            context=context))["entities"][current]
+        label, keys = _claim_values(entity)
+        out.append({"qid": current, "label": label, "keys": keys})
+        try:
+            current = entity["claims"]["P131"][0]["mainsnak"]["datavalue"]["value"]["id"]
+        except Exception:
+            current = None
+    _cache[ck] = out
+    return out
+
+
+async def resolve_async(mention, type_hint, pick, *, context):
+    ck = f"{type_hint}|{mention}".lower()
+    if ck in _cache:
+        return _cache[ck]
+    candidates = await search_async(mention, context=context)
+    if not candidates:
+        return None
+    chosen = pick(mention, type_hint, candidates)
+    qid = await chosen if hasattr(chosen, "__await__") else chosen
+    qid = qid or candidates[0]["id"]
+    label, keys = await claims_async(qid, context=context)
+    out = {"qid": qid, "label": label, "keys": keys}
+    _cache[ck] = out
+    return out
 
 
 def instance_of(qid):

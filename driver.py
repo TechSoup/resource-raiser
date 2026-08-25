@@ -10,11 +10,12 @@
 
 Run:  source the Azure keys, then  python3 driver.py "how much did Apple spend on R&D in 2023?"
 """
-import os, re, sys, json, time, threading, subprocess, urllib.request, urllib.error
+import asyncio, os, re, sys, json, time, threading, urllib.request, urllib.error
 from collections import OrderedDict
-import yaml
+import httpx
 import llm            # provider-agnostic chat/embeddings (Azure OpenAI | OpenAI | Gemini)
 import ard_client
+import runtime
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 UA = "ard-data-demo (guha@guha.com)"
@@ -113,6 +114,102 @@ def _sec_concept(cik, concept):
             if isinstance(fact, dict) else None)
 
 
+class AsyncSecClient:
+    """Application-owned SEC client with one event-loop token bucket and de-duplicated CIK fetches."""
+    def __init__(self, http_client, requests_per_second=8):
+        self.http = http_client
+        self.interval = 1 / requests_per_second
+        self.next_request = 0.0
+        self.pace_lock = asyncio.Lock()
+        self.cache_lock = asyncio.Lock()
+        self.companyfacts = OrderedDict()
+        self.cik_locks = {}
+        self.ticker_lock = asyncio.Lock()
+        self.tickers = None
+
+    async def _pace(self, context):
+        await context.wait(self.pace_lock.acquire())
+        try:
+            delay = self.next_request - time.monotonic()
+            if delay > 0:
+                await context.sleep(delay)
+            self.next_request = time.monotonic() + self.interval
+        finally:
+            self.pace_lock.release()
+
+    async def _json(self, url, context, attempts=5):
+        for attempt in range(attempts):
+            await self._pace(context)
+            try:
+                response = await context.wait(self.http.get(
+                    url, headers={"User-Agent": UA}, timeout=min(30, context.remaining() or 30)))
+            except (asyncio.CancelledError, runtime.QueryCancelled):
+                raise
+            except httpx.RequestError:
+                if attempt == attempts - 1:
+                    raise
+                await context.sleep(min(4.0, 0.5 * (2 ** attempt)))
+                continue
+            if response.status_code == 404:
+                return None
+            if response.status_code in (429, 500, 502, 503) and attempt < attempts - 1:
+                try:
+                    delay = float(response.headers.get("Retry-After"))
+                except (TypeError, ValueError):
+                    delay = min(8.0, 0.75 * (2 ** attempt))
+                await context.sleep(delay)
+                continue
+            if response.status_code == 429:
+                raise SourceRateLimitError(
+                    "SEC is temporarily rate limiting requests; please try again shortly")
+            response.raise_for_status()
+            return response.json()
+        raise RuntimeError("SEC request failed")
+
+    async def company_facts(self, cik, context):
+        key = str(int(cik))
+        async with self.cache_lock:
+            if key in self.companyfacts:
+                value = self.companyfacts.pop(key)
+                self.companyfacts[key] = value
+                return value
+            lock = self.cik_locks.setdefault(key, asyncio.Lock())
+        await context.wait(lock.acquire())
+        try:
+            async with self.cache_lock:
+                if key in self.companyfacts:
+                    value = self.companyfacts.pop(key)
+                    self.companyfacts[key] = value
+                    return value
+            url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):0>10}.json"
+            value = await self._json(url, context)
+            async with self.cache_lock:
+                self.companyfacts[key] = value
+                while len(self.companyfacts) > max(1, _SEC_COMPANYFACTS_CACHE_SIZE):
+                    self.companyfacts.popitem(last=False)
+            return value
+        finally:
+            lock.release()
+
+    async def ticker_to_cik(self, ticker, context):
+        if self.tickers is None:
+            await context.wait(self.ticker_lock.acquire())
+            try:
+                if self.tickers is None:
+                    data = await self._json("https://www.sec.gov/files/company_tickers.json", context)
+                    self.tickers = {item["ticker"].upper(): (str(item["cik_str"]), item["title"])
+                                    for item in data.values()}
+            finally:
+                self.ticker_lock.release()
+        return self.tickers.get(ticker.upper(), (None, None))
+
+    async def concept(self, cik, concept, context):
+        company = await self.company_facts(cik, context)
+        fact = (((company or {}).get("facts") or {}).get("us-gaap") or {}).get(concept)
+        return ({**fact, "entityName": company.get("entityName", "")}
+                if isinstance(fact, dict) else None)
+
+
 def ask_llm(system, user, json_mode=False, model=None, stage="other", max_tokens=None,
             reasoning_effort=None):
     """One chat turn via the configured provider. Built lazily inside llm.client(), so the
@@ -123,9 +220,9 @@ def ask_llm(system, user, json_mode=False, model=None, stage="other", max_tokens
 
 
 def frontmatter(rel):
-    with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
-        t = f.read()
-    return yaml.safe_load(t.split("---", 2)[1])
+    from accessor import okf_fetch
+    path = rel if os.path.isabs(rel) else os.path.join(ROOT, rel)
+    return okf_fetch.load_okf(os.path.normpath(path))
 
 
 _TMAP = None
@@ -139,16 +236,28 @@ def ticker_to_cik(ticker):
 
 
 def accessor(rel, op, **params):
-    cmd = [sys.executable, os.path.join(ROOT, "accessor", "okf_fetch.py"), os.path.join(ROOT, rel), op]
-    cmd += [f"{k}={v}" for k, v in params.items()]
-    out = subprocess.run(cmd, capture_output=True, text=True)
-    if out.returncode:
-        # A missing-credential failure is not a backtrack-able miss (see CredentialError). The accessor
-        # marks it with a stable prefix so we can classify it across the subprocess boundary.
-        if "CREDENTIAL_ERROR:" in (out.stderr or ""):
-            raise CredentialError(out.stderr.split("CREDENTIAL_ERROR:", 1)[1].strip().splitlines()[0])
-        raise SystemExit(f"accessor error: {out.stderr}")
-    return json.loads(out.stdout)
+    """In-process compatibility path; the request-time accessor subprocess is gone."""
+    from accessor import okf_fetch
+    try:
+        return okf_fetch.fetch(os.path.join(ROOT, rel), op, params)
+    except SystemExit as exc:
+        message = str(exc)
+        if "CREDENTIAL_ERROR:" in message:
+            raise CredentialError(message.split("CREDENTIAL_ERROR:", 1)[1].strip().splitlines()[0])
+        raise
+
+
+async def accessor_async(rel, op, *, context, **params):
+    from accessor import okf_fetch
+    try:
+        return await okf_fetch.fetch_async(os.path.join(ROOT, rel), op, params, context=context)
+    except okf_fetch.PublisherRateLimitError as exc:
+        raise SourceRateLimitError(str(exc)) from exc
+    except SystemExit as exc:
+        message = str(exc)
+        if "CREDENTIAL_ERROR:" in message:
+            raise CredentialError(message.split("CREDENTIAL_ERROR:", 1)[1].strip().splitlines()[0])
+        raise
 
 
 def _days(u):
@@ -310,6 +419,70 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
     return out
 
 
+async def fetch_metric_async(metric_query, ticker=None, period="latest", k=25, log=True, cik=None,
+                             concept=None, *, context):
+    """Async SEC companyfacts path; one paced request supplies every candidate concept."""
+    sec = context.sec_client
+    if sec is None:
+        if context.http_client is None:
+            raise RuntimeError("async SEC access requires QueryContext.http_client")
+        sec = context.sec_client = AsyncSecClient(context.http_client)
+    if cik:
+        title = ticker or f"CIK {cik}"
+    else:
+        cik, title = await sec.ticker_to_cik(ticker, context)
+        if not cik:
+            raise SystemExit(f"no CIK for ticker {ticker}")
+    company = await sec.company_facts(cik, context)
+
+    def try_hit(hit):
+        metadata = frontmatter(hit["identifier"])
+        concept_name = metadata.get("concept")
+        fact = (((company or {}).get("facts") or {}).get("us-gaap") or {}).get(concept_name)
+        if not concept_name or not isinstance(fact, dict):
+            return None
+        data = {**fact, "entityName": company.get("entityName", "")}
+        unit, rows = _select_unit(data.get("units", {}), metadata.get("unit", "currency"))
+        if not rows:
+            return None
+        row = pick_value(rows, period, metadata.get("periodType", "duration"), strict=True)
+        if row is None:
+            return None
+        source = (frontmatter(os.path.join(os.path.dirname(hit["identifier"]), metadata["source"]))
+                  if metadata.get("source") else metadata)
+        identity = (source.get("trust") or {}).get("identity", source.get("resource"))
+        result = {"company": data["entityName"], "metric": metadata["title"].split(" — ")[0],
+                  "concept": f"us-gaap:{concept_name}", "period": f"FY{row['end'][:4]}",
+                  "period_end": row["end"], "value": row["val"], "unit": unit,
+                  "source": f"SEC EDGAR ({identity})"}
+        if unit != "shares" and "/" not in unit and unit != "pure":
+            result["value_usd"] = row["val"]
+        return result
+
+    forced = str(concept or "").removeprefix("us-gaap:") or None
+    if forced:
+        metadata = _concept_meta(forced)
+        result = try_hit(metadata) if metadata else None
+        if not result:
+            raise SystemExit(f"{title} does not report {forced} for {period or 'latest'}")
+        return result
+    pool = max(k, 50)
+    hits = await ard_client.search_async(
+        metric_query, k=pool, sources=["sec-edgar"], rerank=False, context=context)
+    for canonical in _canonical_sec_concepts(metric_query):
+        metadata = _concept_meta(canonical)
+        if metadata and not any(hit.get("identifier") == metadata.get("identifier") for hit in hits):
+            hits.insert(0, metadata)
+    reported = [(rank, result) for rank, result in
+                enumerate(try_hit(hit) for hit in hits) if result]
+    if not reported:
+        raise SystemExit(f"no reportable data for {metric_query!r} / {title}")
+    year = re.sub(r"\D", "", period or "")
+    if len(year) == 4:
+        reported = [item for item in reported if item[1]["period"][2:] == year] or reported
+    return await _pick_by_data_async(metric_query, reported, context, log)
+
+
 def _canonical_sec_concepts(metric_query):
     normalized = " ".join(re.findall(r"[a-z0-9]+", str(metric_query).lower()))
     families = {
@@ -380,6 +553,10 @@ def _pick_by_data(metric_query, reported, log=True):
         pick = resolution.get("i")
     except Exception:
         pick = None
+    return _finish_sec_pick(metric_query, cands, resolution, pick, log)
+
+
+def _finish_sec_pick(metric_query, cands, resolution, pick, log):
     canonical = _canonical_sec_index(metric_query, cands)
     if canonical is not None and isinstance(pick, int) and 0 <= pick < len(cands) and pick != canonical:
         # The semantic resolver selected a specialized sibling for a broad measure. Make the
@@ -422,6 +599,41 @@ def _pick_by_data(metric_query, reported, log=True):
         print(f"  → picked {best['concept']} {best['period']} = {best['value']:,} {best['unit']} "
               f"(chosen from {len(cands)} reported concepts by data)")
     return best
+
+
+async def _pick_by_data_async(metric_query, reported, context, log=True):
+    by_concept = {}
+    for rank, result in reported:
+        concept = result["concept"]
+        if concept not in by_concept or result["period_end"] > by_concept[concept][1]["period_end"]:
+            by_concept[concept] = (rank, result)
+    candidates = sorted(by_concept.values(), key=lambda item: item[0])
+    if len(candidates) == 1:
+        return candidates[0][1]
+    listing = "\n".join(
+        f'{index}. {result["concept"]}  (latest {result["period"]}, '
+        f'value {result["value"]:,} {result["unit"]})'
+        for index, (_rank, result) in enumerate(candidates))
+    resolution, pick = {}, None
+    try:
+        answer = await llm.chat_async(
+            "Pick the ONE us-gaap concept that best answers the MEASURE, judging by the reported data. "
+            "Rules: (1) A concept last filed years before the newest candidate is a DISCONTINUED alias — "
+            "do not pick it when a current concept reports the same measure. (2) Match the SPECIFIC "
+            "measure: for a 'total'/overall figure prefer the largest current concept in that family; "
+            "for a named variant pick that exact one, not the largest. Identify material ambiguity among "
+            "CURRENT concepts. Set dominant=true only when wording clearly selects one reading. "
+            'Return JSON {"i":<index>,"dominant":true|false,"alternatives":[<indices>],"why":"..."}.\n'
+            "MEASURE: " + metric_query + "\nCANDIDATES:\n" + listing,
+            metric_query, context=context, json_mode=True, stage="resolve-concept")
+        parsed = json.loads(answer)
+        resolution = parsed if isinstance(parsed, dict) else {}
+        pick = resolution.get("i")
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except Exception:
+        pass
+    return _finish_sec_pick(metric_query, candidates, resolution, pick, log)
 
 
 def main(question):

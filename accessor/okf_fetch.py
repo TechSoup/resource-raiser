@@ -15,8 +15,19 @@ linked doc's operations; its frontmatter supplies default params.
 Usage:
   okf_fetch.py <okf_doc.md> <operation> [k=v ...] [--extract a.b.0.c]
 """
-import sys, os, re, json, time, string, urllib.parse, urllib.request, urllib.error
+import asyncio, glob, sys, os, re, json, time, string, urllib.parse, urllib.request, urllib.error
+from functools import lru_cache
+
+import httpx
 import yaml
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+import runtime
+
+
+class PublisherRateLimitError(RuntimeError):
+    pass
 
 
 def _fetch_with_retry(req, tries=4):
@@ -36,8 +47,10 @@ def _fetch_with_retry(req, tries=4):
         time.sleep(1.5 * (attempt + 1))                       # linear backoff before the next attempt
 
 
+@lru_cache(maxsize=None)
 def load_okf(path):
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as stream:
+        text = stream.read()
     if not text.startswith("---"):
         raise SystemExit(f"{path}: no YAML frontmatter")
     _, fm, _b = text.split("---", 2)
@@ -53,6 +66,15 @@ def resolve_access(fm, okf_path):
     raise SystemExit(f"{okf_path}: no access block and no source link")
 
 
+def preload_descriptors(sources_root=None):
+    """Load immutable descriptor frontmatter before readiness; later fetches do no file reads."""
+    root = sources_root or os.path.join(ROOT, "sources")
+    paths = sorted(glob.glob(os.path.join(root, "**", "*.md"), recursive=True))
+    for path in paths:
+        load_okf(path)
+    return len(paths)
+
+
 def placeholders(op):
     fields = {fn for _, fn, _, _ in string.Formatter().parse(op["url"]) if fn}
     if op.get("body"):
@@ -66,6 +88,95 @@ def extract(obj, dotted):
     return obj
 
 
+def _request(okf_path, operation, params):
+    """Resolve one immutable descriptor into an HTTP request without performing I/O."""
+    fm = load_okf(okf_path)
+    access = resolve_access(fm, okf_path)
+    ops = access.get("operations", {})
+    if operation not in ops:
+        raise SystemExit(f"unknown operation '{operation}'. have: {list(ops)}")
+    op = ops[operation]
+    params = dict(params)
+    for field in placeholders(op):
+        if field not in params and field in fm:
+            params[field] = str(fm[field])
+    for key, value in list(params.items()):
+        if isinstance(value, str) and value.startswith("env:"):
+            params[key] = os.environ.get(value[4:], "")
+    url_params = {key: urllib.parse.quote(str(value), safe="=&[]-:/,@")
+                  for key, value in params.items()}
+    url = op["url"].format(**url_params)
+    headers = {**access.get("headers", {}), **op.get("headers", {})}
+    body = None
+    if op.get("body"):
+        body = string.Template(op["body"]).safe_substitute(params).encode()
+        headers.setdefault("Content-Type", "application/json")
+    return op.get("method", "POST" if body else "GET").upper(), url, headers, body
+
+
+def _decode(body, url, dotted=None):
+    try:
+        result = json.loads(body)
+    except json.JSONDecodeError:
+        low = body.lower()
+        if "missing key" in low or "missing_key" in low or "api key" in low or "api_key" in low:
+            raise SystemExit(f"CREDENTIAL_ERROR: {url[:120]} requires an API key; set it "
+                             f"(e.g. CENSUS_API_KEY / DATA_GOV_API_KEY) and retry.\n{body[:200]}")
+        raise SystemExit(f"non-JSON response from {url[:120]}\n{body[:300]}")
+    if dotted:
+        try:
+            result = extract(result, dotted)
+        except (KeyError, IndexError, TypeError):
+            pass
+    return result
+
+
+def fetch(okf_path, operation, params=None, dotted=None):
+    """In-process synchronous compatibility path; removes the subprocess boundary immediately."""
+    method, url, headers, body = _request(okf_path, operation, params or {})
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    return _decode(_fetch_with_retry(request), url, dotted)
+
+
+async def fetch_async(okf_path, operation, params=None, dotted=None, *, context, tries=4):
+    """Native async descriptor fetch using the application-owned HTTPX client."""
+    context.check()
+    if context.http_client is None:
+        raise RuntimeError("async publisher access requires QueryContext.http_client")
+    method, url, headers, body = _request(okf_path, operation, params or {})
+    response = None
+    for attempt in range(tries):
+        delay = 1.5 * (attempt + 1)
+        try:
+            response = await context.wait(context.http_client.request(
+                method, url, headers=headers, content=body, timeout=min(40, context.remaining() or 40)))
+        except (asyncio.CancelledError, runtime.QueryCancelled):
+            raise
+        except httpx.RequestError as exc:
+            if attempt == tries - 1:
+                raise SystemExit(f"network error for {url}: {exc}") from exc
+        else:
+            if response.status_code not in (429, 500, 502, 503, 504):
+                break
+            if attempt == tries - 1:
+                break
+            if response.status_code == 429:
+                try:
+                    delay = float(response.headers.get("Retry-After"))
+                except (TypeError, ValueError):
+                    pass
+        await context.sleep(delay)
+    if response is None:
+        raise SystemExit(f"network error for {url}")
+    if response.status_code == 429:
+        raise PublisherRateLimitError(
+            f"{urllib.parse.urlparse(url).netloc} is temporarily rate limiting requests; "
+            "please try again shortly")
+    if response.is_error:
+        raise SystemExit(f"HTTP {response.status_code} for {url}\n{response.text[:500]}")
+    return _decode(response.text, url, dotted)
+
+
 def main(argv):
     if len(argv) < 2:
         raise SystemExit(__doc__)
@@ -77,53 +188,7 @@ def main(argv):
             dotted = argv[i + 1]; i += 2; continue
         k, _, v = argv[i].partition("="); params[k] = v; i += 1
 
-    fm = load_okf(okf_path)
-    access = resolve_access(fm, okf_path)
-    ops = access.get("operations", {})
-    if operation not in ops:
-        raise SystemExit(f"unknown operation '{operation}'. have: {list(ops)}")
-    op = ops[operation]
-
-    # default-fill any placeholder (url or body) from the leaf's frontmatter
-    for f in placeholders(op):
-        if f not in params and f in fm:
-            params[f] = str(fm[f])
-
-    # resolve secrets referenced as "env:NAME" (keeps API keys out of the OKF docs)
-    for k, v in list(params.items()):
-        if isinstance(v, str) and v.startswith("env:"):
-            params[k] = os.environ.get(v[4:], "")
-
-    url_params = {k: urllib.parse.quote(str(v), safe="=&[]-:/,@") for k, v in params.items()}
-    url = op["url"].format(**url_params)
-    headers = {**access.get("headers", {}), **op.get("headers", {})}
-    data = None
-    if op.get("body"):
-        data = string.Template(op["body"]).safe_substitute(params).encode()
-        headers.setdefault("Content-Type", "application/json")
-    method = op.get("method", "POST" if data else "GET").upper()
-
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    body = _fetch_with_retry(req)
-    try:
-        result = json.loads(body)
-    except json.JSONDecodeError:
-        # A non-JSON body is an API error masquerading as data (e.g. the Census API redirects a
-        # keyless request to a "Missing Key" HTML page). Surface it clearly instead of a decode
-        # traceback, so the harness fails loudly rather than treating it as a backtrack-able miss.
-        low = body.lower()
-        if "missing key" in low or "missing_key" in low or "api key" in low or "api_key" in low:
-            # CREDENTIAL_ERROR: is a stable marker the driver classifies across the subprocess boundary
-            # so the harness stops the search immediately instead of backtracking (~2 min) over sources
-            # that can never answer without the key.
-            raise SystemExit(f"CREDENTIAL_ERROR: {url[:120]} requires an API key; set it "
-                             f"(e.g. CENSUS_API_KEY / DATA_GOV_API_KEY) and retry.\n{body[:200]}")
-        raise SystemExit(f"non-JSON response from {url[:120]}\n{body[:300]}")
-    if dotted:
-        try:
-            result = extract(result, dotted)
-        except (KeyError, IndexError, TypeError):
-            pass                                          # bad extract path -> return full result
+    result = fetch(okf_path, operation, params, dotted)
     print(json.dumps(result, indent=2) if not isinstance(result, str) else result)
 
 
