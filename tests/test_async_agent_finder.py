@@ -145,11 +145,12 @@ class AsyncAgentFinderTests(unittest.IsolatedAsyncioTestCase):
             return [hit(texts[0])]
 
         client = await self._client(fake_search)
-        before = threading.active_count()
+        before = {thread.ident for thread in threading.enumerate()}
         responses = await asyncio.gather(*(
             client.post("/search", json={"query": {"text": f"q{i}"}}) for i in range(40)))
         self.assertTrue(all(response.status_code == 200 for response in responses))
-        self.assertEqual(threading.active_count(), before)
+        # An unrelated daemon may finish while the requests run; that is not thread creation.
+        self.assertTrue({thread.ident for thread in threading.enumerate()}.issubset(before))
 
     async def test_event_loop_quota_update_allows_exactly_one_request(self):
         client = await self._client()

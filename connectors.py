@@ -5,7 +5,7 @@ run structural/source validation, and admit only accepted responses as Evidence.
 """
 from __future__ import annotations
 
-import decimal, json, os, re, time
+import asyncio, decimal, inspect, json, os, re, time
 from pathlib import Path
 from typing import Callable
 
@@ -117,6 +117,44 @@ class Connector:
             raise
         except Exception as e:
             attempt.outcome, attempt.reason = "error", str(e)[:300]
+            raise
+        finally:
+            attempt.duration_ms = round((time.monotonic() - started) * 1000)
+
+    async def execute_async(self, intent: QueryIntent, attempt: Attempt, hit: dict,
+                            executor: Callable, adjudicator: Callable | None = None) -> Evidence:
+        """Await the I/O boundaries while retaining exactly the synchronous admission rules."""
+        started = time.monotonic()
+        try:
+            data = executor()
+            if inspect.isawaitable(data):
+                data = await data
+            attempt.raw = data
+            data = self.normalize(intent, hit, data)
+            verdict = self.validate(intent, data)
+            attempt.validation = verdict
+            if not verdict.accepted:
+                attempt.outcome, attempt.reason = "rejected", verdict.reason
+                raise Rejected(verdict.reason, attempt)
+            if verdict.residual_semantic_check and adjudicator:
+                decision = adjudicator(data, verdict)
+                if inspect.isawaitable(decision):
+                    decision = await decision
+                ok, why = decision
+                if not ok:
+                    attempt.outcome, attempt.reason = "rejected", why
+                    raise Rejected(why, attempt)
+            attempt.outcome = "accepted"
+            evidence = _evidence(intent, hit, data, attempt)
+            _record_fixture(intent, attempt, evidence)
+            return evidence
+        except Rejected:
+            raise
+        except asyncio.CancelledError:
+            attempt.outcome, attempt.reason = "error", "query cancelled"
+            raise
+        except Exception as exc:
+            attempt.outcome, attempt.reason = "error", str(exc)[:300]
             raise
         finally:
             attempt.duration_ms = round((time.monotonic() - started) * 1000)

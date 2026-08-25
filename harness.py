@@ -11,10 +11,11 @@ Run as a CLI or as a server the connectors skill calls:
   python3 harness.py "How much did Apple spend on R&D in 2023?"     # one-shot (prints JSON)
   python3 harness.py --serve [--port 8099]                          # POST /ask {"question": ...}
 """
-import os, sys, json, time, math, re, signal, traceback, urllib.parse, queue, uuid
+import asyncio, os, sys, json, time, math, re, signal, traceback, urllib.parse, queue, uuid
 import driver, ard_client, planner, store, llm, nlweb, connectors, renderers, runtime, docpage
 from domain import Attempt, Clarification, ClarificationOption, Evidence, QueryIntent
 from core import Toolkit
+from query_context import QueryContext
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TK = Toolkit()
@@ -314,78 +315,82 @@ def _normalize_shape(ctx):
     return ctx
 
 
+def _discovery_system(src_list):
+    return ("A demographic or population restriction ('for Asian residents', 'for women', 'among "
+            "adults 18-64', 'for renters') is part of the ATTRIBUTE, never part of the entity. The "
+            "entity is only the named company, nonprofit, place or organization: in 'unemployment "
+            "rate for Asian residents in Texas' the entity is 'Texas' and the attribute is "
+            "'unemployment rate for Asian residents'. Putting the restriction in the entity loses it "
+            "- retrieval runs on the attribute, so the general measure is returned instead.\n"
+            "Analyze a data question. Return JSON with: 'entity' (the single company/nonprofit/place/org "
+            "it is about, or empty), 'entities' (ALL named entities if it compares several, else []), "
+            "'type' (one of: company, nonprofit, place, org, none), 'attribute' (the metric/measure asked, "
+            "'canonical_entity' (the entity's full commonly-used name, specific enough to identify it "
+            "uniquely, disambiguated using THE QUESTION'S CONTEXT: 'St. Jude' in a question about NIH "
+            "research funding is 'St. Jude Children's Research Hospital'; 'Stanford' is 'Stanford "
+            "University'; a US city takes its state, 'Chicago, Illinois'), "
+            "'entity_status' ('resolved' when you are confident which real-world entity is meant; "
+            "'ambiguous' when the question genuinely does not distinguish it - an unqualified "
+            "Springfield, Portland, Cambridge, Washington or Georgia; 'none' when the question names "
+            "no entity at all, such as an exchange rate, a national total or a topical search), "
+            "'entity_candidates' (when and only when the status is 'ambiguous', the 2-5 real-world "
+            "entities the question could plausibly mean, each a full name in the same form as "
+            "canonical_entity, most likely first - e.g. for an unqualified Springfield: "
+            "['Springfield, Illinois', 'Springfield, Massachusetts', 'Springfield, Missouri']. "
+            "Leave canonical_entity empty when the status is 'ambiguous' or 'none'; do not guess "
+            "one, and do not invent candidates for a resolved or absent entity), "
+
+            "with the entity REMOVED — e.g. 'total revenue', 'poverty rate'), 'period' ('FY<year>' or "
+            "'latest'), 'periods' (list of 'FY<year>' if it spans several years, else []), 'sources' (the "
+            "dir names below whose entity type + scope fit), and 'shape', exactly one of:\n"
+            "  point           - ONE specific measured value ('Apple's total revenue', 'euro to dollar "
+            "exchange rate', 'the US national debt'). A currency exchange rate or a single national figure "
+            "is 'point' even with no named organization or place — it is NOT 'topical'.\n"
+            "  status          - one named entity, a yes/no or category ('Is X a 501(c)(3)?')\n"
+            "  entity-list     - one named entity, the records belonging to it ('NSF awards for MIT')\n"
+            "  comparison      - TWO OR MORE NAMED entities compared ('Harvard or MIT — more NIH funding?')\n"
+            "  timeseries      - one named entity across several periods ('Apple revenue 2019-2024')\n"
+            "  ranking         - which member of an OPEN population is highest/top-N, entities NOT named "
+            "('which university gets the most NIH funding', 'largest nonprofit')\n"
+            "  aggregate       - one statistic over an OPEN population ('how many 501(c)(3)s are there')\n"
+            "  filtered-subset - members of a population matching a numeric THRESHOLD ('nonprofits over $1M', "
+            "'universities getting more than a billion from NIH', 'cities above a 20% diabetes rate')\n"
+            "  ratio           - TWO OR MORE MEASURES combined, usually for ONE entity and often from "
+            "DIFFERENT sources: a share/fraction/percent-of, a ratio, or one measure set against another "
+            "('what share of X's revenue is federal funding', 'X's revenue vs the federal funding it "
+            "receives', 'NIH dollars per resident')\n"
+            "  topical         - no entity; a topic or keyword ('grants for education')\n"
+            "  correlation     - is measure A RELATED to / associated with measure B across a population "
+            "('is poverty correlated with diabetes across counties', 'do richer counties have less obesity')\n"
+            "KEY DISTINCTION 2: 'comparison' compares the SAME measure across DIFFERENT named entities; "
+            "'ratio' combines DIFFERENT measures (usually of one entity). 'Red Cross vs Feeding America "
+            "revenue' is comparison; 'Red Cross revenue vs its federal funding' is ratio.\n"
+            "KEY DISTINCTION: if the entities being compared are NAMED in the question it is 'comparison'; "
+            "if the question asks the engine to find them from a whole population it is 'ranking' (top/most) "
+            "or 'filtered-subset' (a stated numeric cut-off).\n"
+            "Also return 'threshold': for a filtered-subset, {\"op\": \">\"|\">=\"|\"<\"|\"<=\", \"value\": <number "
+            "as a plain integer, e.g. a billion = 1000000000, 20 percent = 20>}, else null.\n"
+            "Also return 'quantifier': 'existential' if the question asks only for EXAMPLES ('give me some', "
+            "'a few', 'name some', 'examples of'), or 'exhaustive' if it asks which/all members qualify.\n"
+            "Also return 'interpretations': whenever the MEASURE is genuinely ambiguous — it could mean "
+            "several materially DIFFERENT things a careful analyst would not conflate — a list of the 2-4 "
+            "distinct specific measures it could mean (each a concrete attribute string, entity removed). "
+            "These words are ALWAYS ambiguous, so ALWAYS populate interpretations for them:\n"
+            "  'earnings' / 'profit' / 'profits' -> ['net income','operating income','EBITDA','gross profit']\n"
+            "  'how big is X' / 'size of X' -> ['total revenue','total assets','number of employees','net income']\n"
+            "  'performance' -> ['total revenue','net income','diluted earnings per share']\n"
+            "Return [] ONLY for a measure that is already precise ('total revenue', 'net income', 'poverty "
+            "rate', 'diabetes rate') — do NOT invent ambiguity for a specific measure.\n"
+            "SOURCES:\n" + src_list)
+
+
 def discover(question, sites=None, assumptions=None):
     """Pass 1: extract the ENTITY, the entity-expunged ATTRIBUTE, and (via the entity's
     TYPE) which SOURCE(s) apply. Pass 2: match the attribute to fields within those sources."""
     _say("status", icon="🔍", msg="Reading your question…")
     src_list = "\n".join(f"- {d}: covers {t}" for d, t in SOURCE_TYPES.items())
     ctx = json.loads(TK.llm(
-        "A demographic or population restriction ('for Asian residents', 'for women', 'among "
-        "adults 18-64', 'for renters') is part of the ATTRIBUTE, never part of the entity. The "
-        "entity is only the named company, nonprofit, place or organization: in 'unemployment "
-        "rate for Asian residents in Texas' the entity is 'Texas' and the attribute is "
-        "'unemployment rate for Asian residents'. Putting the restriction in the entity loses it "
-        "- retrieval runs on the attribute, so the general measure is returned instead.\n"
-        "Analyze a data question. Return JSON with: 'entity' (the single company/nonprofit/place/org "
-        "it is about, or empty), 'entities' (ALL named entities if it compares several, else []), "
-        "'type' (one of: company, nonprofit, place, org, none), 'attribute' (the metric/measure asked, "
-        "'canonical_entity' (the entity's full commonly-used name, specific enough to identify it "
-        "uniquely, disambiguated using THE QUESTION'S CONTEXT: 'St. Jude' in a question about NIH "
-        "research funding is 'St. Jude Children's Research Hospital'; 'Stanford' is 'Stanford "
-        "University'; a US city takes its state, 'Chicago, Illinois'), "
-        "'entity_status' ('resolved' when you are confident which real-world entity is meant; "
-        "'ambiguous' when the question genuinely does not distinguish it - an unqualified "
-        "Springfield, Portland, Cambridge, Washington or Georgia; 'none' when the question names "
-        "no entity at all, such as an exchange rate, a national total or a topical search), "
-        "'entity_candidates' (when and only when the status is 'ambiguous', the 2-5 real-world "
-        "entities the question could plausibly mean, each a full name in the same form as "
-        "canonical_entity, most likely first - e.g. for an unqualified Springfield: "
-        "['Springfield, Illinois', 'Springfield, Massachusetts', 'Springfield, Missouri']. "
-        "Leave canonical_entity empty when the status is 'ambiguous' or 'none'; do not guess "
-        "one, and do not invent candidates for a resolved or absent entity), "
-
-        "with the entity REMOVED — e.g. 'total revenue', 'poverty rate'), 'period' ('FY<year>' or "
-        "'latest'), 'periods' (list of 'FY<year>' if it spans several years, else []), 'sources' (the "
-        "dir names below whose entity type + scope fit), and 'shape', exactly one of:\n"
-        "  point           - ONE specific measured value ('Apple's total revenue', 'euro to dollar "
-        "exchange rate', 'the US national debt'). A currency exchange rate or a single national figure "
-        "is 'point' even with no named organization or place — it is NOT 'topical'.\n"
-        "  status          - one named entity, a yes/no or category ('Is X a 501(c)(3)?')\n"
-        "  entity-list     - one named entity, the records belonging to it ('NSF awards for MIT')\n"
-        "  comparison      - TWO OR MORE NAMED entities compared ('Harvard or MIT — more NIH funding?')\n"
-        "  timeseries      - one named entity across several periods ('Apple revenue 2019-2024')\n"
-        "  ranking         - which member of an OPEN population is highest/top-N, entities NOT named "
-        "('which university gets the most NIH funding', 'largest nonprofit')\n"
-        "  aggregate       - one statistic over an OPEN population ('how many 501(c)(3)s are there')\n"
-        "  filtered-subset - members of a population matching a numeric THRESHOLD ('nonprofits over $1M', "
-        "'universities getting more than a billion from NIH', 'cities above a 20% diabetes rate')\n"
-        "  ratio           - TWO OR MORE MEASURES combined, usually for ONE entity and often from "
-        "DIFFERENT sources: a share/fraction/percent-of, a ratio, or one measure set against another "
-        "('what share of X's revenue is federal funding', 'X's revenue vs the federal funding it "
-        "receives', 'NIH dollars per resident')\n"
-        "  topical         - no entity; a topic or keyword ('grants for education')\n"
-        "  correlation     - is measure A RELATED to / associated with measure B across a population "
-        "('is poverty correlated with diabetes across counties', 'do richer counties have less obesity')\n"
-        "KEY DISTINCTION 2: 'comparison' compares the SAME measure across DIFFERENT named entities; "
-        "'ratio' combines DIFFERENT measures (usually of one entity). 'Red Cross vs Feeding America "
-        "revenue' is comparison; 'Red Cross revenue vs its federal funding' is ratio.\n"
-        "KEY DISTINCTION: if the entities being compared are NAMED in the question it is 'comparison'; "
-        "if the question asks the engine to find them from a whole population it is 'ranking' (top/most) "
-        "or 'filtered-subset' (a stated numeric cut-off).\n"
-        "Also return 'threshold': for a filtered-subset, {\"op\": \">\"|\">=\"|\"<\"|\"<=\", \"value\": <number "
-        "as a plain integer, e.g. a billion = 1000000000, 20 percent = 20>}, else null.\n"
-        "Also return 'quantifier': 'existential' if the question asks only for EXAMPLES ('give me some', "
-        "'a few', 'name some', 'examples of'), or 'exhaustive' if it asks which/all members qualify.\n"
-        "Also return 'interpretations': whenever the MEASURE is genuinely ambiguous — it could mean "
-        "several materially DIFFERENT things a careful analyst would not conflate — a list of the 2-4 "
-        "distinct specific measures it could mean (each a concrete attribute string, entity removed). "
-        "These words are ALWAYS ambiguous, so ALWAYS populate interpretations for them:\n"
-        "  'earnings' / 'profit' / 'profits' -> ['net income','operating income','EBITDA','gross profit']\n"
-        "  'how big is X' / 'size of X' -> ['total revenue','total assets','number of employees','net income']\n"
-        "  'performance' -> ['total revenue','net income','diluted earnings per share']\n"
-        "Return [] ONLY for a measure that is already precise ('total revenue', 'net income', 'poverty "
-        "rate', 'diabetes rate') — do NOT invent ambiguity for a specific measure.\n"
-        "SOURCES:\n" + src_list, question, json_mode=True, stage="classify"))
+        _discovery_system(src_list), question, json_mode=True, stage="classify"))
     ctx = _normalize_shape(ctx)
     ctx["question"] = question
     if assumptions:
@@ -718,6 +723,25 @@ def _link_entity(ctx):
     return [found[0], None] if found else [None]
 
 
+def _entity_selection_system(name, kind, question, listing):
+    return (
+        f"A question mentions the {kind or 'entity'} \"{name}\". Below are database records "
+        "with similar names. Return the indices of the records that ARE that entity, judging "
+        "by the description - a place, a university, an album and a hospital can share a "
+        "name. Usually exactly ONE record is the entity. Return an EMPTY list if none is. "
+        "Return several ONLY when two records are genuinely competing readings of the same "
+        "name and a person would have to choose between them - Springfield, Illinois versus "
+        "Springfield, Massachusetts. A part, subsidiary, department or campus of the entity "
+        "is NOT the entity: 'Stanford University School of Medicine' is not Stanford "
+        "University. Neither is an article, event or topic about it: 'history of Apple Inc.' "
+        "and 'Apple media event' are not Apple Inc. Judge IDENTITY ONLY: ignore which record "
+        "carries useful identifiers and whether data exists for it. A record is not the "
+        "intended entity merely because it has an EIN, CIK or FIPS code. "
+        'Return JSON {"indices": [<n>, ...]}.\n\n'
+        f"QUESTION: {question}\n\nRECORDS:\n{listing}"
+    )
+
+
 def _link_records(name, question="", kind=""):
     """The Wikidata records that ARE the named entity: none, one, or several.
 
@@ -752,20 +776,7 @@ def _link_records(name, question="", kind=""):
                          for i, c in enumerate(cands))
     try:
         out = json.loads(TK.llm(
-            f"A question mentions the {kind or 'entity'} \"{name}\". Below are database records "
-            "with similar names. Return the indices of the records that ARE that entity, judging "
-            "by the description - a place, a university, an album and a hospital can share a "
-            "name. Usually exactly ONE record is the entity. Return an EMPTY list if none is. "
-            "Return several ONLY when two records are genuinely competing readings of the same "
-            "name and a person would have to choose between them - Springfield, Illinois versus "
-            "Springfield, Massachusetts. A part, subsidiary, department or campus of the entity "
-            "is NOT the entity: 'Stanford University School of Medicine' is not Stanford "
-            "University. Neither is an article, event or topic about it: 'history of Apple Inc.' "
-            "and 'Apple media event' are not Apple Inc. Judge IDENTITY ONLY: ignore which record "
-            "carries useful identifiers and whether data exists for it. A record is not the "
-            "intended entity merely because it has an EIN, CIK or FIPS code. "
-            'Return JSON {"indices": [<n>, ...]}.\n\n'
-            f"QUESTION: {question}\n\nRECORDS:\n{listing}",
+            _entity_selection_system(name, kind, question, listing),
             name, json_mode=True, stage="resolve-entity")).get("indices")
     except Exception:
         out = None
@@ -1169,6 +1180,28 @@ def _fetch(state, ctx):
     raise Backtrack("no structured retrieval for this source")
 
 
+_ADJUDICATION_SYSTEM = (
+    "You route data: decide whether the DATA record is ABOUT the right thing for the QUESTION. "
+    "Accept when its MEASURE, UNIT, CURRENCY, and PLACE/ENTITY match what the question asks. "
+    "Reject ONLY for a clear mismatch in one of those: a different measure (e.g. 'intragovernmental "
+    "holdings' when the total national debt was asked), a wrong unit (a total amount when a "
+    "per-share value or a percentage/rate was asked, or vice versa), a different named currency, or "
+    "a different place/entity (a broader containing area used as a proxy for a place is fine). "
+    "CRUCIAL: do NOT judge the numeric VALUE in any way — do not consider whether it seems too "
+    "large or small, whether an exchange rate looks inverted, or whether a date is recent, old, or "
+    "in the future. Treat the value and its date as authoritative and current. "
+    "A NEGATIVE or FALSE answer is still an ANSWER: for a yes/no question, a record whose value is "
+    "'no' / false / 0 (e.g. is_501c3=false correctly answers 'Is X a 501(c)(3)?' with NO) ANSWERS "
+    "the question and MUST be accepted — never reject a record because the answer it gives is "
+    "negative, or you will backtrack until you find a wrongly-positive match. Judge only WHAT the "
+    "record is about. Bias strongly toward ACCEPT: if the record names the same currency, place, or "
+    "measure the question asks about — even inside a longer official title (e.g. 'Treasury Reporting "
+    "Rates of Exchange: Euro Zone-Euro' answers a euro exchange-rate question) — ACCEPT. Reject only "
+    "when you are CONFIDENT it is a different currency/place/measure (e.g. China-Renminbi when the "
+    'euro was asked). When in doubt, ACCEPT. Return JSON {"ok": true|false, "why": "<short reason>"}.'
+)
+
+
 def _answers(question, data, structural=None):
     """Acceptance test at the goal of the search: is this record ABOUT the right thing for the question?
     This is a ROUTING check, not a fact-check — it turns backtracking from 'no data' into 'no WRONG
@@ -1184,24 +1217,7 @@ def _answers(question, data, structural=None):
             return True, ""
     try:
         v = json.loads(TK.llm(  # acceptance check
-            "You route data: decide whether the DATA record is ABOUT the right thing for the QUESTION. "
-            "Accept when its MEASURE, UNIT, CURRENCY, and PLACE/ENTITY match what the question asks. "
-            "Reject ONLY for a clear mismatch in one of those: a different measure (e.g. 'intragovernmental "
-            "holdings' when the total national debt was asked), a wrong unit (a total amount when a "
-            "per-share value or a percentage/rate was asked, or vice versa), a different named currency, or "
-            "a different place/entity (a broader containing area used as a proxy for a place is fine). "
-            "CRUCIAL: do NOT judge the numeric VALUE in any way — do not consider whether it seems too "
-            "large or small, whether an exchange rate looks inverted, or whether a date is recent, old, or "
-            "in the future. Treat the value and its date as authoritative and current. "
-            "A NEGATIVE or FALSE answer is still an ANSWER: for a yes/no question, a record whose value is "
-            "'no' / false / 0 (e.g. is_501c3=false correctly answers 'Is X a 501(c)(3)?' with NO) ANSWERS "
-            "the question and MUST be accepted — never reject a record because the answer it gives is "
-            "negative, or you will backtrack until you find a wrongly-positive match. Judge only WHAT the "
-            "record is about. Bias strongly toward ACCEPT: if the record names the same currency, place, or "
-            "measure the question asks about — even inside a longer official title (e.g. 'Treasury Reporting "
-            "Rates of Exchange: Euro Zone-Euro' answers a euro exchange-rate question) — ACCEPT. Reject only "
-            "when you are CONFIDENT it is a different currency/place/measure (e.g. China-Renminbi when the "
-            'euro was asked). When in doubt, ACCEPT. Return JSON {"ok": true|false, "why": "<short reason>"}.',
+            _ADJUDICATION_SYSTEM,
             json.dumps({"question": question, "data": data}), json_mode=True, stage="check"))
         ok, why = bool(v.get("ok", True)), v.get("why", "")
         # BACKSTOP: never reject on a DATE/PERIOD mismatch. The period is handled by the fetch's own
@@ -2068,7 +2084,524 @@ def retrieve_for(question):
             "attempts": [a.to_dict() for a in (state.get("_attempts") or [])]}
 
 
-_CONCEPT_LEAF = None
+# --- temporary async point path ---------------------------------------------------------------
+# This path deliberately sits beside the synchronous engine until the ASGI cutover. Stage 6 adds
+# composite fan-out; Stage 8 removes the sync copy and makes these names canonical.
+
+async def _asay(context, kind, **data):
+    await context.emit(kind, **data)
+
+
+async def discover_async(question, sites=None, assumptions=None, *, context):
+    """Classify and discover without crossing a synchronous provider boundary."""
+    await _asay(context, "status", icon="🔍", msg="Reading your question…")
+    src_list = "\n".join(f"- {directory}: covers {entity_type}"
+                          for directory, entity_type in SOURCE_TYPES.items())
+    system = _discovery_system(src_list)
+    try:
+        classified = await llm.chat_async(
+            system, question, context=context, json_mode=True, stage="classify")
+        ctx = _normalize_shape(json.loads(classified))
+    except (ValueError, TypeError) as exc:
+        raise SystemExit(f"question classification returned invalid JSON: {exc}") from exc
+    ctx["question"] = question
+    if isinstance(assumptions, dict):
+        allowed = {"entity", "type", "attribute", "period", "shape", "concept", "entity_qid"}
+        applied = {key: value for key, value in assumptions.items()
+                   if key in allowed and value not in (None, "")}
+        ctx.update(applied)
+        if "attribute" in applied:
+            ctx["interpretations"] = []
+        if applied.get("entity"):
+            ctx.update(entity_status="resolved", canonical_entity=applied["entity"],
+                       entity_candidates=[])
+        ctx = _normalize_shape(ctx)
+    if ctx.get("type") == "place" and not (ctx.get("entity") or "").strip():
+        recovered = _recover_place(question)
+        if recovered:
+            ctx["entity"] = recovered
+    sources = [source for source in (ctx.get("sources") or []) if source in SOURCE_TYPES]
+    sources = _ensure_grant_graph(question, sources or list(SOURCE_TYPES))
+    if sites:
+        wanted = [source for source in sites if source in SOURCE_TYPES]
+        if wanted:
+            sources = wanted
+    if (ctx.get("shape") in ("point", "status", "entity-list", "comparison", "timeseries")
+            and ctx.get("entity") and all(source.endswith("-bq") for source in sources)):
+        sources = list(SOURCE_TYPES)
+    await _asay(context, "plan", entity=ctx.get("entity") or "", type=ctx.get("type") or "none",
+                attribute=ctx.get("attribute") or "", period=ctx.get("period") or "latest",
+                sources=sources)
+    resolvable = ctx.get("type") in ("company", "nonprofit", "place")
+    attribute = ctx.get("attribute") or ""
+    readings = [reading for reading in (ctx.get("interpretations") or []) if reading]
+    if not attribute and readings:
+        attribute = readings[0]
+    primary = (attribute or question) if resolvable else question
+    secondary = question if resolvable else (attribute or question)
+    extra = readings[1:3] if not ctx.get("attribute") and readings else []
+    await _asay(context, "status", icon="📚",
+                msg="Asking the ARD Agent Finder which data tables can answer this…")
+    try:
+        found = await ard_client.search_many_async(
+            [primary, secondary] + extra, k=12, sources=sources,
+            rerank_query=question, context=context)
+    except ard_client.DiscoveryError as exc:
+        raise SystemExit(str(exc)) from exc
+    seen, hits = set(), []
+    for hit in found:
+        if hit["identifier"] not in seen:
+            seen.add(hit["identifier"])
+            hits.append(hit)
+    await _asay(context, "candidates", items=[
+        {"title": hit["title"], "score": hit["score"], "publisher": hit.get("publisher")}
+        for hit in hits[:6]])
+    return ctx, hits
+
+
+async def _solve_async(steps, goal, state, i=0):
+    """Sequential depth-first async solver with the synchronous solver's prune semantics."""
+    if i == len(steps):
+        return await goal(state)
+    name, options_fn = steps[i]
+    options = options_fn(state)
+    if hasattr(options, "__await__"):
+        options = await options
+    last = None
+    for option in options:
+        try:
+            return await _solve_async(steps, goal, {**state, name: option}, i + 1)
+        except Prune as exc:
+            if exc.step != name:
+                raise
+            last = exc
+        except Backtrack as exc:
+            last = exc
+    raise Backtrack(f"no viable {name} ({last})")
+
+
+async def _link_records_async(name, question="", kind="", *, context):
+    name = (name or "").strip()
+    if not name:
+        return []
+    cache = context.memo.setdefault("entities", {})
+    key = (name, question)
+    if key in cache:
+        return cache[key]
+    import resolver
+    try:
+        candidates = await resolver.search_async(name, context=context)
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except Exception:
+        candidates = []
+    if not candidates:
+        cache[key] = []
+        return []
+    listing = "\n".join(f"{index}. {candidate.get('label', '')} — {candidate.get('description', '')}"
+                         for index, candidate in enumerate(candidates))
+    try:
+        raw = await llm.chat_async(
+            _entity_selection_system(name, kind, question, listing),
+            name, context=context, json_mode=True, stage="resolve-entity")
+        indices = json.loads(raw).get("indices")
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except Exception:
+        indices = None
+    if not isinstance(indices, list):
+        cache[key] = []
+        return []
+    found = []
+    for index in indices:
+        if not isinstance(index, int) or not 0 <= index < len(candidates):
+            continue
+        try:
+            qid = candidates[index]["id"]
+            label, keys = await resolver.claims_async(qid, context=context)
+        except (asyncio.CancelledError, runtime.QueryCancelled):
+            raise
+        except Exception:
+            continue
+        found.append({"qid": qid, "label": label or candidates[index].get("label") or name,
+                      "name": candidates[index].get("label") or name,
+                      "description": candidates[index].get("description") or "", "keys": keys})
+    cache[key] = found
+    return found
+
+
+async def _link_entity_async(ctx, *, context):
+    status = (ctx.get("entity_status") or "").strip().lower()
+    canonical = (ctx.get("canonical_entity") or "").strip()
+    mention = (ctx.get("entity") or "").strip()
+    if status in ("none", "ambiguous"):
+        return [None]
+    import resolver
+    qid = (ctx.get("entity_qid") or "").strip()
+    if qid:
+        try:
+            label, keys = await resolver.claims_async(qid, context=context)
+        except (asyncio.CancelledError, runtime.QueryCancelled):
+            raise
+        except Exception:
+            label, keys = None, {}
+        if label or keys:
+            return [{"qid": qid, "label": label or canonical or qid,
+                     "name": canonical or label or qid, "keys": keys}, None]
+    if not (canonical or mention):
+        return [None]
+    found = await _link_records_async(canonical or mention, ctx.get("question") or "",
+                                      ctx.get("type") or "", context=context)
+    if len(found) > 1:
+        return found
+    return [found[0], None] if found else [None]
+
+
+async def _place_levels_async(entity, *, context):
+    if not entity:
+        return []
+    import resolver
+    try:
+        return await resolver.hierarchy_async(entity["qid"], context=context)
+    except (asyncio.CancelledError, runtime.QueryCancelled):
+        raise
+    except Exception:
+        return [{"label": entity.get("label"), "keys": entity.get("keys", {})}]
+
+
+async def _resolve_geo_async(place, *, context):
+    fips = _STATE_FIPS.get((place or "").strip().lower().lstrip("the ").strip())
+    if fips:
+        return f"state:{fips}"
+    raw = await llm.chat_async(
+        "Convert this US place to a Census geography clause. A state is state:NN; a county is "
+        'county:CCC&in=state:NN; a city is place:PPPPP&in=state:NN. JSON {"geo":"..."}.',
+        place, context=context, json_mode=True, stage="resolve-entity")
+    return json.loads(raw).get("geo")
+
+
+async def _key_options_async(state, ctx, *, context):
+    fm = driver.frontmatter(state["hit"]["identifier"])
+    keys = (state["entity"] or {}).get("keys", {})
+    mention = ctx.get("entity") or ""
+    if fm.get("concept"):
+        return ([str(int(keys["cik"]))] if keys.get("cik") else []) + [None]
+    if fm.get("field") or fm.get("classification") or fm.get("bmf"):
+        return (([str(keys["ein"]).replace("-", "")] if keys.get("ein") else [])
+                + ([mention] if mention else []) or [None])
+    if fm.get("profile"):
+        return ([(state["entity"] or {}).get("qid")] if (state["entity"] or {}).get("qid") else []) or [None]
+    if fm.get("scorecard"):
+        return [mention] if mention else [None]
+    levels = await _place_levels_async(state.get("entity"), context=context)
+    if fm.get("fema"):
+        states = [level["keys"].get("fips_state") for level in levels
+                  if level["keys"].get("fips_state")]
+        return states + ([mention] if mention else []) or [None]
+    if fm.get("variable"):
+        geos = [geo for geo in (_geo_from_fips(level["keys"]) for level in levels) if geo]
+        return geos + (["__native__"] if mention else []) or [None]
+    if fm.get("measureid"):
+        labels = [level["label"].replace(" County", "").strip() for level in levels
+                  if level.get("label")]
+        return labels or ([mention.replace(" County", "").strip()] if mention else [None])
+    if fm.get("search", {}).get("want") == "organization":
+        label = (state["entity"] or {}).get("label")
+        return list(dict.fromkeys(value for value in (label, mention) if value)) or [None]
+    return [None]
+
+
+async def _s_concept_async(f, *, context):
+    if f.key:
+        return await driver.fetch_metric_async(
+            f.attribute, cik=f.key, period=f.period, log=False,
+            concept=f.ctx.get("concept"), context=context)
+    tickers = context.memo.setdefault("tickers", {})
+    if f.mention not in tickers:
+        raw = await llm.chat_async(
+            'JSON {"ticker":"<US stock ticker or empty>"}.', f.mention,
+            context=context, json_mode=True, stage="resolve-entity")
+        tickers[f.mention] = json.loads(raw).get("ticker")
+    if not tickers[f.mention]:
+        raise Backtrack("no ticker")
+    return await driver.fetch_metric_async(
+        f.attribute, tickers[f.mention], f.period, log=False,
+        concept=f.ctx.get("concept"), context=context)
+
+
+async def _quirk_acs_pe_async(f, response, record, *, context):
+    if not (isinstance(response, list) and len(response) >= 2):
+        raise Backtrack("no census row")
+    def jam(value):
+        try:
+            return float(value) <= -100000000
+        except (TypeError, ValueError):
+            return False
+    value, variable = record.get("value"), record.get("variable") or ""
+    if str(value).strip() == "-888888888" and variable.endswith("E") and not variable.endswith("PE"):
+        percent = variable[:-1] + "PE"
+        geo = await _resolve_geo_async(f.mention, context=context) if f.key == "__native__" else f.key
+        sibling = await driver.accessor_async(f.ident, "acs", geo=geo, get=percent, context=context)
+        if isinstance(sibling, list) and len(sibling) >= 2 and not jam(sibling[1][1]):
+            value, variable = sibling[1][1], percent
+    if jam(value):
+        raise Backtrack("jam null")
+    record["value"], record["variable"] = value, variable
+    return record
+
+
+async def _bind_param_async(binding, f, *, context):
+    if binding == "$geo":
+        geo = await _resolve_geo_async(f.mention, context=context) if f.key == "__native__" else f.key
+        if not geo:
+            raise Backtrack("no geo")
+        return geo
+    return _bind_param(binding, f)
+
+
+async def _s_rest_async(f, *, context):
+    spec = _fetch_spec(f)
+    if not spec:
+        raise Backtrack("no fetch spec for this source")
+    params = {key: await _bind_param_async(value, f, context=context)
+              for key, value in (spec.get("params") or {}).items()}
+    if spec.get("query"):
+        query = re.sub(r"~(\w+)", lambda match: str(f.fm.get(match.group(1), "")), spec["query"])
+        filter_field = spec.get("filter_field")
+        if filter_field and f.fm.get(filter_field):
+            query += f"&filter={f.fm[filter_field]}"
+        params["query"] = query
+    response = await driver.accessor_async(
+        f.ident, spec.get("op", "get"), context=context, **params)
+    rows = _rows_of_resp(response, spec.get("rows"))
+    row = _pick_row(rows, spec["pick"]) if spec.get("pick") else None
+    if spec.get("pick") and row is None:
+        raise Backtrack("no matching row")
+    record = {key: value for key, binding in (spec.get("fields") or {}).items()
+              if (value := _bind_field(binding, f, response, row)) is not None}
+    if spec.get("quirk") == "acs_pe":
+        record = await _quirk_acs_pe_async(f, response, record, context=context)
+    record["source"] = spec.get("source")
+    return record
+
+
+async def _s_search_async(f, *, context):
+    search = f.fm["search"]
+    value = (f.key or f.mention) if search["want"] == "organization" else f.attribute
+    if not value:
+        raise Backtrack("no search term")
+    capability = (planner.capabilities(f.ident) or {}).get(search["operation"], {})
+    page = capability.get("page") or {}
+    async def pull(**extra):
+        result = await driver.accessor_async(
+            f.ident, search["operation"], context=context, **{search["arg"]: value, **extra})
+        for part in search["extract"].split("."):
+            result = result[int(part)] if isinstance(result, list) else result.get(part, [])
+        return result if isinstance(result, list) else []
+    if page.get("complete_for") == "entity" and page.get("offset_param"):
+        step, offset, results = int(page.get("max") or 500), 0, []
+        while offset < int((capability.get("population") or {}).get("ceiling") or 15000):
+            chunk = await pull(**{page["offset_param"]: offset})
+            results.extend(chunk)
+            if len(chunk) < step:
+                break
+            offset += step
+    else:
+        results = await pull()
+    out = {"query": value, "source": f.fm.get("title")}
+    rows = [row for row in results if isinstance(row, dict)]
+    total = sum(_amount(row) for row in rows)
+    out.update(record_count=len(rows), complete=bool(page.get("complete"))
+               or page.get("complete_for") == "entity")
+    if total:
+        out.update(total_usd=round(total, 2), total_usd_display="${:,.0f}".format(total))
+    if not out["complete"]:
+        out["coverage"] = (f"total is across the {len(rows)} award records returned by this "
+                           "query, not every award the organization has received")
+    out.update(_identity_scope(rows, f.fm.get("identity") or {}))
+    out["results"] = [{key: value for key, value in row.items()
+                       if not (isinstance(value, str) and len(value) > 240)} for row in rows][:8]
+    return out
+
+
+async def _fetch_async(state, ctx, *, context):
+    identifier = state["hit"]["identifier"]
+    fm = driver.frontmatter(identifier)
+    f = _F(fm, identifier, state.get("key"), state.get("period") or "latest",
+           ctx.get("attribute") or "", ctx.get("entity") or "", state, ctx)
+    try:
+        if fm.get("concept"):
+            return await _s_concept_async(f, context=context)
+        import nonprofit
+        if fm.get("classification"):
+            return await nonprofit.classify_async(_np_org(f), context=context)
+        if fm.get("field"):
+            return await nonprofit.fetch_np_async(fm["field"], _np_org(f), f.period, context=context)
+        if fm.get("bmf"):
+            return await nonprofit.bmf_async(fm["bmf"], _np_org(f), context=context)
+        if fm.get("profile"):
+            if not f.key:
+                raise Backtrack("no wikidata qid")
+            import orgprofile
+            return await orgprofile.fetch_async(
+                fm["profile"], f.key, (f.state.get("entity") or {}).get("label"), context=context)
+        if fm.get("scorecard"):
+            import college
+            return await college.fetch_async(fm["scorecard"], f.key or f.mention, context=context)
+        if fm.get("fema"):
+            import fema
+            return await fema.fetch_async(f.key or f.mention, context=context)
+        if any(fm.get(marker) for marker in ("variable", "measureid", "tfield")):
+            return await _s_rest_async(f, context=context)
+        if fm.get("search"):
+            return await _s_search_async(f, context=context)
+    except SystemExit as exc:
+        raise Backtrack(str(exc)) from exc
+    raise Backtrack("no structured retrieval for this source")
+
+
+async def _answers_async(question, data, structural=None, *, context):
+    if structural is not None:
+        if not structural.accepted:
+            return False, structural.reason
+        if not structural.residual_semantic_check:
+            return True, ""
+    try:
+        raw = await llm.chat_async(
+            _ADJUDICATION_SYSTEM,
+            json.dumps({"question": question, "data": data}), context=context,
+            json_mode=True, stage="check")
+        verdict = json.loads(raw)
+        ok, why = bool(verdict.get("ok", True)), verdict.get("why", "")
+        if not ok and re.search(r"\b(fy\d*|fiscal|period|years?|dates?|20\d\d|recent|latest|current)\b",
+                                why or "", re.I):
+            return True, ""
+        return ok, why
+    except runtime.QueryCancelled:
+        raise
+    except Exception:
+        return True, ""
+
+
+async def _search_async(question, ctx=None, hits=None, *, context):
+    if ctx is None or hits is None:
+        ctx, hits = await discover_async(question, context=context)
+    if not hits:
+        raise SystemExit("agent finder returned no sources")
+    period = ctx.get("period") or "latest"
+    intent, trace = QueryIntent.from_context(question, ctx), []
+    context.memo["attempts"] = trace
+    steps = [
+        ("hit", lambda state: hits),
+        ("entity", lambda state: _link_entity_async(ctx, context=context)),
+        ("key", lambda state: _key_options_async(state, ctx, context=context)),
+        ("period", lambda state: [period, "latest"] if period != "latest" else ["latest"]),
+    ]
+    attempts, tried_tables, done = 0, set(), {}
+
+    async def goal(state):
+        nonlocal attempts
+        if attempts >= MAX_SEARCH_ATTEMPTS:
+            raise SystemExit(
+                f"no source could answer this. {len(tried_tables)} of {len(hits)} candidate tables "
+                f"were tried in {attempts} attempts before the search budget ran out.")
+        entity = (state.get("entity") or {}).get("label")
+        identity = (state["hit"]["identifier"], (state.get("entity") or {}).get("qid"), entity,
+                    json.dumps(state.get("key"), sort_keys=True, default=str), state.get("period"))
+        if identity in done:
+            raise Backtrack(f"already attempted ({done[identity]})")
+        attempts += 1
+        tried_tables.add(state["hit"]["identifier"])
+        attempt = Attempt(source=state["hit"].get("publisher") or state["hit"]["title"],
+                          identifier=state["hit"]["identifier"], entity=state.get("entity"),
+                          period=state.get("period") or "latest")
+        connector = connectors.for_hit(state["hit"])
+        try:
+            evidence = await connector.execute_async(
+                intent, attempt, state["hit"],
+                lambda: _fetch_async(state, ctx, context=context),
+                adjudicator=lambda data, verdict: _answers_async(
+                    question, data, verdict, context=context))
+        except connectors.Rejected as exc:
+            done[identity] = "wrong table"
+            trace.append(exc.attempt)
+            raise Prune("hit", f"answer rejected: {exc}") from exc
+        except Backtrack as exc:
+            done[identity] = str(exc)
+            trace.append(attempt)
+            raise
+        except runtime.QueryCancelled:
+            trace.append(attempt)
+            raise
+        trace.append(attempt)
+        return {**state, "_data": evidence.payload, "_evidence": evidence, "_attempts": trace}
+
+    try:
+        state = await _solve_async(steps, goal, {})
+    except Backtrack as exc:
+        raise SystemExit(f"no source could answer: {exc}") from exc
+    return ctx, hits, state["hit"], hits.index(state["hit"]) + 1, state["_data"], state
+
+
+async def _present_async(question, evidence, *, context):
+    rendered = renderers.render(evidence)
+    if rendered:
+        return rendered.text, rendered.renderer
+    return await TK.synthesize_async(question, evidence.payload, context=context), "llm-fallback"
+
+
+async def run_async(question, sites=None, assumptions=None, on_ambiguity="answer", *, context=None):
+    """First complete single-loop path for point/status/entity-list questions."""
+    owned_clients = None
+    if context is None:
+        from source_clients import AsyncSourceClients
+        owned_clients = await AsyncSourceClients().start()
+        context = owned_clients.bind(QueryContext())
+    context.usage_ledger = context.usage_ledger or llm.Ledger()
+    context.discovery_ledger = context.discovery_ledger or ard_client.DiscoveryUsage()
+    try:
+        ctx, hits = await discover_async(
+            question, sites=sites, assumptions=assumptions, context=context)
+        if not hits:
+            raise SystemExit("agent finder returned no sources")
+        candidates = ctx.get("entity_candidates") or []
+        if (ctx.get("entity_status") or "").lower() == "ambiguous" and len(candidates) > 1:
+            return _entity_clarification(
+                question, ctx, candidates, context.usage_ledger, context.discovery_ledger)
+        shape = ctx.get("shape") if ctx.get("shape") in planner.SHAPES else "point"
+        if shape not in ("point", "status", "entity-list") or len(ctx.get("interpretations") or []) >= 2:
+            raise SystemExit(f"async composite shape '{shape}' is scheduled for Stage 6")
+        linked = await _link_entity_async(ctx, context=context)
+        linked_candidates = [entity for entity in linked if entity]
+        if len(linked_candidates) > 1:
+            return _entity_clarification(
+                question, ctx, linked_candidates, context.usage_ledger, context.discovery_ledger)
+        intent = QueryIntent.from_context(question, ctx, sites)
+        plan = planner.plan(shape, hits, ctx.get("quantifier") or "exhaustive")
+        if plan["verdict"] == "infeasible":
+            raise SystemExit(f"this is a '{shape}' question; {plan['why']}.")
+        ctx, hits, hit, _tried, data, state = await _search_async(
+            question, ctx=ctx, hits=hits, context=context)
+        hit = _cite_concept_actually_used(hit, data)
+        evidence, attempts = state["_evidence"], state.get("_attempts") or []
+        evidence.identifier = hit["identifier"]
+        evidence.provenance["source_document"] = hit["identifier"]
+        answer, renderer = await _present_async(question, evidence, context=context)
+        return {"question": question, "answer": answer,
+                "usage": context.usage_ledger.snapshot(),
+                "discovery_usage": context.discovery_ledger.snapshot(), "shape": shape,
+                "intent": intent.to_dict(), "attempts": [attempt.to_dict() for attempt in attempts],
+                "evidence": evidence.to_dict(), "answer_renderer": renderer,
+                "plan": planner.describe(shape, plan),
+                "source": {"identifier": hit["identifier"], "title": hit["title"],
+                           "publisher": hit.get("publisher")},
+                "candidates": [{"identifier": candidate.get("identifier"),
+                                "title": candidate["title"], "score": candidate["score"],
+                                "publisher": candidate.get("publisher")} for candidate in hits],
+                "data": data}
+    finally:
+        if owned_clients is not None:
+            await owned_clients.close()
 
 
 def _spent():
@@ -2085,17 +2618,7 @@ def _spent_discovery():
 
 def _leaf_for_concept(concept):
     """The SEC leaf that pins a given us-gaap concept, keyed off the built index metadata."""
-    global _CONCEPT_LEAF
-    if _CONCEPT_LEAF is None:
-        from registry import index as _ix
-        _CONCEPT_LEAF = {}
-        try:
-            for m in json.load(open(_ix.CACHE_META)):
-                if m.get("concept"):
-                    _CONCEPT_LEAF.setdefault(m["concept"], m)
-        except Exception:
-            pass
-    return _CONCEPT_LEAF.get(concept)
+    return driver._concept_meta(concept)
 
 
 def _cite_concept_actually_used(hit, data):
@@ -3509,7 +4032,11 @@ def main(argv):
         else:
             port = int(os.getenv("PORT") or os.getenv("WEBSITES_PORT") or 8099)
         return serve(port)
-    res = run(" ".join(argv) or "How much did Apple spend on R&D in 2023?")
+    use_async = bool(argv and argv[0] == "--async")
+    if use_async:
+        argv = argv[1:]
+    question = " ".join(argv) or "How much did Apple spend on R&D in 2023?"
+    res = asyncio.run(run_async(question)) if use_async else run(question)
     print(json.dumps(res, indent=2))
     _print_cost_report(res.get("usage") or {}, res.get("discovery_usage") or {})
 

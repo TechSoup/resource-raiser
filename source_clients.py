@@ -23,6 +23,7 @@ class AsyncSourceClients:
         try:
             # All filesystem work happens before readiness. Requests see cached immutable frontmatter.
             self.descriptor_count = okf_fetch.preload_descriptors(self.sources_root)
+            driver.preload_concept_metadata()
             self.http = self.http or ard_client.create_async_http_client()
             self.sec = driver.AsyncSecClient(self.http)
             project = os.getenv("GOOGLE_CLOUD_PROJECT")

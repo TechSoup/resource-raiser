@@ -5,6 +5,7 @@ Relevant to disaster-relief nonprofits (Red Cross, Habitat) and to community con
 grant applications. Keyed by US STATE; the place mention is normalized to a 2-letter code.
 """
 import re, json, urllib.request, urllib.parse
+import driver
 
 BASE = "https://www.fema.gov/api/open/v2/DisasterDeclarationsSummaries"
 UA = {"User-Agent": "ard-data-demo/1.0 (guha@guha.com)"}
@@ -53,5 +54,19 @@ def fetch(place, n=50):
     except Exception as e:
         raise SystemExit(f"FEMA error for {st}: {str(e)[:80]}")
     rows = d.get("DisasterDeclarationsSummaries", []) or []
+    return {"state": st, "record_count": len(rows), "results": rows,
+            "source": "FEMA OpenFEMA (did:web:fema.gov)"}
+
+
+async def fetch_async(place, n=50, *, context):
+    st = to_state(place)
+    if not st:
+        raise SystemExit(f"FEMA is by US state; could not map {place!r} to a state")
+    data = await driver.accessor_async(
+        "sources/fema/_access.md", "declarations", state=st, context=context)
+    fields = ("state", "declarationTitle", "incidentType", "declarationDate",
+              "fyDeclared", "declarationType")
+    rows = [{field: row.get(field) for field in fields}
+            for row in (data.get("DisasterDeclarationsSummaries") or [])[:n]]
     return {"state": st, "record_count": len(rows), "results": rows,
             "source": "FEMA OpenFEMA (did:web:fema.gov)"}

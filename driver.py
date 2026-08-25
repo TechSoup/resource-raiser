@@ -322,6 +322,12 @@ def _concept_meta(concept):
     return _SEC_CONCEPT_META.get(str(concept or "").removeprefix("us-gaap:"))
 
 
+def preload_concept_metadata():
+    """Load the immutable SEC concept index before async application readiness."""
+    _concept_meta(None)
+    return len(_SEC_CONCEPT_META or {})
+
+
 def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik=None,
                  concept=None):
     """Discover the right SEC concept for `metric_query`, then return the value the

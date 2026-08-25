@@ -31,6 +31,7 @@ class QueryContext:
     sec_client: Any = None
     bigquery_client: Any = None
     grant_pool: Any = None
+    memo: dict = field(default_factory=dict)
 
     @classmethod
     def with_timeout(cls, seconds: float, **kwargs):
