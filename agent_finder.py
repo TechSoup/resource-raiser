@@ -377,7 +377,7 @@ def _manifest():
     return {
         "@context": [ARD_CONTEXT, {"okf": OKF_NS}],
         "specVersion": "0.91",
-        "host": {"name": "Resource Raiser — ARD Agent Finder", "url": SELF,
+        "host": {"name": "Neural KG — ARD Agent Finder", "url": SELF,
                  "description": "OKF data-table descriptors for ~20 authoritative US public data "
                                 "sources, discoverable by natural-language query."},
         "capabilities": {"search": "POST /search", "explore": "POST /explore",

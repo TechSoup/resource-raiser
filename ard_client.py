@@ -103,7 +103,7 @@ def usage():
 def create_async_http_client(**kwargs):
     """Create the application-owned client used by the async harness path.
 
-    Ownership is deliberately outside this module: one Resource Raiser ASGI application will
+    Ownership is deliberately outside this module: one Neural KG ASGI application will
     create one client at startup, place it on each QueryContext, and close it at shutdown. That
     avoids a client singleton tied to whichever event loop happened to call this module first.
     """

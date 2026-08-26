@@ -1,10 +1,10 @@
-# Design — how Resource Raiser works
+# Design — how Neural KG works
 
 This document explains the architecture end to end: the one idea it's built on, the request
 pipeline, each stage in depth, and the design decisions behind them. For the planner's capability
 matrix specifically, see the companion [`DESIGN-query-shapes.md`](DESIGN-query-shapes.md).
 
-**Resource Raiser is an application of two standards: [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+**Neural KG is an application of two standards: [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 and [ARD](https://github.com/ards-project/ard-spec).** It contributes no new format and no new
 protocol — it is what you get when you put the two together and point them at live data:
 
@@ -31,7 +31,7 @@ attribute* — and force every question through it. When a question doesn't fit,
 they degrade into a name match and return something plausible but wrong ("which university gets the
 most NIH funding?" → the 10 largest matching *projects*, presented as a ranking).
 
-Resource Raiser takes a different stance: **a data source should describe itself well enough that a
+Neural KG takes a different stance: **a data source should describe itself well enough that a
 generic engine can decide what it can and cannot answer, and route accordingly.** Sources are
 described once, declaratively; there is no per-source query code. The engine discovers the right
 source, plans against its declared capability, fetches through one generic accessor, and checks the

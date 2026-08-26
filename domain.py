@@ -1,6 +1,6 @@
 """Stable records at the query engine's boundaries.
 
-These are deliberately small. Resource Raiser keeps empirical backtracking; the records make its
+These are deliberately small. Neural KG keeps empirical backtracking; the records make its
 interpretation, attempts, admitted facts, and final answer inspectable without inventing a plan IR.
 """
 from __future__ import annotations

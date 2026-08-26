@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The NLWeb protocol, spoken over the Resource Raiser engine.
+"""The NLWeb protocol, spoken over the Neural KG engine.
 
 This is the ONLY query contract the server offers. The engine's own shape — a synthesized answer
 plus the table it came from — maps onto NLWeb's message stream without inventing anything:

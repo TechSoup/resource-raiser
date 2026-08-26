@@ -88,7 +88,7 @@ def _build():
         return OpenAI(api_key=os.environ["OPENROUTER_API_KEY"],
                       base_url=os.getenv("OPENROUTER_BASE_URL", _OPENROUTER_BASE),
                       default_headers={"HTTP-Referer": os.getenv("OPENROUTER_APP_URL", ""),
-                                       "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Resource Raiser")},
+                                       "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Neural KG")},
                       timeout=_TIMEOUT, max_retries=_RETRIES)
     return OpenAI(api_key=os.environ["OPENAI_API_KEY"],       # plain OpenAI or an OpenAI-compatible host
                   base_url=os.getenv("OPENAI_BASE_URL") or None,
@@ -120,7 +120,7 @@ def _build_async():
         return AsyncOpenAI(api_key=os.environ["OPENROUTER_API_KEY"],
                            base_url=os.getenv("OPENROUTER_BASE_URL", _OPENROUTER_BASE),
                            default_headers={"HTTP-Referer": os.getenv("OPENROUTER_APP_URL", ""),
-                                            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Resource Raiser")},
+                                            "X-Title": os.getenv("OPENROUTER_APP_TITLE", "Neural KG")},
                            timeout=_TIMEOUT, max_retries=0)
     return AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"],
                        base_url=os.getenv("OPENAI_BASE_URL") or None,

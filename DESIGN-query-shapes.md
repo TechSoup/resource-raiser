@@ -433,5 +433,5 @@ the engine answers EACH and presents them side by side rather than choosing one.
   clean employee-count or EBITDA concept) and backtrack for a long time — one slow branch
   must not block the answerable ones. Verified: "How big is Microsoft?" → revenue $281.7B,
   assets $619B, net income $101.8B, employees honestly "unavailable".
-- The Resource Raiser HTTP boundary is ASGI/Uvicorn. Progress is carried by each query's bounded
+- The Neural KG HTTP boundary is ASGI/Uvicorn. Progress is carried by each query's bounded
   async queue, so concurrent requests cannot cross streams and no worker thread is created.

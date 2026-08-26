@@ -1,8 +1,8 @@
-# The Life of a TBN Query
+# The Life of a Neural KG Query
 
 ## Abstract
 
-TBN answers natural-language questions over independently published data sources without prior integration. Given a question, a language model interprets it into a structured intent; the system queries an ARD index for sources capable of supplying the required data, constructs a plan over the sources it returns, queries those sources directly, performs the requisite ETL just in time, and composes an answer from the records returned. Every answer is validated against the interpreted question before it is emitted, and questions whose required operation lies outside the available access paths are refused rather than approximated. This document walks through the execution of a single query, characterizes the boundary of the answerable query class, and reports where the current implementation falls short of the guarantees the architecture admits.
+Neural KG answers natural-language questions over independently published data sources without prior integration. Given a question, a language model interprets it into a structured intent; the system queries an ARD index for sources capable of supplying the required data, constructs a plan over the sources it returns, queries those sources directly, performs the requisite ETL just in time, and composes an answer from the records returned. Every answer is validated against the interpreted question before it is emitted, and questions whose required operation lies outside the available access paths are refused rather than approximated. This document walks through the execution of a single query, characterizes the boundary of the answerable query class, and reports where the current implementation falls short of the guarantees the architecture admits.
 
 Two properties are worth stating at the outset, because they are easily confused. The system is **model-directed but not model-grounded**. A language model decides what the question means, which entity it names, which measure it asks for, and what shape of operation would answer it; a model also writes the final sentence the caller reads. No model supplies a number. Every figure in an answer comes from a publisher's response that survived deterministic validation, and no model may overturn a deterministic rejection.
 
@@ -236,7 +236,7 @@ What this stage buys is the ability to pretend, at the point of asking, that a w
 
 A warehouse earns that illusion in advance and at considerable cost. Every source is mapped onto a common schema by an ETL pipeline: units reconciled, entity keys aligned, periods put on a common basis, missing-data conventions normalized. The work is substantial, it must be repeated whenever a publisher changes anything, and no question at all can be asked until the pipeline for its source has been built and is running. The payoff is that a query then sees uniform, joinable data.
 
-TBN performs the same conversions, per response, in the connector that owns each source:
+Neural KG performs the same conversions, per response, in the connector that owns each source:
 
 ```
 Census     "16.9"              → 16.9 with unit "%"
@@ -391,7 +391,7 @@ QueryIntent → Attempt[] → Evidence → Answer | Clarification
 
 ## 5. The queryability boundary
 
-The APIs available to TBN expose a finite set of access paths: lookup by canonical or native key; predicate or topical search; records belonging to one entity; ordering or top-N; complete population enumeration; filtering, grouping, or aggregation; historical or period-addressable lookup; stable join keys; and directed graph edges.
+The APIs available to Neural KG expose a finite set of access paths: lookup by canonical or native key; predicate or topical search; records belonging to one entity; ordering or top-N; complete population enumeration; filtering, grouping, or aggregation; historical or period-addressable lookup; stable join keys; and directed graph edges.
 
 These operations constitute the system's query algebra. A question is answerable if and only if the operation it requires is a member of that algebra or composes soundly from members of it.
 
@@ -443,7 +443,7 @@ Which questions this actually blocks depends on the direction of traversal:
 
 Forward traversal is answerable directly, because the filing is indexed by the organization that made the grants. Everything else requires an inverted index over the whole corpus, and somebody has to build it.
 
-TBN builds it: 7.8 million funder-to-recipient edges extracted from the bulk filings once and loaded into a store that exposes reverse and population operations. The specific implementation is incidental and could be replaced. What cannot be avoided, while retaining reverse and population-scale grant questions, is *some* materialized index — the operation does not exist upstream, and no amount of query planning conjures it.
+Neural KG builds it: 7.8 million funder-to-recipient edges extracted from the bulk filings once and loaded into a store that exposes reverse and population operations. The specific implementation is incidental and could be replaced. What cannot be avoided, while retaining reverse and population-scale grant questions, is *some* materialized index — the operation does not exist upstream, and no amount of query planning conjures it.
 
 This is the general remedy of Section 8 applied to a concrete case, and the cost is the one warehouses pay: the index is a copy, it goes stale, and it must be rebuilt as filings are released. It is paid for exactly one source, and only because the questions asked of that source fall outside what its publisher exposes.
 
@@ -607,6 +607,6 @@ The converse also holds, and is the more common case now that interpretation is 
 
 ## 9. Summary
 
-TBN is a bounded query planner over the access paths that published APIs expose. A language model interprets the question into a structured intent — entity, measure, shape, period, and the ambiguities it can detect; semantic discovery proposes candidates; declared capabilities constrain them deterministically; resolution parameterizes the selected path, using an identity registry solely to obtain source-specific identifiers; retrieval obtains facts; execution searches the remaining choice points concurrently under an explicit per-query context; deterministic validation admits or rejects, and no model may overturn a rejection; ambiguity is resolved against fetched values; a model composes the final answer from admitted evidence alone; and refusal reports the boundary that was reached.
+Neural KG is a bounded query planner over the access paths that published APIs expose. A language model interprets the question into a structured intent — entity, measure, shape, period, and the ambiguities it can detect; semantic discovery proposes candidates; declared capabilities constrain them deterministically; resolution parameterizes the selected path, using an identity registry solely to obtain source-specific identifiers; retrieval obtains facts; execution searches the remaining choice points concurrently under an explicit per-query context; deterministic validation admits or rejects, and no model may overturn a rejection; ambiguity is resolved against fetched values; a model composes the final answer from admitted evidence alone; and refusal reports the boundary that was reached.
 
 The model decides what is being asked and how to say the answer. It does not decide what is true.

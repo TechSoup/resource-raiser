@@ -23,7 +23,7 @@ answer. Make “fetch the fact” a separate stage.
 **Draft.** The Apple query now provides a strong narrative spine.
 
 **Claude-style critique.** Better, but the trace accidentally implies that every query follows the
-same linear path. Resource Raiser is interesting precisely because point, ranking, derivation,
+same linear path. Neural KG is interesting precisely because point, ranking, derivation,
 correlation, topical search, and graph traversal do not share one execution mechanism. The document
 still describes a pipeline with retries rather than a decision graph.
 

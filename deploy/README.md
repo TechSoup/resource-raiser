@@ -2,7 +2,7 @@
 
 This deployment uses Azure App Service's managed Python 3.13 runtime. There is no Docker image,
 container registry, or Redis dependency. Each Web App instance runs one Uvicorn event loop for
-Resource Raiser and one loopback-only Agent Finder; App Service scales those complete instances.
+Neural KG and one loopback-only Agent Finder; App Service scales those complete instances.
 
 ## Build the code-release ZIP
 

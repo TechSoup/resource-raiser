@@ -1,4 +1,4 @@
-"""Execution boundary for generic and specialized Resource Raiser sources.
+"""Execution boundary for generic and specialized Neural KG sources.
 
 Connectors do not replace empirical backtracking. They make each empirical execution observable,
 run structural/source validation, and admit only accepted responses as Evidence.

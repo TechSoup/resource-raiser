@@ -1,6 +1,6 @@
 # Setup — choosing and configuring a model provider
 
-Resource Raiser needs a **chat model** (classify, re-rank, acceptance-check, synthesize) and an
+Neural KG needs a **chat model** (classify, re-rank, acceptance-check, synthesize) and an
 **embedding model** (build the ARD index, embed each query). It works with **OpenAI, Google Gemini,
 Azure OpenAI, or a local OpenAI-compatible server (e.g. Ollama)** — all through one SDK (`llm.py`).
 

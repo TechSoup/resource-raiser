@@ -1,4 +1,4 @@
-# Resource Raiser
+# Neural KG
 
 An agentic natural-language data-query engine that demonstrates a simple thesis:
 **data is the most important agentic resource, and it should be discoverable via

@@ -183,7 +183,7 @@ repeating it doubled the prompt (838 → 429 chars per card × 60 cards) for no 
 - **Partial deploys are silent.** An `rsync` failed on a bad flag once and left the VM serving stale
   descriptors against a freshly synced index. Verify both sides after deploying — md5 the modules.
 - Services are `rr-finder` and `rr-harness` (systemd, `Restart=always`, logs in
-  `/var/log/resource-raiser/`), behind nginx: NLWeb at `/`, Resource Raiser at `/rr/`, ARD API at
+  `/var/log/resource-raiser/`), behind nginx: NLWeb at `/`, Neural KG at `/rr/`, ARD API at
   `/ard-api/`, manifest at `/.well-known/ard.json`.
 - **The nginx well-known location must stay an exact match.** A prefix match on `/.well-known/`
   would also capture `/.well-known/acme-challenge/` and silently break certificate renewal ~90 days

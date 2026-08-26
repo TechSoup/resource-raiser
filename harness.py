@@ -2085,10 +2085,10 @@ def _cite_concept_actually_used(hit, data):
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OKF on ARD</title>
+<title>Neural KG</title>
 <style>
  body{font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1a1a1a}
- h1{font-size:1.5rem;margin-bottom:.2em} .sub{color:#666;margin-top:0}
+ h1{font-size:1.5rem;margin-bottom:.1em} .byline{color:#666;font-size:.95rem;margin:0 0 .6em;letter-spacing:.02em} .sub{color:#666;margin-top:0}
  form{display:flex;gap:8px;margin:18px 0} input{flex:1;padding:11px 13px;font-size:1rem;border:1px solid #ccc;border-radius:8px}
  button{padding:11px 18px;font-size:1rem;border:0;border-radius:8px;background:#1a73e8;color:#fff;cursor:pointer}
  button:disabled{background:#9bb7ea}
@@ -2144,7 +2144,8 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .rec-f{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:.85rem;color:#555} .rec-f b{color:#222;font-weight:600}
  .amt{color:#137333;font-weight:700}
 </style></head><body>
-<h1><a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">OKF</a> on <a href="https://agenticresourcediscovery.org/" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">ARD</a></h1>
+<h1>Neural KG</h1>
+<p class="byline"><a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">OKF</a> + <a href="https://agenticresourcediscovery.org/" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">ARD</a></p>
 <p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="life-of-a-query" style="color:#1a73e8">Life of a query ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
 <form id="f"><input id="q" placeholder="e.g. Is the American Red Cross a 501(c)(3)?" autofocus><button id="b">Ask</button></form>
 <div id="out"></div>
@@ -2403,8 +2404,8 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 # result rendering) — only the framing copy and the tab source differ, so it is derived by
 # substitution rather than duplicated.
 TECHSOUP_PAGE = (PAGE
-    .replace("<title>OKF on ARD</title>", "<title>Data for Nonprofits — a TechSoup view</title>")
-    .replace('<h1><a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">OKF</a> on <a href="https://agenticresourcediscovery.org/" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">ARD</a></h1>',
+    .replace("<title>Neural KG</title>", "<title>Data for Nonprofits — a TechSoup view</title>")
+    .replace('<h1>Neural KG</h1>',
              '<h1>Data for Nonprofits</h1>')
     .replace('<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which '
              'dataset answers it; the data is fetched live, the answer is checked, and the search '
@@ -2621,7 +2622,7 @@ def _nlweb_text(ev):
 
 HOW_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How Resource Raiser works</title>
+<title>How Neural KG works</title>
 <style>
  body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1a1a1a}
  h1{font-size:1.5em;margin:0 0 6px} h2{font-size:1.05em;margin:30px 0 8px}

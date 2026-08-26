@@ -1,4 +1,4 @@
-"""Single-loop ASGI transport for Resource Raiser.
+"""Single-loop ASGI transport for Neural KG.
 
 Run one event loop per instance::
 
