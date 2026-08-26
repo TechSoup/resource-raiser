@@ -2144,7 +2144,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .rec-f{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:.85rem;color:#555} .rec-f b{color:#222;font-weight:600}
  .amt{color:#137333;font-weight:700}
 </style></head><body>
-<h1>OKF on ARD</h1>
+<h1><a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">OKF</a> on <a href="https://agenticresourcediscovery.org/" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">ARD</a></h1>
 <p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="life-of-a-query" style="color:#1a73e8">Life of a query ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
 <form id="f"><input id="q" placeholder="e.g. Is the American Red Cross a 501(c)(3)?" autofocus><button id="b">Ask</button></form>
 <div id="out"></div>
@@ -2404,7 +2404,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 # substitution rather than duplicated.
 TECHSOUP_PAGE = (PAGE
     .replace("<title>OKF on ARD</title>", "<title>Data for Nonprofits — a TechSoup view</title>")
-    .replace('<h1>OKF on ARD</h1>',
+    .replace('<h1><a href="https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">OKF</a> on <a href="https://agenticresourcediscovery.org/" style="color:inherit;text-decoration:underline;text-decoration-color:#bbb;text-underline-offset:3px">ARD</a></h1>',
              '<h1>Data for Nonprofits</h1>')
     .replace('<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which '
              'dataset answers it; the data is fetched live, the answer is checked, and the search '
