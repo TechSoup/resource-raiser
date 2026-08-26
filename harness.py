@@ -2085,7 +2085,7 @@ def _cite_concept_actually_used(hit, data):
 
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agentic Data Query</title>
+<title>OKF on ARD</title>
 <style>
  body{font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1a1a1a}
  h1{font-size:1.5rem;margin-bottom:.2em} .sub{color:#666;margin-top:0}
@@ -2144,7 +2144,7 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
  .rec-f{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:.85rem;color:#555} .rec-f b{color:#222;font-weight:600}
  .amt{color:#137333;font-weight:700}
 </style></head><body>
-<h1>Agentic Data Query</h1>
+<h1>OKF on ARD</h1>
 <p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which dataset answers it; the data is fetched live, the answer is checked, and the search backtracks until it actually answers your question. <a href="how-it-works" style="color:#1a73e8">How it works ›</a> · <a href="life-of-a-query" style="color:#1a73e8">Life of a query ›</a> · <a href="techsoup" style="color:#1a73e8">TechSoup view ›</a></p>
 <form id="f"><input id="q" placeholder="e.g. Is the American Red Cross a 501(c)(3)?" autofocus><button id="b">Ask</button></form>
 <div id="out"></div>
@@ -2403,8 +2403,8 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 # result rendering) — only the framing copy and the tab source differ, so it is derived by
 # substitution rather than duplicated.
 TECHSOUP_PAGE = (PAGE
-    .replace("<title>Agentic Data Query</title>", "<title>Data for Nonprofits — a TechSoup view</title>")
-    .replace('<h1>Agentic Data Query</h1>',
+    .replace("<title>OKF on ARD</title>", "<title>Data for Nonprofits — a TechSoup view</title>")
+    .replace('<h1>OKF on ARD</h1>',
              '<h1>Data for Nonprofits</h1>')
     .replace('<p class="sub">Ask a question in plain English. An ARD Agent Finder discovers which '
              'dataset answers it; the data is fetched live, the answer is checked, and the search '
