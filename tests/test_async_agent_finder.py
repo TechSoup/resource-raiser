@@ -14,7 +14,9 @@ sys.path.insert(0, ROOT)
 
 import agent_finder
 import ard_client
+import driver
 import runtime
+from accessor import okf_fetch
 from query_context import QueryContext
 from registry import index
 
@@ -28,6 +30,7 @@ def hit(text, score=91):
 class AsyncAgentFinderTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         agent_finder._QUOTA.clear()
+        ard_client._ENTRY_FRONTMATTER.clear()
 
     async def _client(self, search_side_effect=None):
         app = agent_finder.create_app(llm_client=object())
@@ -70,6 +73,55 @@ class AsyncAgentFinderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(explore.json()["resultType"], "facets")
         self.assertTrue({"results", "referrals", "pageToken", "usage"} <= set(search.json()))
         self.assertEqual(search.json()["results"][0]["displayName"], "Table Detroit")
+
+    async def test_full_entry_is_mechanical_flattened_okf_without_frontmatter_duplication(self):
+        path = "sources/nonprofit-990/cstbasisothr.md"
+        entry = agent_finder._entry_from_meta({
+            "identifier": path,
+            "title": "index title is deliberately ignored for the full entry",
+            "description": "index description is deliberately ignored for the full entry",
+            "queries": ["index query"],
+            "scope": "index scope",
+        }, full=True)
+
+        self.assertEqual(entry["displayName"],
+                         "Cost Basis — Other Assets — IRS Form 990 (Nonprofit)")
+        self.assertEqual(entry["representativeQueries"], [
+            "What is the cost basis of other assets sold?",
+            "How much did we invest in the other assets we sold?",
+            "Can you tell me the cost basis for our sold other assets?",
+        ])
+        self.assertEqual(entry["okf:type"], "Nonprofit 990 Field")
+        self.assertEqual(entry["okf:field"], "cstbasisothr")
+        self.assertEqual(entry["okf:source"], "./_access.md")
+        self.assertEqual(entry["okf:resource"],
+                         "https://projects.propublica.org/nonprofits/api/v2/")
+        self.assertEqual(entry["okf:access"]["operations"]["organization"]
+                         ["capability"]["period"], {"field": "tax_prd_yr", "multi": True})
+        self.assertNotIn("frontmatter", entry["data"])
+        self.assertNotIn("mediaType", entry["data"])
+        self.assertTrue(entry["data"]["content"].lstrip("\r\n").startswith("# Schema\n"))
+        self.assertNotIn("---\ntype:", entry["data"]["content"])
+
+    async def test_execution_uses_the_descriptor_delivered_by_ard(self):
+        path = "sources/nonprofit-990/cstbasisothr.md"
+        entry = agent_finder._entry_from_meta({
+            "identifier": path, "title": "fixture", "description": "fixture",
+            "queries": ["fixture"], "score": 99,
+        }, full=True)
+        entry["score"] = 99
+
+        hit = ard_client._search_results({"results": [entry]})[0]
+        with mock.patch.object(okf_fetch, "load_okf",
+                               side_effect=AssertionError("must not reopen local OKF")):
+            metadata = driver.frontmatter(hit["identifier"])
+            method, url, _headers, _body = okf_fetch._request(
+                hit["identifier"], "organization", {"ein": "530196605"}, metadata)
+
+        self.assertEqual(metadata["field"], "cstbasisothr")
+        self.assertEqual(method, "GET")
+        self.assertEqual(url,
+            "https://projects.propublica.org/nonprofits/api/v2/organizations/530196605.json")
 
     async def test_simultaneous_searches_isolate_results_and_usage(self):
         both_started = asyncio.Event()

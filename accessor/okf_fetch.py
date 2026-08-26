@@ -88,9 +88,9 @@ def extract(obj, dotted):
     return obj
 
 
-def _request(okf_path, operation, params):
+def _request(okf_path, operation, params, descriptor=None):
     """Resolve one immutable descriptor into an HTTP request without performing I/O."""
-    fm = load_okf(okf_path)
+    fm = descriptor if descriptor is not None else load_okf(okf_path)
     access = resolve_access(fm, okf_path)
     ops = access.get("operations", {})
     if operation not in ops:
@@ -131,19 +131,20 @@ def _decode(body, url, dotted=None):
     return result
 
 
-def fetch(okf_path, operation, params=None, dotted=None):
+def fetch(okf_path, operation, params=None, dotted=None, descriptor=None):
     """In-process synchronous compatibility path; removes the subprocess boundary immediately."""
-    method, url, headers, body = _request(okf_path, operation, params or {})
+    method, url, headers, body = _request(okf_path, operation, params or {}, descriptor)
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     return _decode(_fetch_with_retry(request), url, dotted)
 
 
-async def fetch_async(okf_path, operation, params=None, dotted=None, *, context, tries=4):
+async def fetch_async(okf_path, operation, params=None, dotted=None, *, context, tries=4,
+                      descriptor=None):
     """Native async descriptor fetch using the application-owned HTTPX client."""
     context.check()
     if context.http_client is None:
         raise RuntimeError("async publisher access requires QueryContext.http_client")
-    method, url, headers, body = _request(okf_path, operation, params or {})
+    method, url, headers, body = _request(okf_path, operation, params or {}, descriptor)
     response = None
     for attempt in range(tries):
         delay = 1.5 * (attempt + 1)

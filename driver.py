@@ -237,6 +237,9 @@ def ask_llm(system, user, json_mode=False, model=None, stage="other", max_tokens
 
 
 def frontmatter(rel):
+    delivered = ard_client.cached_frontmatter(rel)
+    if delivered is not None:
+        return delivered
     from accessor import okf_fetch
     path = rel if os.path.isabs(rel) else os.path.join(ROOT, rel)
     return okf_fetch.load_okf(os.path.normpath(path))
@@ -256,7 +259,8 @@ def accessor(rel, op, **params):
     """In-process compatibility path; the request-time accessor subprocess is gone."""
     from accessor import okf_fetch
     try:
-        return okf_fetch.fetch(os.path.join(ROOT, rel), op, params)
+        return okf_fetch.fetch(os.path.join(ROOT, rel), op, params,
+                               descriptor=ard_client.cached_frontmatter(rel))
     except runtime.Refused as exc:
         message = str(exc)
         if "CREDENTIAL_ERROR:" in message:
@@ -267,7 +271,9 @@ def accessor(rel, op, **params):
 async def accessor_async(rel, op, *, context, **params):
     from accessor import okf_fetch
     try:
-        return await okf_fetch.fetch_async(os.path.join(ROOT, rel), op, params, context=context)
+        return await okf_fetch.fetch_async(
+            os.path.join(ROOT, rel), op, params, context=context,
+            descriptor=ard_client.cached_frontmatter(rel))
     except okf_fetch.PublisherRateLimitError as exc:
         raise SourceRateLimitError(str(exc)) from exc
     except runtime.Refused as exc:
@@ -381,7 +387,9 @@ def fetch_metric(metric_query, ticker=None, period="latest", k=25, log=True, cik
             return None                                       # reports the concept but not this period
         if log:
             print(f"  • {metric_query!r} → {fm['concept']} ({title}) FY{row['end'][:4]} = {row['val']:,} {unit}")
-        src = frontmatter(os.path.join(os.path.dirname(hit["identifier"]), fm["source"])) if fm.get("source") else fm
+        src = (fm if fm.get("access") else
+               frontmatter(os.path.join(os.path.dirname(hit["identifier"]), fm["source"]))) \
+              if fm.get("source") else fm
         did = (src.get("trust") or {}).get("identity", src.get("resource"))
         out = {"company": data["entityName"], "metric": fm["title"].split(" — ")[0],
                "concept": f"us-gaap:{fm['concept']}", "period": f"FY{row['end'][:4]}",
@@ -471,8 +479,9 @@ async def fetch_metric_async(metric_query, ticker=None, period="latest", k=25, l
         row = pick_value(rows, period, metadata.get("periodType", "duration"), strict=True)
         if row is None:
             return None
-        source = (frontmatter(os.path.join(os.path.dirname(hit["identifier"]), metadata["source"]))
-                  if metadata.get("source") else metadata)
+        source = (metadata if metadata.get("access") else
+                  frontmatter(os.path.join(os.path.dirname(hit["identifier"]), metadata["source"]))) \
+                 if metadata.get("source") else metadata
         identity = (source.get("trust") or {}).get("identity", source.get("resource"))
         result = {"company": data["entityName"], "metric": metadata["title"].split(" — ")[0],
                   "concept": f"us-gaap:{concept_name}", "period": f"FY{row['end'][:4]}",

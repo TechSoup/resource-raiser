@@ -1565,8 +1565,7 @@ async def _run_grants_async(question, ctx, *, context):
 async def _run_ranking_async(question, ctx, p, top_n=10, *, context):
     hit, cap, operation = p["hit"], p["capability"], p["operation"]
     fm = driver.frontmatter(hit["identifier"]) or {}
-    access = driver.frontmatter(planner.access_path(hit["identifier"])) or {}
-    operation_doc = ((access.get("access") or {}).get("operations") or {}).get(operation, {})
+    operation_doc = ((fm.get("access") or {}).get("operations") or {}).get(operation, {})
     needed = {field for _, field, _, _ in __import__("string").Formatter().parse(
         operation_doc.get("url", "")) if field}
     params = {key: fm[key] for key in needed if key in fm}

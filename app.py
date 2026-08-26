@@ -460,7 +460,7 @@ def create_app(engine=harness.run, clients_factory=AsyncSourceClients):
         if not entry: return JSONResponse({"error": "no such entry"}, 404)
         return JSONResponse({"identifier": entry["identifier"], "source": entry.get("publisher", ""),
             "ard_entry": entry, "raw": (entry.get("data") or {}).get("content", ""),
-            "access_doc": entry.get("accessDescriptor", "")})
+            "access_doc": entry.get("okf:source", "")})
 
     async def ard_list(request):
         try:

@@ -16,6 +16,30 @@ BASE = os.getenv("AGENT_FINDER_URL", "http://127.0.0.1:8088").rstrip("/")
 # TimeoutError (a subclass of neither URLError nor ConnectionError), which escaped to the top -> HTTP 000.
 TIMEOUT = int(os.getenv("AGENT_FINDER_TIMEOUT", "180"))
 
+# Effective descriptors delivered by ARD, keyed by the OKF path used throughout the existing
+# execution engine. This is populated at discovery time; local Markdown loading is now a fallback,
+# not the normal request path.
+_ENTRY_FRONTMATTER = {}
+
+
+def _frontmatter_from_entry(item):
+    """Mechanically compact one flattened ARD JSON-LD entry to its effective OKF mapping."""
+    fm = {key[4:]: value for key, value in item.items()
+          if key.startswith("okf:") and key not in ("okf:sourceDocument",
+                                                     "okf:accessDescriptor")}
+    if item.get("displayName") not in (None, ""):
+        fm["title"] = item["displayName"]
+    for key in ("description", "tags", "representativeQueries"):
+        if item.get(key) not in (None, "", [], {}):
+            fm[key] = item[key]
+    if item.get("trustManifest"):
+        fm["trust"] = item["trustManifest"]
+    return fm
+
+
+def cached_frontmatter(identifier):
+    return _ENTRY_FRONTMATTER.get(identifier)
+
 
 class DiscoveryError(RuntimeError):
     """The finder answered, but safe semantic discovery could not produce candidates."""
@@ -186,7 +210,7 @@ def agents(publisher=None, q="", page_size=50, page_token=""):
 
 
 def entry(identifier):
-    """GET /agents/entry — one catalog entry with the OKF document inline as `data`."""
+    """GET /agents/entry — one self-contained, mechanically projected OKF ARD entry."""
     return _get("/agents/entry", {"id": identifier})
 
 
@@ -296,12 +320,18 @@ def _search_results(payload):
         raise NoRelevantTablesError(
             f"no indexed table cleared the LLM relevance threshold ({observed}; "
             f"threshold {threshold:g}); nothing was fetched")
-    return [{"identifier": item.get("okf:sourceDocument") or item["identifier"],
-             "urn": item["identifier"],
-             "title": item.get("displayName", ""),
-             "score": item.get("score"),
-             "publisher": item.get("okf:source") or (item.get("tags") or [None])[0]}
-            for item in payload.get("results", [])]
+    results = []
+    for item in payload.get("results", []):
+        identifier = item.get("okf:sourceDocument") or item["identifier"]
+        metadata = _frontmatter_from_entry(item)
+        _ENTRY_FRONTMATTER[identifier] = metadata
+        parts = identifier.split("/")
+        results.append({"identifier": identifier, "urn": item["identifier"],
+                        "title": item.get("displayName", ""), "score": item.get("score"),
+                        "publisher": parts[1] if len(parts) > 2 else
+                                     (item.get("tags") or [None])[0],
+                        "metadata": metadata})
+    return results
 
 
 async def search_many_async(texts, k=10, sources=None, rerank=True, rerank_query=None, *, context):

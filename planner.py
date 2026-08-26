@@ -51,11 +51,13 @@ def capabilities(identifier):
     """{operation: cap} for this leaf's source. Each cap is the DERIVED access paths (key kind,
     order, enumerate — from derive.py, cached) MERGED with the OKF's declared RESIDUE (grain,
     returns, page limits, completeness) — the facts the query grammar can't show."""
-    p = access_path(identifier)
-    if not p:
-        return {}
     try:
-        acc = (driver.frontmatter(p) or {}).get("access") or {}
+        fm = driver.frontmatter(identifier) or {}
+        if fm.get("access"):
+            acc = fm["access"]
+        else:
+            p = access_path(identifier)
+            acc = (driver.frontmatter(p) or {}).get("access") if p else {}
     except Exception:
         return {}
     out = {}

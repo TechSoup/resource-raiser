@@ -108,16 +108,10 @@ ARD_CONTEXT = os.getenv("ARD_CONTEXT_URL", "https://agenticresourcediscovery.org
 OKF_NS = os.getenv("OKF_NAMESPACE",
                    "https://github.com/GoogleCloudPlatform/knowledge-catalog/okf/ns#")
 
-# OKF frontmatter -> namespaced ARD term. These are exactly the fields ARD's own vocabulary has
-# no word for: what taxonomy a measure comes from, which concept it pins, what one row means.
-# The schema keeps additionalProperties open so they stay valid and become filter dimensions.
-_OKF_TERMS = {
-    "taxonomy": "okf:taxonomy", "concept": "okf:concept", "periodType": "okf:periodType",
-    "unit": "okf:unit", "variable": "okf:variable", "field": "okf:field",
-    "measureid": "okf:measureId", "scorecard": "okf:scorecardField", "tfield": "okf:treasuryField",
-    "path": "okf:datasetPath", "get": "okf:queryParams", "filter": "okf:filter",
-    "entityType": "okf:entityType", "type": "okf:documentType",
-}
+# OKF fields that ARD already carries under its default vocabulary. All other frontmatter keys
+# retain their spelling and are prefixed mechanically with `okf:`. There is deliberately no
+# field-by-field translation table: a newly introduced OKF extension must survive without code.
+_ARD_FIELDS = {"title", "description", "tags", "representativeQueries", "trust"}
 
 
 def _urn_segment(v):
@@ -165,6 +159,39 @@ def _leaf_fm(identifier):
         return {}
 
 
+def _leaf_body(identifier):
+    """The Markdown body only. Frontmatter is represented as JSON-LD terms on the entry."""
+    text = _leaf_text(identifier)
+    parts = text.split("---", 2)
+    if len(parts) != 3:
+        return text
+    body = parts[2]
+    if body.startswith("\r\n"):
+        return body[2:]
+    if body.startswith("\n"):
+        return body[1:]
+    return body
+
+
+def _effective_okf(identifier):
+    """Resolve the repo's `_access.md` authoring inheritance with a shallow, deterministic merge.
+
+    The access document is copied first and the leaf is copied second, so a leaf value wins on an
+    exact key collision. No value is inferred, renamed, summarized, or normalized.
+    """
+    src = publisher(identifier)
+    effective = dict(_access_fm(src))
+    effective.update(_leaf_fm(identifier))
+    return effective
+
+
+def _add_okf_terms(entry, frontmatter):
+    """Project an effective OKF frontmatter mapping onto one ARD JSON-LD node."""
+    for key, value in frontmatter.items():
+        if key not in _ARD_FIELDS and value not in (None, "", [], {}):
+            entry[f"okf:{key}"] = value
+
+
 def ard_urn(identifier):
     """urn:air:<publisher>:okf:<source>.<leaf> — domain-anchored, per §4.2."""
     src = publisher(identifier)
@@ -183,6 +210,7 @@ def _entry_from_meta(m, full=False):
     identifier = m["identifier"]
     src = publisher(identifier)
     acc = _access_fm(src)
+    fm = _leaf_fm(identifier) if full else {}
     e = {
         # FIRST key, and on EVERY entry — not just full ones, and not only on the response
         # envelope. These entries use a second namespace, and a prefixed term is undefined unless
@@ -207,12 +235,15 @@ def _entry_from_meta(m, full=False):
     if trust.get("identity"):
         e["trustManifest"] = {k: v for k, v in trust.items() if v}
     if full:
-        fm = _leaf_fm(identifier)
-        for k, term in _OKF_TERMS.items():
-            if fm.get(k) not in (None, "", [], {}):
-                e[term] = fm[k]
-        e["data"] = {"mediaType": "text/markdown", "frontmatter": fm,
-                     "content": _leaf_text(identifier)}
+        effective = _effective_okf(identifier)
+        # The ARD fields use the leaf values verbatim. Access-document values are inherited only
+        # for OKF extension terms; they must not replace the leaf's discovery card.
+        e["displayName"] = fm.get("title", e["displayName"])
+        e["description"] = fm.get("description", e["description"])
+        e["tags"] = fm.get("tags") or e["tags"]
+        e["representativeQueries"] = fm.get("representativeQueries") or []
+        _add_okf_terms(e, effective)
+        e["data"] = {"content": _leaf_body(identifier)}
     else:
         e["url"] = f"{SELF.rstrip('/')}/agents/entry?id={urllib.parse.quote(identifier)}"
     return e
@@ -338,9 +369,8 @@ def _entry(identifier):
          "description": fm.get("description", ""),
          "representativeQueries": fm.get("representativeQueries") or [],
          "tags": [src], "okf:sourceDocument": path, "okf:source": src,
-         "data": {"mediaType": "text/markdown", "frontmatter": fm, "content": _leaf_text(path)}}
-    if fm.get("entityType"):
-        e["okf:entityType"] = fm["entityType"]
+         "data": {"content": _leaf_body(path)}}
+    _add_okf_terms(e, fm)
     if (acc.get("trust") or {}).get("identity"):
         e["trustManifest"] = {k: v for k, v in acc["trust"].items() if v}
     if acc.get("access"):
@@ -514,7 +544,7 @@ async def search_endpoint(request):
     for hit in matches:
         entry = _entry_from_meta({"identifier": hit["identifier"], "title": hit["title"],
                                   "description": hit.get("description", ""),
-                                  "queries": hit.get("queries") or []})
+                                  "queries": hit.get("queries") or []}, full=True)
         entry.update({"score": hit["score"], "source": SELF})
         results.append(_wire(entry))
     return _json({"@context": [ARD_CONTEXT, {"okf": OKF_NS}],
