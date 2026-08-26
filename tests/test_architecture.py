@@ -162,7 +162,7 @@ class DocPageTests(unittest.TestCase):
         self.assertEqual(body.count("<pre"), md.count("\n```") // 2)
         self.assertEqual(body.count("<h2 "), md.count("\n## "))
         self.assertEqual(len(toc), md.count("\n## "))
-        self.assertIn("compact thesis", body.lower())     # the LAST section survived the parse
+        self.assertIn("it does not decide what is true", body.lower())  # the LAST line survived the parse
 
     def test_absent_document_is_a_clean_miss_not_an_exception(self):
         self.assertIsNone(docpage.markdown_page("NO_SUCH_DOCUMENT.md", "x"))
